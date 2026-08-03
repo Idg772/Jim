@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import pickle
-from pathlib import Path
+import re
+from functools import partial
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from blackjax.ns.adaptive import init as adaptive_init
+from blackjax.ns.base import StateWithLogLikelihood, init_state_strategy
+from jax.sharding import PartitionSpec as P
 
 from jimgw.samplers.blackjax.nss import BlackJAXNSSSampler
-from jimgw.samplers.blackjax.sharding import make_live_mesh
+from jimgw.samplers.blackjax.sharding import (
+    _pack_particles,
+    _particle_dtypes,
+    _unpack_particles,
+    make_live_mesh,
+    place_key,
+    place_replicated_state,
+)
 from jimgw.samplers.blackjax.swig import BlackJAXSwiGSampler
 from jimgw.samplers.config import BlackJAXNSSConfig, BlackJAXSwiGConfig
 
@@ -34,6 +45,122 @@ def _log_likelihood(position):
     return _log_likelihood_from_cache(position, _build_cache(position))
 
 
+@pytest.fixture(scope="module", params=(2, 4))
+def nss_transition_results(request):
+    """Run matching one- and multi-device transitions from one frozen state."""
+    n_devices = request.param
+    if jax.local_device_count() < n_devices:
+        pytest.skip(f"requires {n_devices} local JAX devices")
+
+    n_live = 8
+    n_delete = 4
+    config = BlackJAXNSSConfig(
+        n_live=n_live,
+        n_delete_frac=n_delete / n_live,
+        num_inner_steps_per_dim=1,
+        termination_dlogz=2.0,
+        n_devices=n_devices,
+    )
+    sampler = BlackJAXNSSSampler(
+        n_dims=2,
+        log_prior_fn=_log_prior,
+        log_likelihood_fn=_log_likelihood,
+        log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+        config=config,
+    )
+    positions = jax.random.uniform(jax.random.key(10), (n_live, 2))
+    single_init = partial(
+        init_state_strategy,
+        logprior_fn=_log_prior,
+        loglikelihood_fn=_log_likelihood,
+    )
+    state = adaptive_init(
+        positions,
+        init_state_fn=jax.vmap(single_init),
+        update_inner_kernel_params_fn=sampler._update_inner_kernel_params_fn,
+    )
+    mesh = make_live_mesh(n_devices, n_live, n_delete)
+    assert mesh is not None
+
+    keys = jax.random.split(jax.random.key(11), 5)
+    one_device_step = (
+        jax.jit(sampler._build_nested_sampler(n_delete).step)
+        .lower(keys[0], state)
+        .compile()
+    )
+    replicated_state = place_replicated_state(state, mesh)
+    replicated_key = place_key(keys[0], mesh)
+    four_device_step = jax.jit(sampler._build_nested_sampler(n_delete, mesh).step)
+    executable = four_device_step.lower(replicated_key, replicated_state).compile()
+
+    one_device_results = []
+    sharded_results = []
+    one_device_state = state
+    for key in keys:
+        one_device_result = one_device_step(key, one_device_state)
+        sharded_result = executable(place_key(key, mesh), replicated_state)
+        one_device_results.append(one_device_result)
+        sharded_results.append(sharded_result)
+        one_device_state = one_device_result[0]
+        replicated_state = sharded_result[0]
+
+    return n_devices, one_device_results, sharded_results, executable.as_text()
+
+
+@pytest.fixture(scope="module")
+def swig_transition_results():
+    """Compile matching SwiG transitions to cover its cache-aware chain path."""
+    if not _HAS_FOUR_DEVICES:
+        pytest.skip("run with XLA_FLAGS=--xla_force_host_platform_device_count=4")
+
+    n_live = 8
+    n_delete = 4
+    config = BlackJAXSwiGConfig(
+        blocks=[["slow"], ["fast"]],
+        n_live=n_live,
+        n_delete_frac=n_delete / n_live,
+        num_gibbs_sweeps=1,
+        max_steps=3,
+        max_shrinkage=20,
+        termination_dlogz=2.0,
+        n_devices=4,
+    )
+    sampler = BlackJAXSwiGSampler(
+        n_dims=2,
+        log_prior_fn=_log_prior,
+        log_likelihood_fn=_log_likelihood,
+        log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+        config=config,
+        rebuild_required_by_block={(0,): True, (1,): False},
+        build_cache=_build_cache,
+        log_likelihood_from_cache_fn=_log_likelihood_from_cache,
+    )
+    positions = jax.random.uniform(jax.random.key(20), (n_live, 2))
+    single_init = partial(
+        init_state_strategy,
+        logprior_fn=_log_prior,
+        loglikelihood_fn=_log_likelihood,
+    )
+    state = adaptive_init(
+        positions,
+        init_state_fn=jax.vmap(single_init),
+        update_inner_kernel_params_fn=sampler._update_inner_kernel_params_fn,
+    )
+    mesh = make_live_mesh(4, n_live, n_delete)
+    assert mesh is not None
+
+    key = jax.random.key(21)
+    one_device_result = jax.jit(sampler._build_nested_sampler(n_delete).step)(
+        key, state
+    )
+    replicated_state = place_replicated_state(state, mesh)
+    replicated_key = place_key(key, mesh)
+    sharded_step = jax.jit(sampler._build_nested_sampler(n_delete, mesh).step)
+    executable = sharded_step.lower(replicated_key, replicated_state).compile()
+    sharded_result = executable(replicated_key, replicated_state)
+    return one_device_result, sharded_result, executable.as_text()
+
+
 def test_make_live_mesh_rejects_unavailable_devices():
     with pytest.raises(ValueError, match="only .* local JAX devices"):
         make_live_mesh(jax.local_device_count() + 1, 16, 4)
@@ -51,6 +178,129 @@ def test_make_live_mesh_rejects_indivisible_n_delete(monkeypatch):
     monkeypatch.setattr(jax, "local_devices", lambda: [object(), object()])
     with pytest.raises(ValueError, match="n_delete=3 must be divisible by n_devices=2"):
         make_live_mesh(2, 12, 3)
+
+
+def test_replicated_steps_are_pathwise_equivalent_and_have_target_placement(
+    nss_transition_results,
+):
+    _, one_device_results, sharded_results, _ = nss_transition_results
+    for one_device_result, sharded_result in zip(
+        one_device_results, sharded_results, strict=True
+    ):
+        one_device_host = jax.device_get(one_device_result)
+        sharded_host = jax.device_get(sharded_result)
+        for expected, actual in zip(
+            jax.tree.leaves(one_device_host),
+            jax.tree.leaves(sharded_host),
+            strict=True,
+        ):
+            np.testing.assert_allclose(
+                actual, expected, rtol=1e-14, atol=1e-14, equal_nan=True
+            )
+
+    state, info = sharded_results[-1]
+    for leaf in jax.tree.leaves(state):
+        assert leaf.sharding.is_fully_replicated
+    for leaf in jax.tree.leaves(info):
+        assert not leaf.sharding.is_fully_replicated
+        assert leaf.sharding.spec == P("replacement")
+
+
+def test_replicated_step_lowers_to_one_endpoint_all_gather(nss_transition_results):
+    _, _, _, hlo = nss_transition_results
+
+    assert len(re.findall(r"\ball-gather\(", hlo)) == 1
+    assert "all-reduce(" not in hlo
+    assert "collective-permute(" not in hlo
+
+
+def test_particle_pack_round_trip_preserves_mixed_dtypes():
+    particles = StateWithLogLikelihood(
+        position=jnp.arange(6, dtype=jnp.float32).reshape(3, 2),
+        logdensity=jnp.arange(3, dtype=jnp.float16),
+        loglikelihood=jnp.arange(3, dtype=jnp.float32),
+        loglikelihood_birth=jnp.arange(3, dtype=jnp.bfloat16),
+    )
+
+    unpacked = _unpack_particles(
+        _pack_particles(particles), 2, _particle_dtypes(particles)
+    )
+    for expected, actual in zip(
+        jax.tree.leaves(particles), jax.tree.leaves(unpacked), strict=True
+    ):
+        assert actual.dtype == expected.dtype
+        np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.skipif(
+    not _HAS_FOUR_DEVICES,
+    reason="run with XLA_FLAGS=--xla_force_host_platform_device_count=4",
+)
+def test_distributed_initialisation_evaluates_each_likelihood_once():
+    evaluated = []
+
+    def counted_log_likelihood(position):
+        jax.debug.callback(lambda marker: evaluated.append(float(marker)), position[0])
+        return _log_likelihood(position)
+
+    config = BlackJAXNSSConfig(
+        n_live=8,
+        n_delete_frac=0.5,
+        num_inner_steps_per_dim=1,
+        termination_dlogz=1e6,
+        n_devices=4,
+    )
+    sampler = BlackJAXNSSSampler(
+        n_dims=2,
+        log_prior_fn=_log_prior,
+        log_likelihood_fn=counted_log_likelihood,
+        log_posterior_fn=lambda x: _log_prior(x) + counted_log_likelihood(x),
+        config=config,
+    )
+    dtype = jnp.float64 if jax.config.x64_enabled else jnp.float32
+    markers = jnp.arange(config.n_live, dtype=dtype) / config.n_live
+    initial = jnp.stack((markers, jnp.full_like(markers, 0.5)), axis=1)
+
+    class InitialisationComplete(RuntimeError):
+        pass
+
+    class StopBeforeFirstStep:
+        @staticmethod
+        def step(rng_key, state):
+            del rng_key, state
+            raise InitialisationComplete
+
+    sampler._build_nested_sampler = lambda *args, **kwargs: StopBeforeFirstStep()  # type: ignore[method-assign]
+    with pytest.raises(InitialisationComplete):
+        sampler.sample(jax.random.key(30), initial)
+
+    np.testing.assert_array_equal(
+        np.sort(np.asarray(evaluated)),
+        np.asarray(markers),
+    )
+
+
+def test_replicated_swig_step_is_pathwise_equivalent(swig_transition_results):
+    one_device_result, sharded_result, _ = swig_transition_results
+    for expected, actual in zip(
+        jax.tree.leaves(jax.device_get(one_device_result)),
+        jax.tree.leaves(jax.device_get(sharded_result)),
+        strict=True,
+    ):
+        np.testing.assert_allclose(
+            actual, expected, rtol=1e-14, atol=1e-14, equal_nan=True
+        )
+
+    state, info = sharded_result
+    assert all(leaf.sharding.is_fully_replicated for leaf in jax.tree.leaves(state))
+    assert all(leaf.sharding.spec == P("replacement") for leaf in jax.tree.leaves(info))
+
+
+def test_replicated_swig_step_has_one_endpoint_all_gather(swig_transition_results):
+    _, _, hlo = swig_transition_results
+    assert len(re.findall(r"\ball-gather\(", hlo)) == 1
+    assert "all-reduce(" not in hlo
+    assert "collective-permute(" not in hlo
 
 
 @pytest.mark.skipif(
@@ -125,6 +375,14 @@ def test_swig_runs_sharded_with_consistent_cache():
     reason="run with XLA_FLAGS=--xla_force_host_platform_device_count=4",
 )
 def test_sharded_checkpoint_is_host_backed_and_resumable(tmp_path, monkeypatch):
+    # This test exercises checkpoint state, not the process-global compilation
+    # cache. Keeping the cache disabled avoids leaving JAX workers with a path
+    # under pytest's soon-to-be-removed temporary directory.
+    monkeypatch.setattr(
+        BlackJAXNSSConfig,
+        "configure_jax_cache",
+        lambda self: None,
+    )
     config = BlackJAXNSSConfig(
         n_live=16,
         n_delete_frac=0.25,
@@ -135,33 +393,60 @@ def test_sharded_checkpoint_is_host_backed_and_resumable(tmp_path, monkeypatch):
         checkpoint_interval=1e-9,
     )
 
-    def make_sampler():
+    def make_sampler(sampler_config=config):
         return BlackJAXNSSSampler(
             n_dims=2,
             log_prior_fn=_log_prior,
             log_likelihood_fn=_log_likelihood,
             log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
-            config=config,
+            config=sampler_config,
         )
 
     checkpoint = tmp_path / "checkpoint.pkl"
-    original_unlink = Path.unlink
-    monkeypatch.setattr(
-        Path,
-        "unlink",
-        lambda self, missing_ok=False: (
-            None if self == checkpoint else original_unlink(self, missing_ok=missing_ok)
-        ),
-    )
     initial = jax.random.uniform(jax.random.key(4), (16, 2))
-    make_sampler().sample(jax.random.key(5), initial)
-    monkeypatch.setattr(Path, "unlink", original_unlink)
+    baseline_config = config.model_copy(
+        update={"checkpoint_dir": None, "checkpoint_interval": 0.0}
+    )
+    uninterrupted = make_sampler(baseline_config)
+    uninterrupted.sample(jax.random.key(5), initial)
+
+    original_write_checkpoint = BlackJAXNSSConfig.write_checkpoint
+
+    def write_then_interrupt(self, data, label):
+        original_write_checkpoint(self, data, label)
+        raise RuntimeError("simulated interruption after checkpoint")
+
+    monkeypatch.setattr(
+        BlackJAXNSSConfig,
+        "write_checkpoint",
+        write_then_interrupt,
+    )
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        make_sampler().sample(jax.random.key(5), initial)
 
     with checkpoint.open("rb") as stream:
         saved = pickle.load(stream)
     assert isinstance(saved["state"].particles.position, np.ndarray)
+    assert saved["n_iter"] == 1
+
+    monkeypatch.setattr(
+        BlackJAXNSSConfig,
+        "write_checkpoint",
+        original_write_checkpoint,
+    )
 
     resumed = make_sampler()
     resumed.sample(jax.random.key(999), initial)
-    assert resumed.get_diagnostics()["n_iterations"] > 0
+    assert (
+        resumed.get_diagnostics()["n_iterations"]
+        == uninterrupted.get_diagnostics()["n_iterations"]
+    )
+    for expected, actual in zip(
+        jax.tree.leaves(uninterrupted._final_state),
+        jax.tree.leaves(resumed._final_state),
+        strict=True,
+    ):
+        np.testing.assert_allclose(
+            actual, expected, rtol=1e-14, atol=1e-14, equal_nan=True
+        )
     assert not checkpoint.exists()

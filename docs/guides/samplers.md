@@ -178,16 +178,18 @@ Key parameters:
 - `n_live` — number of live points.
 - `n_delete_frac` — fraction of live points replaced per iteration.
 - `num_inner_steps_per_dim` — slice-sampler steps per dimension per dead point; increase for strongly correlated posteriors.
-- `n_devices` — number of local devices used to shard the live points and
-  replacement chains.
-  Both `n_live` and `int(n_live * n_delete_frac)` must be
-  divisible by this value.
+- `n_devices` — number of local devices used to shard replacement chains.
+  The compact live population, covariance, and evidence state are persistently
+  replicated; each iteration communicates only the packed replacement endpoints.
+  `int(n_live * n_delete_frac)` must be divisible by this value, and `n_live`
+  currently must also divide evenly for distributed initialisation.
   The default `1` uses the unsharded kernel.
 
 **Repository:** [blackjax-devs/blackjax](https://github.com/blackjax-devs/blackjax)
 
 **References:** Yallup, D., Prathaban, M., Alvey, J., Handley, W., *"Parallel Nested Slice Sampling for Gravitational Wave Parameter Estimation"*, [arXiv:2509.24949](https://arxiv.org/abs/2509.24949) (Sep 2025).
 Yallup, D., Kroupa, N., Handley, W., *"Nested Slice Sampling"*, [OpenReview](https://openreview.net/forum?id=ekbkMSuPo4) (2025).
+Yallup, D., Prathaban, M., Alvey, J., et al., *"Ab Initio Real-Time Gravitational-Wave Parameter Estimation"*, [arXiv:2607.28265](https://arxiv.org/abs/2607.28265) (Jul 2026).
 
 ---
 
@@ -234,13 +236,12 @@ Key parameters:
 - `n_live` / `n_delete_frac` — live-set size and replacement fraction, matching NSS.
 - `num_inner_steps_per_dim` — random-direction slice steps per block dimension.
 - `num_gibbs_sweeps` — complete block sweeps per particle replacement.
-- `n_devices` — number of local devices used to shard the live points and
-  replacement chains.
-  The waveform cache remains local to each replacement
-  chain; only live-point state participates in collectives.
+- `n_devices` — number of local devices used to shard replacement chains.
+  The waveform cache remains local to each chain and never becomes part of the
+  replicated live state or the packed endpoint collective.
 
 !!! tip "Sharding without a GPU/TPU cluster"
-    `n_devices` shards across whatever JAX reports as local devices — it does not require accelerators.
+    `n_devices` distributes replacement chains across whatever JAX reports as local devices — it does not require accelerators.
     On a CPU-only host, set `XLA_FLAGS=--xla_force_host_platform_device_count=N` (before JAX initializes; the CPU device count cannot change at runtime) to expose `N` simulated CPU devices and shard across them.
     See [`examples/GW150914_NSS_sharded.py`](https://github.com/GW-JAX-Team/Jim/blob/main/examples/GW150914_NSS_sharded.py).
 

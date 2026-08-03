@@ -8,7 +8,7 @@ from typing import NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 from blackjax import SamplingAlgorithm
-from blackjax.mcmc.slice import SliceInfo, stepping_out
+from blackjax.mcmc.slice import SliceInfo
 from blackjax.mcmc.slice import build_kernel as build_slice_kernel
 from blackjax.ns.from_mcmc import build_kernel as build_from_mcmc_kernel
 from blackjax.ns.nss import sample_direction_from_covariance
@@ -16,8 +16,9 @@ from blackjax.smc.tuning.from_particles import particles_covariance_matrix
 from jax.sharding import Mesh
 from jaxtyping import Array, Float
 
+from jimgw.samplers.blackjax._slice import stepping_out_cached
 from jimgw.samplers.blackjax.nss import BlackJAXNSSSampler
-from jimgw.samplers.blackjax.sharding import build_sharded_from_mcmc_kernel
+from jimgw.samplers.blackjax.sharding import build_replicated_from_mcmc_kernel
 from jimgw.samplers.config import BlackJAXNSSConfig, BlackJAXSwiGConfig
 from jimgw.samplers.periodic import _build_masks_arrays
 from jimgw.typing import FloatScalar
@@ -47,7 +48,7 @@ def _build_swig_constrained_step(
     n_dims: int,
 ) -> Callable:
     slice_kernel = build_slice_kernel(
-        interval=stepping_out,
+        interval=stepping_out_cached,
         max_expansions=max_steps,
         max_shrinkage=max_shrinkage,
     )
@@ -260,7 +261,7 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
                 num_delete=n_delete,
             )
         else:
-            kernel = build_sharded_from_mcmc_kernel(
+            kernel = build_replicated_from_mcmc_kernel(
                 constrained_step,
                 n_inner_steps=1,
                 update_inner_kernel_params_fn=self._update_block_covariances,

@@ -14,7 +14,6 @@ import numpy as np
 from anesthetic.samples import NestedSamples
 from blackjax import SamplingAlgorithm, nss
 from blackjax.mcmc.slice import build_kernel as build_slice_kernel
-from blackjax.mcmc.slice import stepping_out
 from blackjax.ns.adaptive import AdaptiveNSState
 from blackjax.ns.adaptive import init as _ns_adaptive_init
 from blackjax.ns.base import NSInfo
@@ -25,17 +24,18 @@ from blackjax.ns.nss import (
     slice_constrained_step,
 )
 from blackjax.ns.utils import finalise
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
+from jax.sharding import Mesh
 from jaxtyping import Array, Float, Key
 
 from jimgw.samplers.base import Sampler
+from jimgw.samplers.blackjax._slice import stepping_out_cached
 from jimgw.samplers.blackjax.sharding import (
-    _LIVE_AXIS,
-    build_sharded_from_mcmc_kernel,
+    build_replicated_from_mcmc_kernel,
     make_live_mesh,
     place_key,
-    place_state,
+    place_replicated_state,
+    replacement_sharding,
+    replicate_initial_particles,
 )
 from jimgw.samplers.config import BlackJAXNSSConfig
 from jimgw.samplers.periodic import to_prior_space_proposal
@@ -112,14 +112,14 @@ class BlackJAXNSSSampler(Sampler):
                 loglikelihood_fn=self._log_likelihood_fn,
             )
             slice_kernel = build_slice_kernel(
-                interval=stepping_out,
+                interval=stepping_out_cached,
                 max_expansions=10,
                 max_shrinkage=100,
             )
             constrained_step = slice_constrained_step(
                 init_state_fn, slice_kernel, self._proposal
             )
-            kernel = build_sharded_from_mcmc_kernel(
+            kernel = build_replicated_from_mcmc_kernel(
                 constrained_step,
                 n_inner_steps=num_inner_steps,
                 update_inner_kernel_params_fn=self._update_inner_kernel_params_fn,
@@ -199,19 +199,32 @@ class BlackJAXNSSSampler(Sampler):
 
         def _batched_nss_init(positions):
             if mesh is not None:
-                positions = jax.device_put(
-                    positions, NamedSharding(mesh, P(_LIVE_AXIS))
-                )
+                positions = jax.device_put(positions, replacement_sharding(mesh))
 
             def _batched_fn(pos):
                 return jax.lax.map(_single_init_fn, pos, batch_size=n_delete)
 
+            if mesh is None:
+                return _ns_adaptive_init(
+                    positions,
+                    init_state_fn=_batched_fn,
+                    update_inner_kernel_params_fn=self._update_inner_kernel_params_fn,
+                )
+
+            # Evaluate each initial likelihood exactly once on a sharded live
+            # batch, then exchange only the compact particle records.  All
+            # steady-state sampler data is replicated after this one-time step.
+            initial_particles = jax.jit(
+                _batched_fn,
+                out_shardings=replacement_sharding(mesh),
+            )(positions)
+            initial_particles = replicate_initial_particles(initial_particles, mesh)
             state = _ns_adaptive_init(
-                positions,
-                init_state_fn=_batched_fn,
+                initial_particles.position,
+                init_state_fn=lambda _: initial_particles,
                 update_inner_kernel_params_fn=self._update_inner_kernel_params_fn,
             )
-            return place_state(state, mesh) if mesh is not None else state
+            return place_replicated_state(state, mesh)
 
         # Resume from checkpoint if one exists.
         if (
@@ -228,7 +241,7 @@ class BlackJAXNSSSampler(Sampler):
                 dead = _ckpt["dead"]
                 rng_key = _ckpt["rng_key"]
                 if mesh is not None:
-                    state = place_state(state, mesh)
+                    state = place_replicated_state(state, mesh)
                     rng_key = place_key(rng_key, mesh)
                 n_iter = _ckpt["n_iter"]
                 self._prev_elapsed = float(_ckpt["elapsed_time"])

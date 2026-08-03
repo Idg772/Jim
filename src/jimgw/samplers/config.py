@@ -117,7 +117,7 @@ class _CheckpointMixin(BaseModel):
 
 
 class _ShardingMixin(BaseModel):
-    """Single-host device sharding — included by NSS and SwiG (not NS AW)."""
+    """Single-host replacement-chain sharding for NSS and SwiG (not NS AW)."""
 
     n_devices: int = Field(default=1, ge=1)
 
@@ -156,9 +156,14 @@ class _LiveSetConfigMixin(BaseModel):
         # (NSS, SwiG); absent (default 1) elsewhere, so this is a no-op for NS AW.
         n_devices = getattr(self, "n_devices", 1)
         if n_devices > 1 and self.n_live % n_devices:
-            raise ValueError("n_live must be divisible by n_devices when sharding")
+            raise ValueError(
+                "n_live must be divisible by n_devices for distributed initialisation"
+            )
         if n_devices > 1 and n_delete % n_devices:
-            raise ValueError("n_delete must be divisible by n_devices when sharding")
+            raise ValueError(
+                "n_delete must be divisible by n_devices when sharding replacement "
+                "chains"
+            )
         return self
 
 

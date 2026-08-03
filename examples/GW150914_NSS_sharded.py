@@ -1,4 +1,4 @@
-"""GW150914 analysis with the BlackJAX NSS sampler, sharded across simulated CPU devices.
+"""GW150914 analysis with BlackJAX NSS replacement work spread across CPU devices.
 
 Identical to `GW150914_NSS.py` except for two additions: the `XLA_FLAGS`
 environment variable (set *before* `jax` is imported — JAX's device count is
@@ -22,7 +22,9 @@ import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 
-print(f"Sharding live points across {jax.local_device_count()} simulated CPU devices.")
+print(
+    f"Sharding replacement chains across {jax.local_device_count()} simulated CPU devices."
+)
 
 from jimgw.core.jim import Jim
 from jimgw.core.prior import (
@@ -125,7 +127,7 @@ jim = Jim(
         n_delete_frac=0.5,
         num_inner_steps_per_dim=20,
         termination_dlogz=0.1,
-        n_devices=4,  # n_live and int(n_live * n_delete_frac) must divide evenly.
+        n_devices=4,  # Initial live work and replacement chains divide evenly.
     ),
 )
 
