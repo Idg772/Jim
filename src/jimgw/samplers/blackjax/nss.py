@@ -6,14 +6,14 @@ import shutil
 import time
 from collections.abc import Callable
 from functools import partial
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional, cast
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from anesthetic.samples import NestedSamples
 from blackjax import SamplingAlgorithm, nss
-from blackjax.mcmc.slice import build_kernel as build_slice_kernel
+from blackjax.mcmc.slice import SliceInfo
 from blackjax.ns.adaptive import AdaptiveNSState
 from blackjax.ns.adaptive import init as _ns_adaptive_init
 from blackjax.ns.base import NSInfo
@@ -21,14 +21,17 @@ from blackjax.ns.base import init_state_strategy as _init_state_strategy
 from blackjax.ns.nss import (
     live_covariance,
     sample_direction_from_covariance,
-    slice_constrained_step,
 )
 from blackjax.ns.utils import finalise
 from jax.sharding import Mesh
 from jaxtyping import Array, Float, Key
 
 from jimgw.samplers.base import Sampler
-from jimgw.samplers.blackjax._slice import stepping_out_cached
+from jimgw.samplers.blackjax._fsm import (
+    SegmentSchedule,
+    run_segment,
+    slice_randoms_from_keys,
+)
 from jimgw.samplers.blackjax.sharding import (
     build_replicated_from_mcmc_kernel,
     make_live_mesh,
@@ -38,9 +41,99 @@ from jimgw.samplers.blackjax.sharding import (
     replicate_initial_particles,
 )
 from jimgw.samplers.config import BlackJAXNSSConfig
-from jimgw.samplers.periodic import to_prior_space_proposal
+from jimgw.samplers.periodic import _build_masks_arrays, to_prior_space_proposal
 
 logger = logging.getLogger(__name__)
+
+
+class _FsmParticleState(NamedTuple):
+    """Particle state extended with an empty cache for the generic FSM runner."""
+
+    position: object
+    logdensity: object
+    loglikelihood: object
+    loglikelihood_birth: object
+    cache: object
+
+
+def _build_nss_fsm_constrained_step(
+    *,
+    log_prior_fn: Callable,
+    log_likelihood_fn: Callable,
+    periodic: Optional[dict[int, tuple[float, float]]],
+    n_dims: int,
+    max_expansions: int = 10,
+    max_shrinkage: int = 100,
+) -> Callable:
+    """Build an NSS transition that folds every inner slice into one segment."""
+    mask, lower, period = _build_masks_arrays(periodic, n_dims)
+
+    def wrap_position(position):
+        return jnp.where(mask, lower + jnp.mod(position - lower, period), position)
+
+    def eval_candidate(position, cache):
+        return log_prior_fn(position), log_likelihood_fn(position), cache
+
+    def constrained_step(keys, state, loglikelihood_0, cov):
+        prop_keys, level_u, bracket_u, bracket_v, shrink_key_data = (
+            slice_randoms_from_keys(keys)
+        )
+        direction_template = jnp.zeros_like(state.position)
+        # A vmap changes x64 covariance-normalization rounding relative to the
+        # BlackJAX scan. Keep these static draws unrolled so the folded segment
+        # remains bitwise pathwise-equivalent without a preprocessing loop.
+        directions = jnp.stack(
+            tuple(
+                cast(
+                    Array,
+                    sample_direction_from_covariance(
+                        prop_keys[slice_idx],
+                        direction_template,
+                        cov,
+                    ),
+                )
+                for slice_idx in range(prop_keys.shape[0])
+            )
+        )
+        schedule = SegmentSchedule(
+            directions=directions,
+            level_u=level_u,
+            bracket_u=bracket_u,
+            bracket_v=bracket_v,
+            shrink_key_data=shrink_key_data,
+        )
+        entry = _FsmParticleState(
+            position=state.position,
+            logdensity=state.logdensity,
+            loglikelihood=state.loglikelihood,
+            loglikelihood_birth=jnp.asarray(loglikelihood_0),
+            cache=(),
+        )
+        final, segment_info = run_segment(
+            schedule,
+            entry,
+            loglikelihood_0,
+            eval_candidate=eval_candidate,
+            wrap_position=wrap_position,
+            max_expansions=max_expansions,
+            max_shrinkage=max_shrinkage,
+        )
+        new_state = state._replace(
+            position=final.position,
+            logdensity=final.logdensity,
+            loglikelihood=final.loglikelihood,
+            loglikelihood_birth=jnp.asarray(loglikelihood_0),
+        )
+        info = SliceInfo(
+            is_accepted=segment_info.is_accepted,
+            num_expansions=segment_info.num_expansions,
+            num_shrink=segment_info.num_shrink,
+            bracket_left=segment_info.bracket_left,
+            bracket_right=segment_info.bracket_right,
+        )
+        return new_state, info
+
+    return constrained_step
 
 
 class BlackJAXNSSSampler(Sampler):
@@ -93,6 +186,7 @@ class BlackJAXNSSSampler(Sampler):
         self._proposal = to_prior_space_proposal(
             periodic, n_dims, sample_direction_from_covariance
         )
+        self._periodic_index = periodic
 
     @property
     def sampler_name(self) -> str:
@@ -106,18 +200,11 @@ class BlackJAXNSSSampler(Sampler):
         config = self._config
         num_inner_steps = config.num_inner_steps_per_dim * self.n_dims
         if mesh is not None:
-            init_state_fn = partial(
-                _init_state_strategy,
-                logprior_fn=self._log_prior_fn,
-                loglikelihood_fn=self._log_likelihood_fn,
-            )
-            slice_kernel = build_slice_kernel(
-                interval=stepping_out_cached,
-                max_expansions=10,
-                max_shrinkage=100,
-            )
-            constrained_step = slice_constrained_step(
-                init_state_fn, slice_kernel, self._proposal
+            constrained_step = _build_nss_fsm_constrained_step(
+                log_prior_fn=self._log_prior_fn,
+                log_likelihood_fn=self._log_likelihood_fn,
+                periodic=self._periodic_index,
+                n_dims=self.n_dims,
             )
             kernel = build_replicated_from_mcmc_kernel(
                 constrained_step,
@@ -125,6 +212,7 @@ class BlackJAXNSSSampler(Sampler):
                 update_inner_kernel_params_fn=self._update_inner_kernel_params_fn,
                 n_delete=n_delete,
                 mesh=mesh,
+                fold_inner_steps=True,
             )
             # `nested_sampler.init` is never called (state init happens in
             # `_batched_nss_init`); BlackJAX still requires SamplingAlgorithm.init

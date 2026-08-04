@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, cast
 
 import jax
 import jax.numpy as jnp
@@ -16,6 +16,11 @@ from blackjax.smc.tuning.from_particles import particles_covariance_matrix
 from jax.sharding import Mesh
 from jaxtyping import Array, Float
 
+from jimgw.samplers.blackjax._fsm import (
+    SegmentSchedule,
+    run_segment,
+    slice_randoms_from_keys,
+)
 from jimgw.samplers.blackjax._slice import stepping_out_cached
 from jimgw.samplers.blackjax.nss import BlackJAXNSSSampler
 from jimgw.samplers.blackjax.sharding import build_replicated_from_mcmc_kernel
@@ -34,7 +39,7 @@ class CachedSliceState(NamedTuple):
     cache: object
 
 
-def _build_swig_constrained_step(
+def _build_swig_constrained_step_lockstep(
     *,
     log_prior_fn: Callable,
     build_cache: Callable,
@@ -47,6 +52,7 @@ def _build_swig_constrained_step(
     periodic: Optional[dict[int, tuple[float, float]]],
     n_dims: int,
 ) -> Callable:
+    """Frozen pre-FSM reference implementation for bitwise equivalence tests."""
     slice_kernel = build_slice_kernel(
         interval=stepping_out_cached,
         max_expansions=max_steps,
@@ -143,6 +149,182 @@ def _build_swig_constrained_step(
                     (cached_state, accepted, num_expansions, num_shrink),
                     keys[1:],
                 )
+
+        final_state = state._replace(
+            position=cached_state.position,
+            logdensity=cached_state.logdensity,
+            loglikelihood=cached_state.loglikelihood,
+            loglikelihood_birth=jnp.asarray(loglikelihood_0),
+        )
+        info = SliceInfo(
+            is_accepted=accepted,
+            num_expansions=num_expansions,
+            num_shrink=num_shrink,
+            bracket_left=jnp.zeros(n_dims),
+            bracket_right=jnp.zeros(n_dims),
+        )
+        return final_state, info
+
+    return constrained_step
+
+
+def _build_swig_constrained_step(
+    *,
+    log_prior_fn: Callable,
+    build_cache: Callable,
+    log_likelihood_from_cache_fn: Callable,
+    rebuild_required_by_block: dict[tuple[int, ...], bool],
+    num_gibbs_sweeps: int,
+    num_inner_steps_per_dim: int,
+    max_steps: int,
+    max_shrinkage: int,
+    periodic: Optional[dict[int, tuple[float, float]]],
+    n_dims: int,
+    per_slice_info: bool = False,
+) -> Callable:
+    """Run a SwiG transition with one FSM loop per static cache segment."""
+    periodic_mask, periodic_lower, periodic_period = _build_masks_arrays(
+        periodic, n_dims
+    )
+
+    def wrap_periodic_position(position):
+        return jnp.where(
+            periodic_mask,
+            periodic_lower + jnp.mod(position - periodic_lower, periodic_period),
+            position,
+        )
+
+    def make_eval(requires_rebuild):
+        if requires_rebuild:
+
+            def eval_candidate(position, cache):
+                del cache
+                new_cache = build_cache(position)
+                return (
+                    log_prior_fn(position),
+                    log_likelihood_from_cache_fn(position, new_cache),
+                    new_cache,
+                )
+
+        else:
+
+            def eval_candidate(position, cache):
+                return (
+                    log_prior_fn(position),
+                    log_likelihood_from_cache_fn(position, cache),
+                    cache,
+                )
+
+        return eval_candidate
+
+    def constrained_step(rng_key, state, loglikelihood_0, block_covariances):
+        cache = build_cache(state.position)
+        cached_state = CachedSliceState(
+            position=state.position,
+            logdensity=state.logdensity,
+            loglikelihood=state.loglikelihood,
+            loglikelihood_birth=jnp.asarray(loglikelihood_0),
+            cache=cache,
+        )
+
+        slice_records = []
+        key = rng_key
+        for _ in range(num_gibbs_sweeps):
+            for (parameter_indices, requires_rebuild), covariance in zip(
+                rebuild_required_by_block.items(),
+                block_covariances,
+                strict=True,
+            ):
+                parameter_index_array = jnp.asarray(parameter_indices)
+                n_steps = num_inner_steps_per_dim * len(parameter_indices)
+                keys = jax.random.split(key, n_steps + 1)
+                key = keys[0]
+                (
+                    prop_keys,
+                    level_u,
+                    bracket_u,
+                    bracket_v,
+                    shrink_key_data,
+                ) = slice_randoms_from_keys(keys[1:])
+                # Do not vmap these floating-point draws: batched covariance
+                # normalization changes x64 rounding relative to the frozen
+                # scan. Static unrolling preserves the bitwise path and adds no
+                # preprocessing loop ahead of the scheduler segments.
+                block_directions = jnp.stack(
+                    [
+                        cast(
+                            Array,
+                            sample_direction_from_covariance(
+                                prop_keys[i],
+                                jnp.zeros_like(state.position[parameter_index_array]),
+                                covariance,
+                            ),
+                        )
+                        for i in range(n_steps)
+                    ]
+                )
+                directions = (
+                    jnp.zeros((n_steps, n_dims), dtype=state.position.dtype)
+                    .at[:, parameter_index_array]
+                    .set(block_directions)
+                )
+                for slice_idx in range(n_steps):
+                    slice_records.append(
+                        (
+                            requires_rebuild,
+                            directions[slice_idx],
+                            level_u[slice_idx],
+                            bracket_u[slice_idx],
+                            bracket_v[slice_idx],
+                            shrink_key_data[slice_idx],
+                        )
+                    )
+
+        segments = []
+        run_start = 0
+        for i in range(1, len(slice_records) + 1):
+            if (
+                i == len(slice_records)
+                or slice_records[i][0] != slice_records[run_start][0]
+            ):
+                chunk = slice_records[run_start:i]
+                segments.append(
+                    (
+                        chunk[0][0],
+                        SegmentSchedule(
+                            directions=jnp.stack([record[1] for record in chunk]),
+                            level_u=jnp.stack([record[2] for record in chunk]),
+                            bracket_u=jnp.stack([record[3] for record in chunk]),
+                            bracket_v=jnp.stack([record[4] for record in chunk]),
+                            shrink_key_data=jnp.stack([record[5] for record in chunk]),
+                        ),
+                    )
+                )
+                run_start = i
+
+        segment_infos = []
+        for requires_rebuild, schedule in segments:
+            cached_state, segment_info = run_segment(
+                schedule,
+                cached_state,
+                loglikelihood_0,
+                eval_candidate=make_eval(requires_rebuild),
+                wrap_position=wrap_periodic_position,
+                max_expansions=max_steps,
+                max_shrinkage=max_shrinkage,
+            )
+            segment_infos.append(segment_info)
+
+        accepted = jnp.all(
+            jnp.concatenate([info.is_accepted for info in segment_infos])
+        )
+        num_expansions = jnp.concatenate(
+            [info.num_expansions for info in segment_infos]
+        )
+        num_shrink = jnp.concatenate([info.num_shrink for info in segment_infos])
+        if not per_slice_info:
+            num_expansions = num_expansions.sum()
+            num_shrink = num_shrink.sum()
 
         final_state = state._replace(
             position=cached_state.position,

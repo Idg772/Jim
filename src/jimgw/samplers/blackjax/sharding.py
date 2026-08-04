@@ -214,6 +214,7 @@ def update_with_mcmc_take_last_replicated(
     n_inner_steps: int,
     n_delete: int,
     mesh: Mesh,
+    fold_inner_steps: bool = False,
 ) -> Callable:
     """Run sharded constrained chains and gather only packed endpoints."""
 
@@ -246,6 +247,13 @@ def update_with_mcmc_take_last_replicated(
         def run_local_chains(keys, states, threshold, parameters):
             def run_chain(key, chain_state):
                 keys = jax.random.split(key, n_inner_steps)
+                if fold_inner_steps:
+                    return constrained_step_fn(
+                        keys,
+                        chain_state,
+                        threshold,
+                        **parameters,
+                    )
 
                 def body_fn(current_state, step_key):
                     return constrained_step_fn(
@@ -282,6 +290,7 @@ def build_replicated_from_mcmc_kernel(
     update_inner_kernel_params_fn: Callable,
     n_delete: int,
     mesh: Mesh,
+    fold_inner_steps: bool = False,
 ) -> Callable:
     """Build Jim's fused adaptive NS step for a replicated live population.
 
@@ -296,6 +305,7 @@ def build_replicated_from_mcmc_kernel(
         n_inner_steps=n_inner_steps,
         n_delete=n_delete,
         mesh=mesh,
+        fold_inner_steps=fold_inner_steps,
     )
 
     def kernel(rng_key, state: AdaptiveNSState):
