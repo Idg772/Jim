@@ -336,6 +336,12 @@ class TransientLikelihoodFD(SingleEventLikelihood):
             jnp.isin(self.frequencies, detector.sliced_frequencies)
             for detector in detectors
         ]
+        # All-True masks mean every detector shares the union grid: the mask
+        # gather is the identity and the scatter-add is a dense add. Detected
+        # at trace time so the fast path emits no gather/scatter ops at all.
+        self._identical_masks = all(
+            bool(jnp.all(mask)) for mask in self.frequency_masks
+        )
 
         self.trigger_time = trigger_time
         self.gmst = compute_gmst(self.trigger_time)
@@ -413,6 +419,17 @@ class TransientLikelihoodFD(SingleEventLikelihood):
 
     # --- shared likelihood core ---
 
+    def _sliced_waveform_sky(
+        self,
+        waveform_sky: dict[str, Complex[Array, " n_freq"]],
+        detector_index: int,
+    ) -> dict[str, Complex[Array, " n_freq"]]:
+        """Waveform restricted to one detector's frequency grid."""
+        if self._identical_masks:
+            return waveform_sky
+        mask = self.frequency_masks[detector_index]
+        return {key: waveform_sky[key][mask] for key in waveform_sky}
+
     def _likelihood(
         self,
         params: dict[str, Float],
@@ -428,16 +445,17 @@ class TransientLikelihoodFD(SingleEventLikelihood):
 
             for i, ifo in enumerate(self.detectors):
                 psd = ifo.sliced_psd
-                waveform_sky_ifo = {
-                    key: waveform_sky[key][self.frequency_masks[i]]
-                    for key in waveform_sky
-                }
+                waveform_sky_ifo = self._sliced_waveform_sky(waveform_sky, i)
                 h_dec = ifo.fd_response(
                     ifo.sliced_frequencies, waveform_sky_ifo, params
                 )
-                complex_d_inner_h = complex_d_inner_h.at[self.frequency_masks[i]].add(
-                    4 * h_dec * jnp.conj(ifo.sliced_fd_data) / psd * self.df
-                )
+                contribution = 4 * h_dec * jnp.conj(ifo.sliced_fd_data) / psd * self.df
+                if self._identical_masks:
+                    complex_d_inner_h = complex_d_inner_h + contribution
+                else:
+                    complex_d_inner_h = complex_d_inner_h.at[
+                        self.frequency_masks[i]
+                    ].add(contribution)
                 optimal_SNR = inner_product(h_dec, h_dec, psd, self.df)
                 log_likelihood += -optimal_SNR / 2
 
@@ -457,10 +475,7 @@ class TransientLikelihoodFD(SingleEventLikelihood):
 
             for i, ifo in enumerate(self.detectors):
                 psd = ifo.sliced_psd
-                waveform_sky_ifo = {
-                    key: waveform_sky[key][self.frequency_masks[i]]
-                    for key in waveform_sky
-                }
+                waveform_sky_ifo = self._sliced_waveform_sky(waveform_sky, i)
                 h_dec = ifo.fd_response(
                     ifo.sliced_frequencies, waveform_sky_ifo, params
                 )
@@ -489,10 +504,7 @@ class TransientLikelihoodFD(SingleEventLikelihood):
             log_likelihood: FloatScalar = jnp.zeros(())
             for i, ifo in enumerate(self.detectors):
                 psd = ifo.sliced_psd
-                waveform_sky_ifo = {
-                    key: waveform_sky[key][self.frequency_masks[i]]
-                    for key in waveform_sky
-                }
+                waveform_sky_ifo = self._sliced_waveform_sky(waveform_sky, i)
                 h_dec = ifo.fd_response(
                     ifo.sliced_frequencies, waveform_sky_ifo, params
                 )

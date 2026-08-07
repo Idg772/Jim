@@ -3,6 +3,7 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from jimgw.core.constants import EARTH_RADIUS_LIGHT_S
@@ -138,6 +139,58 @@ class TestTransientLikelihoodFD:
         assert likelihood.frequencies[-1] == fmax
         assert likelihood.trigger_time == gps
         assert hasattr(likelihood, "gmst")
+
+    def test_identical_masks_detected_for_shared_grid(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+        )
+        assert likelihood._identical_masks is True
+        for mask in likelihood.frequency_masks:
+            assert bool(jnp.all(mask))
+
+    def test_identical_mask_fast_path_is_bit_identical(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        kwargs = {
+            "detectors": ifos,
+            "waveform": waveform,
+            "f_min": fmin,
+            "f_max": fmax,
+            "trigger_time": gps,
+            "time_marginalization": {},
+            "phase_marginalization": True,
+        }
+        fast = TransientLikelihoodFD(**kwargs)
+        slow = TransientLikelihoodFD(**kwargs)
+        # Force the pre-change gather/scatter path on one instance; the fast
+        # path must reproduce it exactly (identity gather and all-indices
+        # scatter-add are bit-exact rewrites).
+        slow._identical_masks = False
+        params = example_params()
+        np.testing.assert_array_equal(
+            np.asarray(fast.evaluate(params)), np.asarray(slow.evaluate(params))
+        )
+
+    def test_identical_mask_fast_path_plain_likelihood(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        kwargs = {
+            "detectors": ifos,
+            "waveform": waveform,
+            "f_min": fmin,
+            "f_max": fmax,
+            "trigger_time": gps,
+        }
+        fast = TransientLikelihoodFD(**kwargs)
+        slow = TransientLikelihoodFD(**kwargs)
+        slow._identical_masks = False
+        params = example_params()
+        np.testing.assert_array_equal(
+            np.asarray(fast.evaluate(params)), np.asarray(slow.evaluate(params))
+        )
 
     def test_cached_waveform_matches_full_evaluation(self, detectors_and_waveform):
         ifos, waveform, fmin, fmax, gps = detectors_and_waveform
