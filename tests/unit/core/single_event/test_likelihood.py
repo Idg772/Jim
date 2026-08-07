@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax.scipy.special import logsumexp
 
 from jimgw.core.constants import EARTH_RADIUS_LIGHT_S
 from jimgw.core.jim import Jim
@@ -25,6 +26,7 @@ from jimgw.core.single_event.transforms import (
     MassRatioToSymmetricMassRatioTransform,
 )
 from jimgw.core.single_event.waveform import RippleIMRPhenomD
+from jimgw.core.utils import log_i0
 from jimgw.samplers.config import BlackJAXSwiGConfig
 from tests.utils import assert_all_finite, common_keys_allclose
 
@@ -504,6 +506,58 @@ class TestTransientLikelihoodFD:
             time_marginalization={"tc_range": custom_range},
         )
         assert likelihood.tc_range == custom_range
+
+    def test_windowed_time_reduction_matches_masked_logsumexp(
+        self, detectors_and_waveform
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={},
+        )
+        assert likelihood._tc_window_indices.size > 0
+
+        rng = np.random.default_rng(0)
+        n = len(likelihood.frequencies)
+        d_inner_h = jnp.asarray(rng.normal(size=n) + 1j * rng.normal(size=n))
+
+        padded = jnp.concatenate((likelihood.pad_low, d_inner_h, likelihood.pad_high))
+        fft_ref = jnp.fft.fft(padded, norm="backward")
+        in_window = (likelihood.tc_array > likelihood.tc_range[0]) & (
+            likelihood.tc_array < likelihood.tc_range[1]
+        )
+        norm = jnp.log(len(likelihood.tc_array))
+
+        ref_time = logsumexp(jnp.where(in_window, fft_ref.real, -jnp.inf)) - norm
+        np.testing.assert_allclose(
+            float(likelihood._reduce_time(d_inner_h)), float(ref_time), rtol=1e-12
+        )
+
+        ref_phase_time = (
+            logsumexp(jnp.where(in_window, log_i0(jnp.absolute(fft_ref)), -jnp.inf))
+            - norm
+        )
+        np.testing.assert_allclose(
+            float(likelihood._reduce_phase_time(d_inner_h)),
+            float(ref_phase_time),
+            rtol=1e-12,
+        )
+
+    def test_empty_tc_window_raises_at_construction(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        with pytest.raises(ValueError, match="tc_range"):
+            TransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                time_marginalization={"tc_range": (1e-9, 2e-9)},
+            )
 
     def test_time_marg_fixed_t_c_raises(self, detectors_and_waveform):
         ifos, waveform, fmin, fmax, gps = detectors_and_waveform

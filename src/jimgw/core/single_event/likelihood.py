@@ -6,6 +6,7 @@ from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from evosax.algorithms import CMA_ES
 from jax.scipy.special import logsumexp
 from jaxtyping import Array, Complex, Float
@@ -524,6 +525,16 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         fs = self.detectors[0].data.sampling_frequency
         duration = self.detectors[0].data.duration
         self.tc_array = jnp.fft.fftfreq(int(duration * fs / 2), 1.0 / duration)
+        tc_array = np.asarray(self.tc_array)
+        tc_window = np.flatnonzero(
+            (tc_array > self.tc_range[0]) & (tc_array < self.tc_range[1])
+        )
+        if tc_window.size == 0:
+            raise ValueError(
+                f"time_marginalization tc_range {self.tc_range} contains no FFT "
+                "time samples; widen the range."
+            )
+        self._tc_window_indices = jnp.asarray(tc_window)
         self.pad_low = jnp.zeros(int(self.frequencies[0] * duration))
         n_pad_high = int(
             (fs / 2.0 - 1.0 / duration - float(self.frequencies[-1])) * duration
@@ -536,12 +547,8 @@ class TransientLikelihoodFD(SingleEventLikelihood):
             (self.pad_low, complex_d_inner_h, self.pad_high)
         )
         fft_d_inner_h = jnp.fft.fft(complex_d_inner_h_positive_f, norm="backward")
-        fft_d_inner_h = jnp.where(
-            (self.tc_array > self.tc_range[0]) & (self.tc_array < self.tc_range[1]),
-            fft_d_inner_h.real,
-            jnp.zeros_like(fft_d_inner_h.real) - jnp.inf,
-        )
-        return logsumexp(fft_d_inner_h) - jnp.log(len(self.tc_array))
+        window = fft_d_inner_h.real[self._tc_window_indices]
+        return logsumexp(window) - jnp.log(len(self.tc_array))
 
     # --- phase marginalization helpers ---
 
@@ -624,12 +631,8 @@ class TransientLikelihoodFD(SingleEventLikelihood):
             (self.pad_low, complex_d_inner_h, self.pad_high)
         )
         fft_d_inner_h = jnp.fft.fft(complex_d_inner_h_positive_f, norm="backward")
-        log_i0_abs_fft = jnp.where(
-            (self.tc_array > self.tc_range[0]) & (self.tc_array < self.tc_range[1]),
-            log_i0(jnp.absolute(fft_d_inner_h)),
-            jnp.zeros_like(fft_d_inner_h.real) - jnp.inf,
-        )
-        return logsumexp(log_i0_abs_fft) - jnp.log(len(self.tc_array))
+        window = jnp.absolute(fft_d_inner_h[self._tc_window_indices])
+        return logsumexp(log_i0(window)) - jnp.log(len(self.tc_array))
 
     def _reduce_phase_distance(
         self,
