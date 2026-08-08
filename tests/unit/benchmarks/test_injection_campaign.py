@@ -1,6 +1,7 @@
 import csv
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -10,6 +11,8 @@ from benchmarks.injection_campaign.plot_pp import aggregate_and_plot
 from benchmarks.injection_campaign.plot_timing import aggregate_and_plot_timing
 from benchmarks.injection_campaign.prepare_campaign import prepare_campaign
 from benchmarks.injection_campaign.run_campaign import _is_complete
+from benchmarks.injection_campaign.run_injection import _time_marginalization_config
+from jimgw.core.prior import CombinePrior, UniformPrior
 
 
 def _write_noise_curves(directory: Path) -> None:
@@ -36,8 +39,113 @@ def _prepared_campaign(tmp_path: Path, n_injections: int = 4) -> Path:
     return campaign
 
 
-def test_campaign_config_requests_upsampled_time_marginalization() -> None:
-    assert common.DEFAULT_CONFIG["time_marginalization_upsample_factor"] == 32
+def test_campaign_config_samples_one_cell_time_jitter_without_upsampling() -> None:
+    assert common.DEFAULT_CONFIG["time_marginalization_upsample_factor"] == 1
+    assert common.DEFAULT_CONFIG["time_marginalization_jitter_time"] is True
+
+
+def test_campaign_config_gives_time_jitter_its_own_swig_block() -> None:
+    blocks = common.DEFAULT_CONFIG["blocks"]
+    flattened = [name for block in blocks for name in block]
+
+    assert blocks[-1] == ["time_jitter"]
+    assert len(flattened) == 16
+    assert len(set(flattened)) == 16
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        ({}, {"upsample_factor": 1, "jitter_time": False}),
+        (
+            {"time_marginalization_upsample_factor": 32},
+            {"upsample_factor": 32, "jitter_time": False},
+        ),
+        (
+            {
+                "time_marginalization_upsample_factor": 1,
+                "time_marginalization_jitter_time": True,
+            },
+            {"upsample_factor": 1, "jitter_time": True},
+        ),
+    ],
+)
+def test_time_marginalization_config_preserves_stored_campaign_behavior(
+    stored: dict[str, object], expected: dict[str, object]
+) -> None:
+    config = {
+        "time_marginalization_tc_range_seconds": [-0.03, 0.03],
+        **stored,
+    }
+
+    assert _time_marginalization_config(config) == {
+        "tc_range": (-0.03, 0.03),
+        **expected,
+    }
+
+
+def test_time_marginalization_config_rejects_non_boolean_jitter_flag() -> None:
+    with pytest.raises(TypeError, match="jitter.*boolean"):
+        _time_marginalization_config(
+            {
+                "time_marginalization_tc_range_seconds": [-0.03, 0.03],
+                "time_marginalization_jitter_time": "false",
+            }
+        )
+
+
+def test_time_jitter_extends_recovery_prior_and_periodic_bounds() -> None:
+    from benchmarks.injection_campaign.run_injection import (
+        _recovery_sampling_components,
+    )
+
+    physical_names = tuple(f"physical_{index:02d}" for index in range(15))
+    original_prior = CombinePrior(
+        [UniformPrior(0.0, 1.0, parameter_names=[name]) for name in physical_names]
+    )
+    original_periodic = {physical_names[0]: (0.0, 1.0)}
+    likelihood = SimpleNamespace(
+        jitter_time=True,
+        time_jitter_bounds=(-0.00025, 0.00025),
+    )
+
+    prior, periodic = _recovery_sampling_components(
+        original_prior, original_periodic, likelihood
+    )
+
+    assert prior.parameter_names == (*physical_names, "time_jitter")
+    assert len(prior.parameter_names) == 16
+    assert prior.base_prior[-1].parameter_names == ("time_jitter",)
+    assert prior.base_prior[-1].xmin == likelihood.time_jitter_bounds[0]
+    assert prior.base_prior[-1].xmax == likelihood.time_jitter_bounds[1]
+    assert periodic == {
+        physical_names[0]: (0.0, 1.0),
+        "time_jitter": likelihood.time_jitter_bounds,
+    }
+    assert original_prior.parameter_names == physical_names
+    assert original_periodic == {physical_names[0]: (0.0, 1.0)}
+
+
+def test_recovery_components_leave_non_jitter_campaigns_unchanged() -> None:
+    from benchmarks.injection_campaign.run_injection import (
+        _recovery_sampling_components,
+    )
+
+    original_prior = CombinePrior(
+        [UniformPrior(0.0, 1.0, parameter_names=["physical"])]
+    )
+    original_periodic = {"physical": (0.0, 1.0)}
+
+    prior, periodic = _recovery_sampling_components(
+        original_prior,
+        original_periodic,
+        SimpleNamespace(jitter_time=False),
+    )
+
+    assert prior is original_prior
+    assert periodic == original_periodic
+    assert "time_jitter" not in prior.parameter_names
+    assert "time_jitter" not in periodic
 
 
 def test_prior_ppf_and_cdf_are_inverse() -> None:
@@ -94,7 +202,12 @@ def test_prepare_campaign_round_trip_and_input_integrity(tmp_path: Path) -> None
 
     assert manifest["n_injections"] == 4
     assert manifest["config"]["n_devices"] == 4
+    assert manifest["config"]["time_marginalization_upsample_factor"] == 1
+    assert manifest["config"]["time_marginalization_jitter_time"] is True
+    assert manifest["config"]["blocks"][-1] == ["time_jitter"]
     assert len(catalogue) == 4
+    assert set(catalogue[0]) == set(common.CATALOGUE_FIELDS)
+    assert "time_jitter" not in catalogue[0]
     assert (campaign / "status.csv").is_file()
     with np.load(campaign / "inputs/psd/aLIGO-design.npz") as archive:
         assert archive["frequencies"].shape == (262145,)
@@ -139,6 +252,7 @@ def test_status_and_pp_outputs_are_derived_from_compact_summaries(
             name: ((injection_id + parameter_index / len(common.PARAMETERS)) % 5) / 5
             for parameter_index, name in enumerate(common.PARAMETERS)
         }
+        ranks["time_jitter"] = 0.5
         common.atomic_savez_compressed(
             directory / "posterior.npz", {"M_c": np.asarray([1.19, 1.20])}
         )
@@ -164,9 +278,9 @@ def test_status_and_pp_outputs_are_derived_from_compact_summaries(
         campaign, pdf_output=tmp_path / "figure-3.pdf"
     )
 
-    assert {
-        row["injection_id"] for row in rows if row["status"] == "complete"
-    } == set(completed_ids)
+    assert {row["injection_id"] for row in rows if row["status"] == "complete"} == set(
+        completed_ids
+    )
     assert all(
         row["attempts"] == (1 if row["injection_id"] in completed_ids else 0)
         for row in rows
@@ -183,6 +297,8 @@ def test_status_and_pp_outputs_are_derived_from_compact_summaries(
 
     with (campaign / "pp/summary.csv").open(newline="", encoding="utf-8") as stream:
         summary_rows = {row["parameter"]: row for row in csv.DictReader(stream)}
+    assert set(summary_rows) == set(common.PARAMETERS)
+    assert "time_jitter" not in summary_rows
     catalogue = common.read_catalogue(campaign / "catalogue.csv")
     # M_c is PARAMETERS[0], so its fake rank for injection i is (i % 5) / 5.
     expected_residual = float(
@@ -244,7 +360,7 @@ def test_pod_runner_excludes_only_regenerable_cache_from_results() -> None:
         repository / "benchmarks/injection_campaign/runpod/run_on_pod.sh"
     ).read_text()
 
-    assert 'benchmarks.injection_campaign.run_campaign' in script
+    assert "benchmarks.injection_campaign.run_campaign" in script
     assert '--exclude="$(basename "$output_dir")/.jax-cache"' in script
     assert "--plot" in script
     assert 'range_arguments=(--start "$start")' in script

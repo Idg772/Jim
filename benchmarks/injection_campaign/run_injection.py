@@ -125,13 +125,41 @@ def _device_report(jax: Any, requested: int, simulate_cpu: bool) -> dict[str, An
 def _injection_parameters(
     truth: dict[str, Any], likelihood_transforms: list[Any]
 ) -> dict[str, Any]:
-    parameters = {
-        name: truth[name]
-        for name in (*PARAMETERS, "phase_c", "t_c")
-    }
+    parameters = {name: truth[name] for name in (*PARAMETERS, "phase_c", "t_c")}
     for transform in likelihood_transforms:
         parameters = transform.forward(parameters)
     return parameters
+
+
+def _time_marginalization_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Resolve time-marginalization settings without changing old manifests."""
+
+    jitter_time = config.get("time_marginalization_jitter_time", False)
+    if not isinstance(jitter_time, bool):
+        raise TypeError("time_marginalization_jitter_time must be a boolean")
+    return {
+        "tc_range": tuple(config["time_marginalization_tc_range_seconds"]),
+        "upsample_factor": int(config.get("time_marginalization_upsample_factor", 1)),
+        "jitter_time": jitter_time,
+    }
+
+
+def _recovery_sampling_components(
+    prior: Any,
+    periodic: dict[str, tuple[float, float]],
+    likelihood: Any,
+) -> tuple[Any, dict[str, tuple[float, float]]]:
+    """Add the sampled one-cell time shift when jitter is enabled."""
+
+    if not likelihood.jitter_time:
+        return prior, dict(periodic)
+
+    from jimgw.core.prior import CombinePrior, UniformPrior
+
+    bounds = tuple(float(value) for value in likelihood.time_jitter_bounds)
+    jitter_prior = UniformPrior(*bounds, parameter_names=["time_jitter"])
+    recovery_prior = CombinePrior([*prior.base_prior, jitter_prior])
+    return recovery_prior, {**periodic, "time_jitter": bounds}
 
 
 def run_injection(args: argparse.Namespace) -> dict[str, Any]:
@@ -210,9 +238,9 @@ def run_injection(args: argparse.Namespace) -> dict[str, Any]:
     )
     injection_started = time.perf_counter()
     noise_key = jax.random.key(truth["noise_seed"])
-    start_time = float(config["trigger_time_gps"]) - float(
-        config["duration_seconds"]
-    ) / 2.0
+    start_time = (
+        float(config["trigger_time_gps"]) - float(config["duration_seconds"]) / 2.0
+    )
     for detector_index, ifo in enumerate(ifos):
         ifo.inject_signal(
             duration=float(config["duration_seconds"]),
@@ -236,12 +264,10 @@ def run_injection(args: argparse.Namespace) -> dict[str, Any]:
         f_min=float(config["f_min_hz"]),
         f_max=float(config["f_max_hz"]),
         phase_marginalization=True,
-        time_marginalization={
-            "tc_range": tuple(config["time_marginalization_tc_range_seconds"]),
-            "upsample_factor": int(
-                config.get("time_marginalization_upsample_factor", 1)
-            ),
-        },
+        time_marginalization=_time_marginalization_config(config),
+    )
+    recovery_prior, recovery_periodic = _recovery_sampling_components(
+        components["prior"], components["periodic"], likelihood
     )
     sampler_config = BlackJAXSwiGConfig(
         blocks=config["blocks"],
@@ -254,10 +280,10 @@ def run_injection(args: argparse.Namespace) -> dict[str, Any]:
     )
     jim = Jim(
         likelihood,
-        components["prior"],
+        recovery_prior,
         sample_transforms=components["sample_transforms"],
         likelihood_transforms=components["likelihood_transforms"],
-        periodic=components["periodic"],
+        periodic=recovery_periodic,
         sampler_config=sampler_config,
         seed=int(truth["sampler_seed"]),
         verbose=args.verbose,
@@ -279,7 +305,9 @@ def run_injection(args: argparse.Namespace) -> dict[str, Any]:
     if missing:
         raise RuntimeError("posterior is missing parameters: " + ", ".join(missing))
     counts = {name: int(values.shape[0]) for name, values in samples.items()}
-    if len(set(counts.values())) != 1 or any(values.ndim != 1 for values in samples.values()):
+    if len(set(counts.values())) != 1 or any(
+        values.ndim != 1 for values in samples.values()
+    ):
         raise RuntimeError(f"invalid posterior array shapes: {counts}")
     atomic_savez_compressed(posterior_path, samples)
     ranks = {
@@ -293,10 +321,7 @@ def run_injection(args: argparse.Namespace) -> dict[str, Any]:
         "campaign": manifest["config"]["campaign"],
         "config_sha256": manifest["config_sha256"],
         "injection_id": args.injection_id,
-        "truth": {
-            name: truth[name]
-            for name in (*PARAMETERS, "phase_c", "t_c")
-        },
+        "truth": {name: truth[name] for name in (*PARAMETERS, "phase_c", "t_c")},
         "seeds": {
             "noise": truth["noise_seed"],
             "sampler": truth["sampler_seed"],

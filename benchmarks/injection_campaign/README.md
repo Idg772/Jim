@@ -2,10 +2,12 @@
 
 This directory turns the measured `paper-15d` benchmark into a reproducible,
 resumable injection-recovery campaign. Each recovery uses the benchmark's
-15-dimensional precessing-tidal waveform, prior, seven SwiG blocks, 512 live
-points, 64 deletions per outer step, one Gibbs sweep, and four-way device
-sharding. Phase and geocentric time are injected but analytically marginalized,
-so the P–P test covers the 15 sampled parameters.
+15-dimensional precessing-tidal waveform and physical prior, plus a sampled
+periodic `time_jitter` offset in its own eighth SwiG block. The resulting
+16-dimensional sampler uses 512 live points, 64 deletions per outer step, one
+Gibbs sweep, and four-way device sharding. Phase and geocentric time are
+injected but analytically marginalized; `time_jitter` only shifts the numerical
+FFT grid, so the P–P test continues to cover the 15 physical parameters.
 
 The default noise curves are the Bilby-packaged Advanced LIGO zero-detuned
 high-power and Advanced Virgo design PSDs. `prepare_campaign` interpolates and
@@ -77,7 +79,14 @@ The compact tracking artifacts are:
 
 Calibration-specific configuration and outputs:
 
-- New manifests set `time_marginalization_upsample_factor` to 32; older manifests without the key retain the original factor of 1.
+- New manifests use `time_marginalization_upsample_factor=1` and enable
+  `time_marginalization_jitter_time`. The campaign constructs a uniform,
+  periodic `time_jitter` prior from the likelihood's one-cell bounds. Sampling
+  that offset integrates over grid alignment without the runtime cost of 16 or
+  32 phase-ramped FFTs per likelihood evaluation.
+- Older manifests without the jitter key retain their stored behavior: missing
+  upsampling also means factor 1, while manifests that requested factor 32
+  continue to use factor 32 with no sampled jitter.
 - New catalogues use an independently shuffled Latin hypercube for every parameter, so each marginal covers every prior stratum once.
 - `pp/summary.csv` reports truth-draw KS statistics and rank-minus-truth-quantile residual means and standard errors.
 

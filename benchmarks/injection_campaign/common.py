@@ -53,7 +53,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "f_max_hz": 2048.0 - 1.0 / 128.0,
     "phase_marginalization": True,
     "time_marginalization_tc_range_seconds": [-0.03, 0.03],
-    "time_marginalization_upsample_factor": 32,
+    "time_marginalization_upsample_factor": 1,
+    "time_marginalization_jitter_time": True,
     "waveform": "IMRPhenomPv2_NRTidalv2",
     "waveform_f_ref_hz": 20.0,
     "n_devices": 4,
@@ -71,6 +72,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         ["zenith", "azimuth"],
         ["psi"],
         ["d_L"],
+        ["time_jitter"],
     ],
     "prior": {
         "M_c": {"distribution": "uniform", "range": [1.18, 1.21]},
@@ -261,10 +263,7 @@ def generate_catalogue(
     if stratified:
         quantiles = np.column_stack(
             [
-                (
-                    truth_rng.permutation(n_injections)
-                    + truth_rng.random(n_injections)
-                )
+                (truth_rng.permutation(n_injections) + truth_rng.random(n_injections))
                 / n_injections
                 for _ in names
             ]
@@ -277,9 +276,7 @@ def generate_catalogue(
         row: dict[str, Any] = {
             "injection_id": injection_id,
             "noise_seed": int(noise_sequence.generate_state(1, dtype=np.uint32)[0]),
-            "sampler_seed": int(
-                sampler_sequence.generate_state(1, dtype=np.uint32)[0]
-            ),
+            "sampler_seed": int(sampler_sequence.generate_state(1, dtype=np.uint32)[0]),
         }
         for column, name in enumerate(names):
             row[name] = prior_ppf(name, float(quantiles[injection_id, column]))
