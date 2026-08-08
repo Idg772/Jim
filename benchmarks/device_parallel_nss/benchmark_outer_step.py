@@ -38,6 +38,28 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--inner-steps-per-dim", type=_positive_int, default=1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--implementation-root",
+        type=Path,
+        default=Path(__file__).resolve().parents[2],
+        help=(
+            "Repository checkout whose src/jimgw implementation is benchmarked. "
+            "This lets the same harness run the paper baseline and the candidate."
+        ),
+    )
+    parser.add_argument(
+        "--implementation-label",
+        default="candidate",
+        help="Human-readable implementation label written to the JSON report.",
+    )
+    parser.add_argument(
+        "--implementation-revision",
+        default=None,
+        help=(
+            "Resolved Git revision for an exported implementation tree. When "
+            "omitted, the harness queries --implementation-root directly."
+        ),
+    )
+    parser.add_argument(
         "--dtype",
         choices=("float32", "float64"),
         default="float32",
@@ -83,7 +105,12 @@ def _normalise_hlo_instruction(line: str) -> str:
 def _collective_census(hlo: str) -> dict[str, dict[str, Any]]:
     census: dict[str, dict[str, Any]] = {}
     for operation in ("all-gather", "all-reduce", "collective-permute"):
-        pattern = re.compile(rf"(^|[^a-z-]){re.escape(operation)}\(")
+        # CPU HLO commonly keeps collectives synchronous (``all-gather``),
+        # while GPU HLO rewrites them to an asynchronous start/done pair.
+        # Count the start as the single logical collective and ignore the done.
+        pattern = re.compile(
+            rf"(?:^|\s){re.escape(operation)}(?:-start)?\("
+        )
         instructions = [
             _normalise_hlo_instruction(line)
             for line in hlo.splitlines()
@@ -136,9 +163,7 @@ def _timing_summary(step_times_ms: list[float]) -> dict[str, Any]:
     }
 
 
-def _git_metadata() -> dict[str, Any]:
-    repository = Path(__file__).resolve().parents[2]
-
+def _git_metadata(repository: Path, revision_override: str | None) -> dict[str, Any]:
     def git(*args: str) -> str | None:
         result = subprocess.run(
             ("git", *args),
@@ -149,12 +174,23 @@ def _git_metadata() -> dict[str, Any]:
         )
         return result.stdout.strip() if result.returncode == 0 else None
 
-    revision = git("rev-parse", "HEAD")
+    revision = revision_override or git("rev-parse", "HEAD")
     status = git("status", "--porcelain")
     return {
+        "repository": str(repository),
         "revision": revision,
         "dirty": bool(status) if status is not None else None,
     }
+
+
+def _select_implementation(root: Path) -> Path:
+    root = root.expanduser().resolve()
+    source = root / "src"
+    package = source / "jimgw"
+    if not package.is_dir():
+        raise SystemExit(f"--implementation-root must contain src/jimgw; got {root}")
+    sys.path.insert(0, str(source))
+    return root
 
 
 def _run(args: argparse.Namespace) -> dict[str, Any]:
@@ -169,13 +205,18 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     from blackjax.ns.adaptive import init as adaptive_init
     from blackjax.ns.base import init_state_strategy
 
+    from jimgw.samplers.blackjax import sharding as sharding_module
     from jimgw.samplers.blackjax.nss import BlackJAXNSSSampler
-    from jimgw.samplers.blackjax.sharding import (
-        make_live_mesh,
-        place_key,
-        place_replicated_state,
-    )
     from jimgw.samplers.config import BlackJAXNSSConfig
+
+    make_live_mesh = sharding_module.make_live_mesh
+    place_key = sharding_module.place_key
+    if hasattr(sharding_module, "place_replicated_state"):
+        place_benchmark_state = sharding_module.place_replicated_state
+        state_topology = "replicated-live-state"
+    else:
+        place_benchmark_state = sharding_module.place_state
+        state_topology = "sharded-live-state"
 
     if args.n_delete >= args.n_live:
         raise SystemExit("--n-delete must be smaller than --n-live")
@@ -231,7 +272,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         update_inner_kernel_params_fn=sampler._update_inner_kernel_params_fn,
     )
     if mesh is not None:
-        state = place_replicated_state(state, mesh)
+        state = place_benchmark_state(state, mesh)
 
     raw_keys = jax.random.split(
         jax.random.key(args.seed + 1),
@@ -266,6 +307,10 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     live_state, dead_history = output
     devices = jax.local_devices()
     return {
+        "implementation": {
+            "label": args.implementation_label,
+            "state_topology": state_topology,
+        },
         "environment": {
             "python": platform.python_version(),
             "python_implementation": platform.python_implementation(),
@@ -286,7 +331,13 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 }
                 for device in devices
             ],
-            "git": _git_metadata(),
+            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "jax_platforms": os.environ.get("JAX_PLATFORMS"),
+            "xla_flags": os.environ.get("XLA_FLAGS"),
+            "git": _git_metadata(
+                args.implementation_root,
+                args.implementation_revision,
+            ),
         },
         "workload": {
             "n_live": args.n_live,
@@ -318,6 +369,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> None:
     args = _parse_args()
+    args.implementation_root = _select_implementation(args.implementation_root)
     if args.simulate_cpu:
         _configure_cpu_simulation(args.n_devices)
     report = _run(args)
