@@ -143,6 +143,10 @@ log*
 # Out directory of runs
 outdir
 
+# Benchmark result bundles
+benchmark-results/
+campaign-results/
+
 # Workspace files
 jim.code-workspace
 
