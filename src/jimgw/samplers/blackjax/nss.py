@@ -262,6 +262,13 @@ class BlackJAXNSSSampler(Sampler):
         )
         config.configure_jax_cache()
         _method_t0 = time.perf_counter()
+        phase_seconds: dict[str, float | None] = {
+            "init_total": None,
+            "likelihood_jit": None,
+            "initial_likelihood_eval": None,
+            "ns_loop": None,
+            "finalise": None,
+        }
 
         def _validated_initial_particles(pos):
             arr = jnp.asarray(pos)
@@ -286,6 +293,7 @@ class BlackJAXNSSSampler(Sampler):
         )
 
         def _batched_nss_init(positions):
+            _init_t0 = time.perf_counter()
             if mesh is not None:
                 positions = jax.device_put(positions, replacement_sharding(mesh))
 
@@ -293,26 +301,40 @@ class BlackJAXNSSSampler(Sampler):
                 return jax.lax.map(_single_init_fn, pos, batch_size=n_delete)
 
             if mesh is None:
-                return _ns_adaptive_init(
+                state = _ns_adaptive_init(
                     positions,
                     init_state_fn=_batched_fn,
                     update_inner_kernel_params_fn=self._update_inner_kernel_params_fn,
                 )
+                phase_seconds["init_total"] = time.perf_counter() - _init_t0
+                return state
 
             # Evaluate each initial likelihood exactly once on a sharded live
             # batch, then exchange only the compact particle records.  All
             # steady-state sampler data is replicated after this one-time step.
-            initial_particles = jax.jit(
-                _batched_fn,
-                out_shardings=replacement_sharding(mesh),
-            )(positions)
+            # AOT-compile so the one-off likelihood JIT cost is measured
+            # separately from the evaluation itself; arXiv:2607.28265 quotes
+            # the likelihood and sampler-kernel compiles separately from the
+            # sampling time.
+            _jit_t0 = time.perf_counter()
+            _compiled_init = (
+                jax.jit(_batched_fn, out_shardings=replacement_sharding(mesh))
+                .lower(positions)
+                .compile()
+            )
+            phase_seconds["likelihood_jit"] = time.perf_counter() - _jit_t0
+            _eval_t0 = time.perf_counter()
+            initial_particles = jax.block_until_ready(_compiled_init(positions))
+            phase_seconds["initial_likelihood_eval"] = time.perf_counter() - _eval_t0
             initial_particles = replicate_initial_particles(initial_particles, mesh)
             state = _ns_adaptive_init(
                 initial_particles.position,
                 init_state_fn=lambda _: initial_particles,
                 update_inner_kernel_params_fn=self._update_inner_kernel_params_fn,
             )
-            return place_replicated_state(state, mesh)
+            state = place_replicated_state(state, mesh)
+            phase_seconds["init_total"] = time.perf_counter() - _init_t0
+            return state
 
         # Resume from checkpoint if one exists.
         if (
@@ -375,6 +397,7 @@ class BlackJAXNSSSampler(Sampler):
         step_fn = jax.jit(nested_sampler.step)
         _last_ckpt_t = time.perf_counter()
 
+        _loop_t0 = time.perf_counter()
         while not _terminate(state):
             rng_key, subkey = jax.random.split(rng_key)
             state, dead_info = step_fn(subkey, state)
@@ -397,7 +420,9 @@ class BlackJAXNSSSampler(Sampler):
                     },
                     self.sampler_name,
                 )
+        phase_seconds["ns_loop"] = time.perf_counter() - _loop_t0
 
+        _finalise_t0 = time.perf_counter()
         final_state = finalise(state, dead)  # type: ignore[arg-type]  # AdaptiveNSState structurally satisfies NSState (.particles field)
         self._final_state = jax.device_get(final_state)
         self._n_iterations = n_iter
@@ -414,6 +439,8 @@ class BlackJAXNSSSampler(Sampler):
             logzero=np.nan,
             dtype=np.float64,
         )
+        phase_seconds["finalise"] = time.perf_counter() - _finalise_t0
+        self._phase_seconds = phase_seconds
         if ckpt_path is not None:
             ckpt_path.unlink(missing_ok=True)
         if config.checkpoint_dir is not None:
@@ -474,4 +501,5 @@ class BlackJAXNSSSampler(Sampler):
             "acceptance_history": np.asarray(ui.is_accepted),
             "log_Z": log_Z,
             "log_Z_error": log_Z_error,
+            "sample_phase_seconds": dict(getattr(self, "_phase_seconds", {})) or None,
         }

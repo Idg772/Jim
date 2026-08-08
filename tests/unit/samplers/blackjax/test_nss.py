@@ -140,6 +140,38 @@ def test_nss_diagnostics():
     assert diag["sampling_time"] >= 0.0
 
 
+def test_nss_sample_phase_seconds():
+    sampler = _make_sampler()
+    sampler.sample(jax.random.key(4), _init_pos(100))
+    diag = sampler.get_diagnostics()
+
+    phases = diag["sample_phase_seconds"]
+    assert set(phases) == {
+        "init_total",
+        "likelihood_jit",
+        "initial_likelihood_eval",
+        "ns_loop",
+        "finalise",
+    }
+    assert phases["init_total"] is not None and phases["init_total"] > 0.0
+    assert phases["ns_loop"] is not None and phases["ns_loop"] > 0.0
+    assert phases["finalise"] is not None and phases["finalise"] >= 0.0
+
+    # The compile/eval split exists only on the sharded (mesh) path; on the
+    # single-device CPU path both must be None together.
+    jit_s = phases["likelihood_jit"]
+    eval_s = phases["initial_likelihood_eval"]
+    assert (jit_s is None) == (eval_s is None)
+    if jit_s is not None:
+        assert jit_s > 0.0 and eval_s > 0.0
+        assert jit_s + eval_s <= phases["init_total"] + 1e-6
+
+    # Phases must fit inside the overall reported sampling time (small
+    # slack for the un-timed terminate checks between steps).
+    accounted = phases["init_total"] + phases["ns_loop"] + phases["finalise"]
+    assert accounted <= diag["sampling_time"] + 0.5
+
+
 def test_nss_checkpoint_file_created(tmp_path, monkeypatch):
     """Checkpoint .pkl is written during sampling and cleaned up on success."""
     prior = CombinePrior(
