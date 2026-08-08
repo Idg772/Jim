@@ -211,6 +211,16 @@ def test_ranked_parameters_include_tc_only_when_sampled() -> None:
     )
 
 
+def test_pp_parameters_include_tc_only_when_sampled() -> None:
+    from benchmarks.injection_campaign.plot_pp import _pp_parameters
+
+    assert _pp_parameters({"config": {}}) == common.PARAMETERS
+    assert _pp_parameters({"config": {"sample_coalescence_time": True}}) == (
+        *common.PARAMETERS,
+        "t_c",
+    )
+
+
 def test_prior_ppf_and_cdf_are_inverse() -> None:
     grid = np.linspace(1e-6, 1.0 - 1e-6, 101)
     for name in (*common.PARAMETERS, *common.NUISANCE_PARAMETERS):
@@ -318,9 +328,10 @@ def test_status_and_pp_outputs_are_derived_from_compact_summaries(
     for injection_id in completed_ids:
         directory = common.result_dir(campaign, injection_id)
         directory.mkdir(parents=True)
+        pp_names = (*common.PARAMETERS, "t_c")
         ranks = {
-            name: ((injection_id + parameter_index / len(common.PARAMETERS)) % 5) / 5
-            for parameter_index, name in enumerate(common.PARAMETERS)
+            name: ((injection_id + parameter_index / len(pp_names)) % 5) / 5
+            for parameter_index, name in enumerate(pp_names)
         }
         ranks["time_jitter"] = 0.5
         common.atomic_savez_compressed(
@@ -367,7 +378,7 @@ def test_status_and_pp_outputs_are_derived_from_compact_summaries(
 
     with (campaign / "pp/summary.csv").open(newline="", encoding="utf-8") as stream:
         summary_rows = {row["parameter"]: row for row in csv.DictReader(stream)}
-    assert set(summary_rows) == set(common.PARAMETERS)
+    assert set(summary_rows) == {*common.PARAMETERS, "t_c"}
     assert "time_jitter" not in summary_rows
     catalogue = common.read_catalogue(campaign / "catalogue.csv")
     # M_c is PARAMETERS[0], so its fake rank for injection i is (i % 5) / 5.

@@ -24,7 +24,6 @@ from benchmarks.injection_campaign.common import (
 plt.switch_backend("Agg")
 
 
-RANK_FIELDS = ("injection_id", *PARAMETERS)
 SUMMARY_FIELDS = (
     "parameter",
     "n_injections",
@@ -40,6 +39,14 @@ SUMMARY_FIELDS = (
 )
 
 
+def _pp_parameters(manifest: dict[str, Any]) -> tuple[str, ...]:
+    """P-P parameter list for a campaign (t_c only when it was sampled)."""
+
+    if manifest["config"].get("sample_coalescence_time", False):
+        return (*PARAMETERS, "t_c")
+    return PARAMETERS
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("campaign_dir", type=Path)
@@ -48,6 +55,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def load_rank_rows(campaign_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     manifest = load_manifest(campaign_dir)
+    parameters = _pp_parameters(manifest)
     rows: list[dict[str, Any]] = []
     for injection_id in range(int(manifest["n_injections"])):
         path = result_dir(campaign_dir, injection_id) / "summary.json"
@@ -71,7 +79,7 @@ def load_rank_rows(campaign_dir: Path) -> tuple[dict[str, Any], list[dict[str, A
             raise ValueError(f"result posterior is missing or corrupt: {path.parent}")
         ranks = summary.get("ranks", {})
         row = {"injection_id": injection_id}
-        for name in PARAMETERS:
+        for name in parameters:
             value = float(ranks[name])
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"rank outside [0, 1] for {name}: {path}")
@@ -108,13 +116,14 @@ def _ecdf(ranks: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 def aggregate_and_plot(campaign_dir: Path) -> dict[str, Any]:
     campaign_dir = campaign_dir.expanduser().resolve()
     manifest, rows = load_rank_rows(campaign_dir)
+    parameters = _pp_parameters(manifest)
     output_dir = campaign_dir / "pp"
     output_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_csv(output_dir / "ranks.csv", rows, RANK_FIELDS)
+    atomic_write_csv(output_dir / "ranks.csv", rows, ("injection_id", *parameters))
     n = len(rows)
     rank_arrays = {
         name: np.asarray([row[name] for row in rows], dtype=float)
-        for name in PARAMETERS
+        for name in parameters
     }
     catalogue = read_catalogue(campaign_dir / manifest["catalogue"]["path"])
     truth_by_id = {row["injection_id"]: row for row in catalogue}
@@ -123,7 +132,7 @@ def aggregate_and_plot(campaign_dir: Path) -> dict[str, Any]:
             [prior_cdf(name, truth_by_id[row["injection_id"]][name]) for row in rows],
             dtype=float,
         )
-        for name in PARAMETERS
+        for name in parameters
     }
     summaries = []
     for name, ranks in rank_arrays.items():
@@ -151,8 +160,8 @@ def aggregate_and_plot(campaign_dir: Path) -> dict[str, Any]:
 
     combined, ax = plt.subplots(figsize=(8.0, 7.0), constrained_layout=True)
     _draw_expected(ax, n)
-    colors = plt.cm.turbo(np.linspace(0.02, 0.98, len(PARAMETERS)))
-    for color, name in zip(colors, PARAMETERS, strict=True):
+    colors = plt.cm.turbo(np.linspace(0.02, 0.98, len(parameters)))
+    for color, name in zip(colors, parameters, strict=True):
         x, y = _ecdf(rank_arrays[name])
         ax.step(x, y, where="post", color=color, alpha=0.72, linewidth=1.2, label=name)
     ax.set(
@@ -170,14 +179,15 @@ def aggregate_and_plot(campaign_dir: Path) -> dict[str, Any]:
     plt.close(combined)
 
     figure, axes = plt.subplots(4, 4, figsize=(13.0, 12.5), constrained_layout=True)
-    for axis, name, color in zip(axes.flat, PARAMETERS, colors, strict=False):
+    for axis, name, color in zip(axes.flat, parameters, colors, strict=False):
         _draw_expected(axis, n)
         x, y = _ecdf(rank_arrays[name])
         axis.step(x, y, where="post", color=color, linewidth=1.45)
         axis.set(xlim=(0, 1), ylim=(0, 1), title=name)
         axis.set_aspect("equal", adjustable="box")
         axis.grid(alpha=0.15)
-    axes.flat[-1].axis("off")
+    for axis in axes.flat[len(parameters) :]:
+        axis.axis("off")
     figure.supxlabel("Credible level")
     figure.supylabel("Fraction of injections")
     figure.suptitle(f"FSM/SwiG parameter P–P plots ({n} recoveries)")
