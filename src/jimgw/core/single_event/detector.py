@@ -417,7 +417,12 @@ class GroundBased2G(Detector):
             jnp.stack(jax.tree_util.tree_leaves(h_detector)), axis=0
         )
 
-        phase_shift = jnp.exp(-2j * jnp.pi * frequency * time_shift)
+        # Real-angle phasor: exp(-2πi f Δt) with a complex-typed argument
+        # forces XLA's generic complex exp (two f64 exps plus inf/zero
+        # edge-case selects per bin). cos/sin of the real angle is the same
+        # rotation without any of that.
+        phase_angle = (-2.0 * jnp.pi) * frequency * time_shift
+        phase_shift = jax.lax.complex(jnp.cos(phase_angle), jnp.sin(phase_angle))
         return projected_strain * phase_shift
 
     def td_response(

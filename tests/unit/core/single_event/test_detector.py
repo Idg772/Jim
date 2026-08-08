@@ -200,3 +200,40 @@ class TestET:
                 f"{ifo_a.name}↔{ifo_b.name}: {dist:.0f} m "
                 f"(expected ~{self.ET_ARM_LENGTH_M:.0f} m ± 50 m)"
             )
+
+
+def test_fd_response_matches_complex_exp_reference():
+    det = make_detector()
+    inject_reference(det)
+    params = {
+        "ra": 1.375,
+        "dec": -1.2108,
+        "psi": 0.3,
+        "gmst": 2.1,
+        "trigger_time": GPS_TIME,
+        "t_c": 0.013,
+    }
+    antenna = det.antenna_pattern(
+        params["ra"], params["dec"], params["psi"], params["gmst"]
+    )
+    rng = np.random.default_rng(5)
+    n = 513
+    frequency = jnp.linspace(F_MIN, F_MAX, n)
+    h_sky = {
+        key: jnp.asarray(rng.normal(size=n) + 1j * rng.normal(size=n))
+        for key in antenna
+    }
+
+    result = det.fd_response(frequency, h_sky, params)
+
+    # Pre-change reference: complex-exponential phasor applied to the same
+    # antenna-projected strain.
+    time_shift = det.delay_from_geocenter(params["ra"], params["dec"], params["gmst"])
+    time_shift += params["trigger_time"] - det.start_time + params["t_c"]
+    projected = sum(h_sky[key] * antenna[key] for key in h_sky)
+    reference = projected * jnp.exp(-2j * jnp.pi * frequency * time_shift)
+
+    assert result.dtype == reference.dtype
+    np.testing.assert_allclose(
+        np.asarray(result), np.asarray(reference), rtol=1e-13, atol=1e-14
+    )
