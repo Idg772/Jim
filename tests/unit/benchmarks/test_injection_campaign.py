@@ -39,6 +39,31 @@ def test_campaign_config_requests_upsampled_time_marginalization() -> None:
     assert common.DEFAULT_CONFIG["time_marginalization_upsample_factor"] == 32
 
 
+def test_prior_ppf_and_cdf_are_inverse() -> None:
+    grid = np.linspace(1e-6, 1.0 - 1e-6, 101)
+    for name in (*common.PARAMETERS, *common.NUISANCE_PARAMETERS):
+        values = np.asarray([common.prior_ppf(name, u) for u in grid])
+        back = np.asarray([common.prior_cdf(name, v) for v in values])
+        np.testing.assert_allclose(back, grid, atol=1e-12)
+
+
+def test_stratified_catalogue_covers_every_stratum_once() -> None:
+    n = 16
+    rows = common.generate_catalogue(n, 7)
+    for name in (*common.PARAMETERS, *common.NUISANCE_PARAMETERS):
+        u = np.sort([common.prior_cdf(name, row[name]) for row in rows])
+        assert np.array_equal(np.floor(u * n).astype(int), np.arange(n))
+
+
+def test_iid_catalogue_mode_differs_from_stratified() -> None:
+    stratified = common.generate_catalogue(8, 42)
+    iid = common.generate_catalogue(8, 42, stratified=False)
+    assert stratified != iid
+    assert [row["noise_seed"] for row in stratified] == [
+        row["noise_seed"] for row in iid
+    ]
+
+
 def test_catalogue_is_deterministic_and_inside_the_recovery_prior() -> None:
     first = common.generate_catalogue(8, 42)
     second = common.generate_catalogue(8, 42)

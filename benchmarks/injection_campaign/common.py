@@ -189,54 +189,100 @@ def atomic_savez_compressed(path: Path, arrays: Mapping[str, Any]) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _power_law_sample(
-    rng: np.random.Generator, low: float, high: float, alpha: float
-) -> float:
-    u = float(rng.random())
-    exponent = alpha + 1.0
-    if exponent == 0.0:
-        return float(low * (high / low) ** u)
-    return float((u * (high**exponent - low**exponent) + low**exponent) ** (1 / exponent))
+_UNIFORM_PRIOR_RANGES: dict[str, tuple[float, float]] = {
+    "M_c": (1.18, 1.21),
+    "q": (0.125, 1.0),
+    "s1_mag": (0.0, 0.05),
+    "s2_mag": (0.0, 0.05),
+    "s1_phi": (0.0, 2.0 * np.pi),
+    "s2_phi": (0.0, 2.0 * np.pi),
+    "lambda_1": (0.0, 5000.0),
+    "lambda_2": (0.0, 5000.0),
+    "ra": (0.0, 2.0 * np.pi),
+    "psi": (0.0, np.pi),
+    "phase_c": (0.0, 2.0 * np.pi),
+    "t_c": (-0.03, 0.03),
+}
+_SINE_ANGLE_PARAMETERS = ("s1_theta", "s2_theta", "iota")
+_D_L_RANGE = (1.0, 75.0)  # PowerLawPrior alpha=2: CDF proportional to d^3
 
 
-def _isotropic_polar_angle(rng: np.random.Generator) -> float:
-    return float(np.arccos(rng.uniform(-1.0, 1.0)))
+def prior_cdf(name: str, value: float) -> float:
+    """Analytic CDF of the campaign prior for one catalogue parameter."""
+
+    if name in _UNIFORM_PRIOR_RANGES:
+        low, high = _UNIFORM_PRIOR_RANGES[name]
+        return (value - low) / (high - low)
+    if name in _SINE_ANGLE_PARAMETERS:
+        return 0.5 * (1.0 - np.cos(value))
+    if name == "dec":
+        return 0.5 * (1.0 + np.sin(value))
+    if name == "d_L":
+        low, high = _D_L_RANGE
+        return (value**3 - low**3) / (high**3 - low**3)
+    raise KeyError(f"no analytic prior CDF for parameter {name!r}")
 
 
-def generate_catalogue(n_injections: int, master_seed: int) -> list[dict[str, Any]]:
-    """Draw deterministic truths from exactly the paper-15d recovery prior."""
+def prior_ppf(name: str, u: float) -> float:
+    """Inverse of :func:`prior_cdf`."""
+
+    if name in _UNIFORM_PRIOR_RANGES:
+        low, high = _UNIFORM_PRIOR_RANGES[name]
+        return low + u * (high - low)
+    if name in _SINE_ANGLE_PARAMETERS:
+        return float(np.arccos(1.0 - 2.0 * u))
+    if name == "dec":
+        return float(np.arcsin(2.0 * u - 1.0))
+    if name == "d_L":
+        low, high = _D_L_RANGE
+        return float((u * (high**3 - low**3) + low**3) ** (1.0 / 3.0))
+    raise KeyError(f"no analytic prior PPF for parameter {name!r}")
+
+
+def generate_catalogue(
+    n_injections: int, master_seed: int, stratified: bool = True
+) -> list[dict[str, Any]]:
+    """Draw deterministic truths from exactly the paper-15d recovery prior.
+
+    With ``stratified`` (the default) each parameter's quantiles form an
+    independently shuffled Latin hypercube: every marginal hits each of the
+    ``n_injections`` prior strata exactly once, so prior-dominated parameters
+    cannot inherit truth-draw fluctuations into the P-P test. Truths remain
+    individually prior-distributed; the P-P binomial bands become slightly
+    conservative for prior-dominated parameters.
+    """
 
     if n_injections < 1:
         raise ValueError("n_injections must be positive")
-    seed_sequences = np.random.SeedSequence(master_seed).spawn(n_injections)
+    root = np.random.SeedSequence(master_seed)
+    per_injection = root.spawn(n_injections)
+    truth_rng = np.random.default_rng(root.spawn(1)[0])
+    names = (*PARAMETERS, *NUISANCE_PARAMETERS)
+    if stratified:
+        quantiles = np.column_stack(
+            [
+                (
+                    truth_rng.permutation(n_injections)
+                    + truth_rng.random(n_injections)
+                )
+                / n_injections
+                for _ in names
+            ]
+        )
+    else:
+        quantiles = truth_rng.random((n_injections, len(names)))
     rows: list[dict[str, Any]] = []
-    for injection_id, seed_sequence in enumerate(seed_sequences):
-        truth_sequence, noise_sequence, sampler_sequence = seed_sequence.spawn(3)
-        rng = np.random.default_rng(truth_sequence)
+    for injection_id, seed_sequence in enumerate(per_injection):
+        _, noise_sequence, sampler_sequence = seed_sequence.spawn(3)
         row: dict[str, Any] = {
             "injection_id": injection_id,
             "noise_seed": int(noise_sequence.generate_state(1, dtype=np.uint32)[0]),
             "sampler_seed": int(
                 sampler_sequence.generate_state(1, dtype=np.uint32)[0]
             ),
-            "M_c": float(rng.uniform(1.18, 1.21)),
-            "q": float(rng.uniform(0.125, 1.0)),
-            "s1_mag": float(rng.uniform(0.0, 0.05)),
-            "s1_theta": _isotropic_polar_angle(rng),
-            "s1_phi": float(rng.uniform(0.0, 2.0 * np.pi)),
-            "s2_mag": float(rng.uniform(0.0, 0.05)),
-            "s2_theta": _isotropic_polar_angle(rng),
-            "s2_phi": float(rng.uniform(0.0, 2.0 * np.pi)),
-            "iota": _isotropic_polar_angle(rng),
-            "lambda_1": float(rng.uniform(0.0, 5000.0)),
-            "lambda_2": float(rng.uniform(0.0, 5000.0)),
-            "d_L": _power_law_sample(rng, 1.0, 75.0, 2.0),
-            "ra": float(rng.uniform(0.0, 2.0 * np.pi)),
-            "dec": float(np.arcsin(rng.uniform(-1.0, 1.0))),
-            "psi": float(rng.uniform(0.0, np.pi)),
-            "phase_c": float(rng.uniform(0.0, 2.0 * np.pi)),
-            "t_c": float(rng.uniform(-0.03, 0.03)),
         }
+        for column, name in enumerate(names):
+            row[name] = prior_ppf(name, float(quantiles[injection_id, column]))
         rows.append(row)
     return rows
 
