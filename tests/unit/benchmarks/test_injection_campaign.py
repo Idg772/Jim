@@ -1,3 +1,4 @@
+import csv
 import json
 from pathlib import Path
 
@@ -130,7 +131,8 @@ def test_status_and_pp_outputs_are_derived_from_compact_summaries(
 ) -> None:
     campaign = _prepared_campaign(tmp_path, n_injections=5)
     manifest = common.load_manifest(campaign)
-    for injection_id in range(5):
+    completed_ids = (1, 3, 4)
+    for injection_id in completed_ids:
         directory = common.result_dir(campaign, injection_id)
         directory.mkdir(parents=True)
         ranks = {
@@ -162,10 +164,15 @@ def test_status_and_pp_outputs_are_derived_from_compact_summaries(
         campaign, pdf_output=tmp_path / "figure-3.pdf"
     )
 
-    assert {row["status"] for row in rows} == {"complete"}
-    assert all(row["attempts"] == 1 for row in rows)
-    assert report["completed_injections"] == 5
-    assert timing_report["completed_injections"] == 5
+    assert {
+        row["injection_id"] for row in rows if row["status"] == "complete"
+    } == set(completed_ids)
+    assert all(
+        row["attempts"] == (1 if row["injection_id"] in completed_ids else 0)
+        for row in rows
+    )
+    assert report["completed_injections"] == len(completed_ids)
+    assert timing_report["completed_injections"] == len(completed_ids)
     for relative in report["outputs"]:
         assert (campaign / relative).is_file()
     assert (campaign / "pp/pp-combined.png").stat().st_size > 0
@@ -173,6 +180,30 @@ def test_status_and_pp_outputs_are_derived_from_compact_summaries(
     assert (campaign / "timing/figure-3-equivalent.png").stat().st_size > 0
     assert (campaign / "timing/figure-3-summary.csv").is_file()
     assert (tmp_path / "figure-3.pdf").stat().st_size > 0
+
+    with (campaign / "pp/summary.csv").open(newline="", encoding="utf-8") as stream:
+        summary_rows = {row["parameter"]: row for row in csv.DictReader(stream)}
+    catalogue = common.read_catalogue(campaign / "catalogue.csv")
+    # M_c is PARAMETERS[0], so its fake rank for injection i is (i % 5) / 5.
+    expected_residual = float(
+        np.mean(
+            [
+                (injection_id % 5) / 5
+                - common.prior_cdf("M_c", catalogue[injection_id]["M_c"])
+                for injection_id in completed_ids
+            ]
+        )
+    )
+    mc_row = summary_rows["M_c"]
+    assert {
+        "truth_ks_statistic",
+        "truth_ks_pvalue",
+        "residual_mean",
+        "residual_stderr",
+    } <= set(mc_row)
+    np.testing.assert_allclose(
+        float(mc_row["residual_mean"]), expected_residual, atol=1e-12
+    )
 
 
 def test_completed_result_must_match_campaign_hash(tmp_path: Path) -> None:

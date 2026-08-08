@@ -16,6 +16,8 @@ from benchmarks.injection_campaign.common import (
     atomic_write_csv,
     file_sha256,
     load_manifest,
+    prior_cdf,
+    read_catalogue,
     result_dir,
 )
 
@@ -31,6 +33,10 @@ SUMMARY_FIELDS = (
     "cdf_at_90",
     "ks_statistic",
     "ks_pvalue",
+    "truth_ks_statistic",
+    "truth_ks_pvalue",
+    "residual_mean",
+    "residual_stderr",
 )
 
 
@@ -110,9 +116,20 @@ def aggregate_and_plot(campaign_dir: Path) -> dict[str, Any]:
         name: np.asarray([row[name] for row in rows], dtype=float)
         for name in PARAMETERS
     }
+    catalogue = read_catalogue(campaign_dir / manifest["catalogue"]["path"])
+    truth_by_id = {row["injection_id"]: row for row in catalogue}
+    truth_quantiles = {
+        name: np.asarray(
+            [prior_cdf(name, truth_by_id[row["injection_id"]][name]) for row in rows],
+            dtype=float,
+        )
+        for name in PARAMETERS
+    }
     summaries = []
     for name, ranks in rank_arrays.items():
         ks = kstest(ranks, "uniform")
+        residual = ranks - truth_quantiles[name]
+        truth_ks = kstest(truth_quantiles[name], "uniform")
         summaries.append(
             {
                 "parameter": name,
@@ -122,6 +139,12 @@ def aggregate_and_plot(campaign_dir: Path) -> dict[str, Any]:
                 "cdf_at_90": float(np.mean(ranks <= 0.9)),
                 "ks_statistic": float(ks.statistic),
                 "ks_pvalue": float(ks.pvalue),
+                "truth_ks_statistic": float(truth_ks.statistic),
+                "truth_ks_pvalue": float(truth_ks.pvalue),
+                "residual_mean": float(np.mean(residual)),
+                "residual_stderr": float(
+                    np.std(residual, ddof=1) / np.sqrt(residual.size)
+                ),
             }
         )
     atomic_write_csv(output_dir / "summary.csv", summaries, SUMMARY_FIELDS)

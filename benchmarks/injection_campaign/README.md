@@ -75,6 +75,12 @@ The compact tracking artifacts are:
 - `pp/ranks.csv`, `pp/summary.csv`, `pp-combined.png`, and `pp-grid.png`.
 - `timing/figure-3-summary.csv` and `timing/figure-3-equivalent.png`.
 
+Calibration-specific configuration and outputs:
+
+- New manifests set `time_marginalization_upsample_factor` to 32; older manifests without the key retain the original factor of 1.
+- New catalogues use an independently shuffled Latin hypercube for every parameter, so each marginal covers every prior stratum once.
+- `pp/summary.csv` reports truth-draw KS statistics and rank-minus-truth-quantile residual means and standard errors.
+
 Profiles, HLO, per-slice arrays, successful logs, and copied strain buffers are
 deliberately not retained.
 
