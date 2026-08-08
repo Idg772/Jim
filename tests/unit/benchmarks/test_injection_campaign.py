@@ -111,7 +111,7 @@ def test_time_jitter_extends_recovery_prior_and_periodic_bounds() -> None:
     )
 
     prior, periodic = _recovery_sampling_components(
-        original_prior, original_periodic, likelihood
+        original_prior, original_periodic, likelihood, {}
     )
 
     assert prior.parameter_names == (*physical_names, "time_jitter")
@@ -141,12 +141,71 @@ def test_recovery_components_leave_non_jitter_campaigns_unchanged() -> None:
         original_prior,
         original_periodic,
         SimpleNamespace(jitter_time=False),
+        {},
     )
 
     assert prior is original_prior
     assert periodic == original_periodic
     assert "time_jitter" not in prior.parameter_names
     assert "time_jitter" not in periodic
+
+
+def test_likelihood_time_settings_selects_sampled_coalescence_time() -> None:
+    from benchmarks.injection_campaign.run_injection import _likelihood_time_settings
+
+    assert _likelihood_time_settings({"sample_coalescence_time": True}) is None
+
+    legacy = {
+        "time_marginalization_tc_range_seconds": [-0.03, 0.03],
+        "time_marginalization_jitter_time": True,
+    }
+    assert _likelihood_time_settings(legacy) == {
+        "tc_range": (-0.03, 0.03),
+        "upsample_factor": 1,
+        "jitter_time": True,
+    }
+
+
+def test_sampled_tc_extends_recovery_prior_without_periodic_bounds() -> None:
+    from benchmarks.injection_campaign.run_injection import (
+        _recovery_sampling_components,
+    )
+
+    physical_names = tuple(f"physical_{index:02d}" for index in range(15))
+    original_prior = CombinePrior(
+        [UniformPrior(0.0, 1.0, parameter_names=[name]) for name in physical_names]
+    )
+    original_periodic = {physical_names[0]: (0.0, 1.0)}
+    config = {
+        "sample_coalescence_time": True,
+        "coalescence_time_range_seconds": [-0.03, 0.03],
+    }
+
+    prior, periodic = _recovery_sampling_components(
+        original_prior,
+        original_periodic,
+        SimpleNamespace(jitter_time=False),
+        config,
+    )
+
+    assert prior.parameter_names == (*physical_names, "t_c")
+    assert len(prior.parameter_names) == 16
+    assert prior.base_prior[-1].parameter_names == ("t_c",)
+    assert prior.base_prior[-1].xmin == -0.03
+    assert prior.base_prior[-1].xmax == 0.03
+    assert periodic == original_periodic
+    assert "t_c" not in periodic
+    assert original_prior.parameter_names == physical_names
+
+
+def test_ranked_parameters_include_tc_only_when_sampled() -> None:
+    from benchmarks.injection_campaign.run_injection import _ranked_parameters
+
+    assert _ranked_parameters({}) == common.PARAMETERS
+    assert _ranked_parameters({"sample_coalescence_time": True}) == (
+        *common.PARAMETERS,
+        "t_c",
+    )
 
 
 def test_prior_ppf_and_cdf_are_inverse() -> None:

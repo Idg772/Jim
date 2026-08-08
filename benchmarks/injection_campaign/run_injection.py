@@ -144,17 +144,41 @@ def _time_marginalization_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _likelihood_time_settings(config: dict[str, Any]) -> dict[str, Any] | None:
+    """Time-marginalization settings, or None when t_c is sampled instead."""
+
+    if config.get("sample_coalescence_time", False):
+        return None
+    return _time_marginalization_config(config)
+
+
+def _ranked_parameters(config: dict[str, Any]) -> tuple[str, ...]:
+    """Parameters whose posterior ranks feed the P-P test."""
+
+    if config.get("sample_coalescence_time", False):
+        return (*PARAMETERS, "t_c")
+    return PARAMETERS
+
+
 def _recovery_sampling_components(
     prior: Any,
     periodic: dict[str, tuple[float, float]],
     likelihood: Any,
+    config: dict[str, Any],
 ) -> tuple[Any, dict[str, tuple[float, float]]]:
-    """Add the sampled one-cell time shift when jitter is enabled."""
+    """Add the sampled coalescence time or the legacy one-cell time shift."""
+
+    from jimgw.core.prior import CombinePrior, UniformPrior
+
+    if config.get("sample_coalescence_time", False):
+        low, high = (
+            float(value) for value in config["coalescence_time_range_seconds"]
+        )
+        tc_prior = UniformPrior(low, high, parameter_names=["t_c"])
+        return CombinePrior([*prior.base_prior, tc_prior]), dict(periodic)
 
     if not likelihood.jitter_time:
         return prior, dict(periodic)
-
-    from jimgw.core.prior import CombinePrior, UniformPrior
 
     bounds = tuple(float(value) for value in likelihood.time_jitter_bounds)
     jitter_prior = UniformPrior(*bounds, parameter_names=["time_jitter"])
@@ -264,10 +288,10 @@ def run_injection(args: argparse.Namespace) -> dict[str, Any]:
         f_min=float(config["f_min_hz"]),
         f_max=float(config["f_max_hz"]),
         phase_marginalization=True,
-        time_marginalization=_time_marginalization_config(config),
+        time_marginalization=_likelihood_time_settings(config),
     )
     recovery_prior, recovery_periodic = _recovery_sampling_components(
-        components["prior"], components["periodic"], likelihood
+        components["prior"], components["periodic"], likelihood, config
     )
     sampler_config = BlackJAXSwiGConfig(
         blocks=config["blocks"],
@@ -301,7 +325,8 @@ def run_injection(args: argparse.Namespace) -> dict[str, Any]:
     extraction_started = time.perf_counter()
     diagnostics = jim.get_diagnostics()
     samples = {name: np.asarray(values) for name, values in jim.get_samples().items()}
-    missing = sorted(set(PARAMETERS) - samples.keys())
+    ranked = _ranked_parameters(config)
+    missing = sorted(set(ranked) - samples.keys())
     if missing:
         raise RuntimeError("posterior is missing parameters: " + ", ".join(missing))
     counts = {name: int(values.shape[0]) for name, values in samples.items()}
@@ -311,7 +336,7 @@ def run_injection(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError(f"invalid posterior array shapes: {counts}")
     atomic_savez_compressed(posterior_path, samples)
     ranks = {
-        name: posterior_rank(samples[name], float(truth[name])) for name in PARAMETERS
+        name: posterior_rank(samples[name], float(truth[name])) for name in ranked
     }
     extraction_seconds = time.perf_counter() - extraction_started
 
