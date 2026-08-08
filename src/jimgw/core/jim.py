@@ -10,7 +10,7 @@ from ripplegw.interfaces import Waveform
 
 from jimgw._logging import ensure_logger_handler
 from jimgw.core.base import LikelihoodBase
-from jimgw.core.prior import Prior
+from jimgw.core.prior import Prior, UniformPrior, find_specific_prior
 from jimgw.core.single_event.blocked_likelihood import (
     _build_rebuild_required_by_block,
     _validate_parameter_blocks,
@@ -284,6 +284,19 @@ class Jim:
                         "or from fixed_parameters."
                     )
 
+            if "time_jitter" in likelihood.likelihood_only_parameter_names:
+                time_jitter_prior = find_specific_prior(prior, "time_jitter")
+                expected_bounds = getattr(likelihood, "time_jitter_bounds", None)
+                if (
+                    not isinstance(time_jitter_prior, UniformPrior)
+                    or expected_bounds is None
+                    or time_jitter_prior.get_bounds() != expected_bounds
+                ):
+                    raise ValueError(
+                        "time_jitter must have a UniformPrior with the exact bounds "
+                        f"{expected_bounds} required by the coarse FFT cell."
+                    )
+
             # Waveforms that publish a `parameter_names` attribute can be
             # cross-checked against the prior.
             wf_param_names = getattr(likelihood.waveform, "parameter_names", None)
@@ -291,6 +304,7 @@ class Jim:
                 consumed: set[str] = set(wf_param_names)
                 consumed |= {"ra", "dec", "psi", "t_c"}
                 consumed -= marginalized_names
+                consumed |= set(likelihood.likelihood_only_parameter_names)
 
                 provided = set(self.likelihood_parameter_names)
                 if likelihood.fixed_parameters:

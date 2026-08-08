@@ -83,6 +83,68 @@ def _build_time_marginalization_fine_window(
     return fine_candidates, fine_mask, fine_step
 
 
+def _build_time_marginalization_jitter_window(
+    n_total: int,
+    duration: float,
+    tc_range: tuple[float, float],
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Return FFT storage candidates that a one-cell jitter can move in range."""
+    time_step = duration / n_total
+    half_width = 0.5 * time_step
+    storage_indices = np.arange(n_total, dtype=int)
+    q_max = (n_total - 1) // 2
+    signed_indices = np.where(
+        storage_indices <= q_max,
+        storage_indices,
+        storage_indices - n_total,
+    )
+    candidate_times = signed_indices * time_step
+    if not tc_range[0] < tc_range[1]:
+        empty = np.empty(0, dtype=int)
+        return empty, np.empty(0, dtype=float), half_width
+    support_low = -0.5 * duration
+    support_high = 0.5 * duration
+    clipped_low = max(tc_range[0], support_low)
+    clipped_high = min(tc_range[1], support_high)
+    if not clipped_low < clipped_high:
+        empty = np.empty(0, dtype=int)
+        return empty, np.empty(0, dtype=float), half_width
+
+    cell_low = candidate_times - half_width
+    cell_high = candidate_times + half_width
+    can_enter = np.zeros(n_total, dtype=bool)
+    # Cells adjacent to the signed FFT seam wrap by one duration. Keeping a
+    # conservative superset here lets the dynamic mask below retain exact
+    # strict-boundary semantics for every sampled jitter.
+    for period_shift in (-duration, 0.0, duration):
+        can_enter |= (cell_high + period_shift > clipped_low) & (
+            cell_low + period_shift < clipped_high
+        )
+    # For odd N, the positive endpoint reaches +D/2 only at δ=+dt/2,
+    # which canonicalizes to -D/2. Preserve that exact endpoint whenever the
+    # strict requested interval contains it.
+    if n_total % 2 == 1 and tc_range[0] < support_low < tc_range[1]:
+        can_enter[q_max] = True
+    return storage_indices[can_enter], candidate_times[can_enter], half_width
+
+
+def _canonicalize_time_jitter(
+    time_jitter: FloatScalar, half_width: float
+) -> FloatScalar:
+    """Map a sampled jitter onto its half-open periodic FFT cell."""
+    period = 2.0 * half_width
+    canonical = jnp.where(
+        time_jitter >= half_width,
+        time_jitter - period,
+        time_jitter,
+    )
+    return jnp.where(
+        canonical < -half_width,
+        canonical + period,
+        canonical,
+    )
+
+
 class SingleEventLikelihood(LikelihoodBase):
     detectors: Sequence[Detector]
     waveform: Waveform
@@ -100,6 +162,11 @@ class SingleEventLikelihood(LikelihoodBase):
     def detector_names(self) -> list[str]:
         """Names of the detectors used in this likelihood."""
         return [detector.name for detector in self.detectors]
+
+    @property
+    def likelihood_only_parameter_names(self) -> tuple[str, ...]:
+        """Sampled parameters consumed by the likelihood but not its waveform."""
+        return ()
 
     def __init__(
         self,
@@ -435,6 +502,13 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         if distance_marginalization is not None:
             self._init_distance_marginalization(distance_marginalization)
 
+    @property
+    def likelihood_only_parameter_names(self) -> tuple[str, ...]:
+        """Parameters used by reductions after waveform generation."""
+        if self.time_marginalization and self.jitter_time:
+            return ("time_jitter",)
+        return ()
+
     # --- direct evaluation ---
 
     def _evaluate(self, params: dict[str, Float]) -> FloatScalar:
@@ -535,10 +609,20 @@ class TransientLikelihoodFD(SingleEventLikelihood):
 
             if self.phase_marginalization:
                 # joint time + phase marginalization
-                log_likelihood += self._reduce_phase_time(complex_d_inner_h)
+                if self.jitter_time:
+                    log_likelihood += self._reduce_phase_time_jitter(
+                        complex_d_inner_h, params["time_jitter"]
+                    )
+                else:
+                    log_likelihood += self._reduce_phase_time(complex_d_inner_h)
             else:
                 # time only marginalization
-                log_likelihood += self._reduce_time(complex_d_inner_h)
+                if self.jitter_time:
+                    log_likelihood += self._reduce_time_jitter(
+                        complex_d_inner_h, params["time_jitter"]
+                    )
+                else:
+                    log_likelihood += self._reduce_time(complex_d_inner_h)
             return log_likelihood
 
         elif self.phase_marginalization or self.distance_marginalization:
@@ -595,6 +679,12 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         if "t_c" in self.fixed_parameters:
             raise ValueError("Cannot have t_c fixed while marginalizing over t_c")
         self.tc_range = config.tc_range
+        self.jitter_time = config.jitter_time
+        if self.jitter_time and "time_jitter" in self.fixed_parameters:
+            raise ValueError(
+                "time_jitter must be sampled when jitter_time is enabled; "
+                "it cannot be fixed."
+            )
         fs = self.detectors[0].data.sampling_frequency
         duration = self.detectors[0].data.duration
         self.tc_array = jnp.fft.fftfreq(int(duration * fs / 2), 1.0 / duration)
@@ -604,7 +694,23 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         )
         self._tc_window_indices = jnp.asarray(tc_window)
         self.tc_upsample = int(config.upsample_factor)
-        if self.tc_upsample == 1 and tc_window.size == 0:
+        if self.jitter_time:
+            jitter_indices, jitter_times, jitter_half_width = (
+                _build_time_marginalization_jitter_window(
+                    len(tc_array), float(duration), self.tc_range
+                )
+            )
+            if jitter_indices.size == 0:
+                raise ValueError(
+                    f"time_marginalization tc_range {self.tc_range} contains no "
+                    "jittered FFT time samples; widen the range."
+                )
+            self._tc_jitter_candidate_indices = jnp.asarray(jitter_indices)
+            self._tc_jitter_candidate_times = jnp.asarray(jitter_times)
+            self.time_jitter_half_width = jitter_half_width
+            self.time_jitter_bounds = (-jitter_half_width, jitter_half_width)
+            self._marg_frequencies = jnp.arange(len(tc_array)) / duration
+        if self.tc_upsample == 1 and not self.jitter_time and tc_window.size == 0:
             raise ValueError(
                 f"time_marginalization tc_range {self.tc_range} contains no FFT "
                 "time samples; widen the range."
@@ -618,7 +724,7 @@ class TransientLikelihoodFD(SingleEventLikelihood):
                 _build_time_marginalization_fine_window(
                     n_total,
                     self.tc_upsample,
-                    duration,
+                    float(duration),
                     self.tc_range,
                 )
             )
@@ -675,6 +781,46 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         fft_d_inner_h = jnp.fft.fft(complex_d_inner_h_positive_f, norm="backward")
         window = fft_d_inner_h.real[self._tc_window_indices]
         return logsumexp(window) - jnp.log(len(self.tc_array))
+
+    def _jittered_window_fft(
+        self,
+        complex_d_inner_h: Float[Array, " n_freq"],
+        time_jitter: FloatScalar,
+    ) -> tuple[Complex[Array, " n_window"], Array]:
+        """Evaluate one phase-ramped FFT and its exact shifted-window mask."""
+        time_jitter = _canonicalize_time_jitter(
+            time_jitter, self.time_jitter_half_width
+        )
+        padded = jnp.concatenate((self.pad_low, complex_d_inner_h, self.pad_high))
+        angle = (-2.0 * jnp.pi) * self._marg_frequencies * time_jitter
+        shifted = padded * jax.lax.complex(jnp.cos(angle), jnp.sin(angle))
+        fft_d_inner_h = jnp.fft.fft(shifted, norm="backward")
+        window = fft_d_inner_h[self._tc_jitter_candidate_indices]
+        shifted_times = self._tc_jitter_candidate_times + time_jitter
+        half_duration = 0.5 * self.duration
+        shifted_times = jnp.where(
+            shifted_times >= half_duration,
+            shifted_times - self.duration,
+            shifted_times,
+        )
+        shifted_times = jnp.where(
+            shifted_times < -half_duration,
+            shifted_times + self.duration,
+            shifted_times,
+        )
+        mask = (shifted_times > self.tc_range[0]) & (shifted_times < self.tc_range[1])
+        return window, mask
+
+    def _reduce_time_jitter(
+        self,
+        complex_d_inner_h: Float[Array, " n_freq"],
+        time_jitter: FloatScalar,
+    ) -> FloatScalar:
+        """Single-FFT time marginalization on a sampled shifted time grid."""
+        window, mask = self._jittered_window_fft(complex_d_inner_h, time_jitter)
+        return logsumexp(jnp.where(mask, window.real, -jnp.inf)) - jnp.log(
+            len(self.tc_array)
+        )
 
     # --- phase marginalization helpers ---
 
@@ -766,6 +912,17 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         fft_d_inner_h = jnp.fft.fft(complex_d_inner_h_positive_f, norm="backward")
         window = jnp.absolute(fft_d_inner_h[self._tc_window_indices])
         return logsumexp(log_i0(window)) - jnp.log(len(self.tc_array))
+
+    def _reduce_phase_time_jitter(
+        self,
+        complex_d_inner_h: Float[Array, " n_freq"],
+        time_jitter: FloatScalar,
+    ) -> FloatScalar:
+        """Single-FFT phase-time marginalization on a shifted time grid."""
+        window, mask = self._jittered_window_fft(complex_d_inner_h, time_jitter)
+        return logsumexp(
+            jnp.where(mask, log_i0(jnp.absolute(window)), -jnp.inf)
+        ) - jnp.log(len(self.tc_array))
 
     def _reduce_phase_distance(
         self,

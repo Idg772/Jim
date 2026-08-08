@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from jimgw.core.prior import Prior
 
@@ -19,6 +19,13 @@ class TimeMargConfig(BaseModel):
     model_config = {"extra": "forbid"}
     tc_range: tuple[float, float] = (-0.1, 0.1)
     upsample_factor: int = Field(default=1, ge=1)
+    jitter_time: bool = False
+
+    @model_validator(mode="after")
+    def _validate_jitter_upsampling_exclusion(self) -> "TimeMargConfig":
+        if self.jitter_time and self.upsample_factor > 1:
+            raise ValueError("jitter_time cannot be combined with upsample_factor > 1")
+        return self
 
 
 class DistanceMargConfig(BaseModel):

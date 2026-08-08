@@ -18,6 +18,8 @@ from jimgw.core.single_event.likelihood import (
     TransientLikelihoodFD,
     ZeroLikelihood,
     _build_time_marginalization_fine_window,
+    _build_time_marginalization_jitter_window,
+    _canonicalize_time_jitter,
 )
 from jimgw.core.single_event.time_utils import (
     greenwich_mean_sidereal_time as compute_gmst,
@@ -109,6 +111,59 @@ def test_upsampled_fine_window_returns_empty_for_invalid_range(tc_range):
 
     assert candidates.size == 0
     assert fine_mask.shape == (2, 0)
+
+
+@pytest.mark.parametrize(
+    ("n_total", "tc_range", "expected_indices", "expected_times"),
+    [
+        (3, (-1.6, -1.3), [1, 2], [1.0, -1.0]),
+        (4, (1.25, 2.1), [1, 2], [1.0, -2.0]),
+        (4, (1.5, 1.75), [2], [-2.0]),
+    ],
+)
+def test_jitter_window_handles_odd_even_wrap_and_strict_boundaries(
+    n_total, tc_range, expected_indices, expected_times
+):
+    indices, times, half_width = _build_time_marginalization_jitter_window(
+        n_total=n_total,
+        duration=float(n_total),
+        tc_range=tc_range,
+    )
+
+    assert half_width == 0.5
+    np.testing.assert_array_equal(indices, np.asarray(expected_indices))
+    np.testing.assert_array_equal(times, np.asarray(expected_times))
+
+
+@pytest.mark.parametrize(
+    "tc_range",
+    [
+        (1e300, 1e301),
+        (np.nan, 0.0),
+        (0.0, np.nan),
+        (1.0, -1.0),
+    ],
+)
+def test_jitter_window_returns_empty_for_invalid_or_unreachable_range(tc_range):
+    indices, times, _ = _build_time_marginalization_jitter_window(
+        n_total=5,
+        duration=5.0,
+        tc_range=tc_range,
+    )
+
+    assert indices.size == 0
+    assert times.size == 0
+
+
+def test_time_jitter_canonicalizes_odd_nonbinary_cell_endpoint() -> None:
+    n_total = 13
+    duration = 2.4829141485514503
+    half_width = duration / (2 * n_total)
+
+    lower = _canonicalize_time_jitter(jnp.asarray(-half_width), half_width)
+    upper = _canonicalize_time_jitter(jnp.asarray(half_width), half_width)
+
+    assert float(upper) == float(lower)
 
 
 def test_inner_product_matches_real_part_of_complex_inner_product():
@@ -522,6 +577,101 @@ class TestTransientLikelihoodFD:
             (7,): False,
         }
 
+    def test_time_jitter_block_reuses_waveform_cache(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            phase_marginalization=True,
+            time_marginalization={"jitter_time": True},
+        )
+        jitter_lo, jitter_hi = likelihood.time_jitter_bounds
+        prior = CombinePrior(
+            [
+                base_prior
+                for base_prior in _waveform_cache_prior().base_prior
+                if base_prior.parameter_names != ("t_c",)
+            ]
+            + [
+                UniformPrior(100.0, 1000.0, parameter_names=["d_L"]),
+                UniformPrior(
+                    jitter_lo,
+                    jitter_hi,
+                    parameter_names=["time_jitter"],
+                ),
+            ]
+        )
+        blocks = [
+            ["M_c", "q"],
+            ["s1_z", "s2_z"],
+            ["iota"],
+            ["d_L"],
+            ["ra", "dec"],
+            ["psi"],
+            ["time_jitter"],
+        ]
+
+        jim = Jim(
+            likelihood,
+            prior,
+            BlackJAXSwiGConfig(blocks=blocks, n_live=8, n_delete_frac=0.25),
+            likelihood_transforms=[MassRatioToSymmetricMassRatioTransform],
+            periodic={"time_jitter": likelihood.time_jitter_bounds},
+        )
+
+        jitter_index = jim.sampling_parameter_names.index("time_jitter")
+        assert jim._rebuild_required_by_block[(jitter_index,)] is False
+
+    def test_time_jitter_prior_must_use_exact_coarse_cell_bounds(
+        self, detectors_and_waveform
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            phase_marginalization=True,
+            time_marginalization={"jitter_time": True},
+        )
+        jitter_lo, jitter_hi = likelihood.time_jitter_bounds
+        prior = CombinePrior(
+            [
+                base_prior
+                for base_prior in _waveform_cache_prior().base_prior
+                if base_prior.parameter_names != ("t_c",)
+            ]
+            + [
+                UniformPrior(100.0, 1000.0, parameter_names=["d_L"]),
+                UniformPrior(
+                    2.0 * jitter_lo,
+                    2.0 * jitter_hi,
+                    parameter_names=["time_jitter"],
+                ),
+            ]
+        )
+        blocks = [
+            ["M_c", "q"],
+            ["s1_z", "s2_z"],
+            ["iota"],
+            ["d_L"],
+            ["ra", "dec"],
+            ["psi"],
+            ["time_jitter"],
+        ]
+
+        with pytest.raises(ValueError, match="time_jitter.*exact bounds"):
+            Jim(
+                likelihood,
+                prior,
+                BlackJAXSwiGConfig(blocks=blocks, n_live=8, n_delete_frac=0.25),
+                likelihood_transforms=[MassRatioToSymmetricMassRatioTransform],
+            )
+
     def test_waveform_cache_rejects_non_sampling_parameter_in_blocks(
         self, detectors_and_waveform
     ):
@@ -670,6 +820,264 @@ class TestTransientLikelihoodFD:
             time_marginalization={"tc_range": custom_range},
         )
         assert likelihood.tc_range == custom_range
+
+    def test_time_jitter_is_opt_in(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+
+        default = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={},
+        )
+        jittered = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={"jitter_time": True},
+        )
+
+        assert default.jitter_time is False
+        assert jittered.jitter_time is True
+
+    def test_time_jitter_rejects_deterministic_upsampling(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+
+        with pytest.raises(ValueError, match="jitter_time.*upsample_factor"):
+            TransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                time_marginalization={
+                    "jitter_time": True,
+                    "upsample_factor": 2,
+                },
+            )
+
+    def test_time_jitter_cannot_be_fixed(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+
+        with pytest.raises(ValueError, match="time_jitter.*sampled"):
+            TransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                fixed_parameters={"time_jitter": 0.0},
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                time_marginalization={"jitter_time": True},
+            )
+
+    def test_jittered_reduction_matches_direct_fft(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={
+                "jitter_time": True,
+                "tc_range": (-0.037, 0.029),
+            },
+        )
+        rng = np.random.default_rng(24)
+        d_inner_h = jnp.asarray(
+            rng.normal(size=len(likelihood.frequencies))
+            + 1j * rng.normal(size=len(likelihood.frequencies))
+        )
+        jitter = 0.37 * likelihood.time_jitter_half_width
+
+        padded = jnp.concatenate((likelihood.pad_low, d_inner_h, likelihood.pad_high))
+        frequencies = jnp.arange(padded.size) / float(likelihood.duration)
+        shifted = padded * jnp.exp(-2j * jnp.pi * frequencies * jitter)
+        fft_ref = jnp.fft.fft(shifted, norm="backward")
+        in_window = (likelihood.tc_array + jitter > likelihood.tc_range[0]) & (
+            likelihood.tc_array + jitter < likelihood.tc_range[1]
+        )
+        norm = jnp.log(len(likelihood.tc_array))
+
+        time_ref = logsumexp(jnp.where(in_window, fft_ref.real, -jnp.inf)) - norm
+        phase_time_ref = (
+            logsumexp(
+                jnp.where(
+                    in_window,
+                    log_i0(jnp.absolute(fft_ref)),
+                    -jnp.inf,
+                )
+            )
+            - norm
+        )
+
+        np.testing.assert_allclose(
+            likelihood._reduce_time_jitter(d_inner_h, jitter), time_ref, rtol=1e-12
+        )
+        np.testing.assert_allclose(
+            likelihood._reduce_phase_time_jitter(d_inner_h, jitter),
+            phase_time_ref,
+            rtol=1e-12,
+        )
+
+    def test_time_jitter_evaluation_requires_sampled_parameter(
+        self, detectors_and_waveform
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={"jitter_time": True},
+        )
+
+        with pytest.raises(KeyError, match="time_jitter"):
+            likelihood.evaluate(example_params())
+
+    def test_time_jitter_cell_endpoints_are_periodic_relabels(
+        self, detectors_and_waveform
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        duration = float(ifos[0].data.duration)
+        n_total = int(duration * ifos[0].data.sampling_frequency / 2)
+        dt = duration / n_total
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={
+                "jitter_time": True,
+                "tc_range": (duration / 2 - 0.75 * dt, duration / 2 + 0.1 * dt),
+            },
+        )
+        rng = np.random.default_rng(51)
+        d_inner_h = jnp.asarray(
+            rng.normal(size=len(likelihood.frequencies))
+            + 1j * rng.normal(size=len(likelihood.frequencies))
+        )
+
+        for reduce in (
+            likelihood._reduce_time_jitter,
+            likelihood._reduce_phase_time_jitter,
+        ):
+            at_lower_edge = reduce(d_inner_h, -0.5 * dt)
+            at_upper_edge = reduce(d_inner_h, 0.5 * dt)
+            np.testing.assert_allclose(
+                at_lower_edge,
+                at_upper_edge,
+                rtol=1e-12,
+                atol=1e-12,
+            )
+
+    def test_time_jitter_bounds_are_exactly_one_coarse_cell(
+        self, detectors_and_waveform
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={"jitter_time": True},
+        )
+        dt = float(likelihood.duration) / len(likelihood.tc_array)
+
+        assert likelihood.time_jitter_bounds == (-0.5 * dt, 0.5 * dt)
+
+    def test_jitter_average_matches_evenly_upsampled_time_grid(
+        self, detectors_and_waveform
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        upsample = 4
+        jittered = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={
+                "jitter_time": True,
+                "tc_range": (-np.inf, np.inf),
+            },
+        )
+        fine = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={
+                "upsample_factor": upsample,
+                "tc_range": (-np.inf, np.inf),
+            },
+        )
+        rng = np.random.default_rng(72)
+        d_inner_h = jnp.asarray(
+            rng.normal(size=len(jittered.frequencies))
+            + 1j * rng.normal(size=len(jittered.frequencies))
+        )
+        dt = float(jittered.duration) / len(jittered.tc_array)
+        offsets = ((np.arange(upsample) / upsample + 0.5) % 1.0 - 0.5) * dt
+
+        for jitter_reduce, fine_reduce in (
+            (jittered._reduce_time_jitter, fine._reduce_time),
+            (jittered._reduce_phase_time_jitter, fine._reduce_phase_time),
+        ):
+            jitter_values = jnp.asarray(
+                [jitter_reduce(d_inner_h, offset) for offset in offsets]
+            )
+            jitter_average = logsumexp(jitter_values) - jnp.log(upsample)
+            np.testing.assert_allclose(
+                jitter_average,
+                fine_reduce(d_inner_h),
+                rtol=1e-12,
+                atol=1e-12,
+            )
+
+    def test_integrated_time_jitter_removes_loud_grid_alignment_swing(
+        self, detectors_and_waveform
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={"jitter_time": True},
+        )
+        frequencies = likelihood.frequencies
+        dt = float(likelihood.duration) / len(likelihood.tc_array)
+        amplitude = 16000.0 / len(frequencies)
+        n_jitter = 256
+        jitter_offsets = ((np.arange(n_jitter) + 0.5) / n_jitter - 0.5) * dt
+
+        @jax.jit
+        def integrated_value(d_inner_h):
+            values = jax.vmap(
+                lambda jitter: likelihood._reduce_phase_time_jitter(d_inner_h, jitter)
+            )(jnp.asarray(jitter_offsets))
+            return logsumexp(values) - jnp.log(n_jitter)
+
+        non_aliasing_offsets = np.asarray(
+            [0.071, 0.193, 0.337, 0.481, 0.619, 0.743, 0.887]
+        )
+        values = []
+        for offset in non_aliasing_offsets:
+            d_inner_h = amplitude * jnp.exp(2j * jnp.pi * frequencies * (offset * dt))
+            values.append(float(integrated_value(d_inner_h)))
+
+        swing = float(np.ptp(values))
+        assert swing < 1.0, f"loud integrated jitter swing was {swing}"
 
     def test_time_marg_upsample_factor_validation(self, detectors_and_waveform):
         ifos, waveform, fmin, fmax, gps = detectors_and_waveform
@@ -920,6 +1328,49 @@ class TestTransientLikelihoodFD:
             float(ref_phase_time),
             rtol=1e-12,
         )
+
+    def test_default_u1_reducer_jaxprs_match_legacy_single_fft_path(
+        self, detectors_and_waveform
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={},
+        )
+        d_inner_h = jnp.ones(len(likelihood.frequencies), dtype=jnp.complex128)
+
+        def legacy_time(value):
+            padded = jnp.concatenate((likelihood.pad_low, value, likelihood.pad_high))
+            fft_d_inner_h = jnp.fft.fft(padded, norm="backward")
+            window = fft_d_inner_h.real[likelihood._tc_window_indices]
+            return logsumexp(window) - jnp.log(len(likelihood.tc_array))
+
+        def legacy_phase_time(value):
+            padded = jnp.concatenate((likelihood.pad_low, value, likelihood.pad_high))
+            fft_d_inner_h = jnp.fft.fft(padded, norm="backward")
+            window = jnp.absolute(fft_d_inner_h[likelihood._tc_window_indices])
+            return logsumexp(log_i0(window)) - jnp.log(len(likelihood.tc_array))
+
+        assert str(jax.make_jaxpr(likelihood._reduce_time)(d_inner_h)) == str(
+            jax.make_jaxpr(legacy_time)(d_inner_h)
+        )
+        assert str(jax.make_jaxpr(likelihood._reduce_phase_time)(d_inner_h)) == str(
+            jax.make_jaxpr(legacy_phase_time)(d_inner_h)
+        )
+
+        def hlo_body(fn):
+            def reducer(value):
+                return fn(value)
+
+            hlo = jax.jit(reducer).lower(d_inner_h).compiler_ir(dialect="hlo")
+            return hlo.as_hlo_text()
+
+        assert hlo_body(likelihood._reduce_time) == hlo_body(legacy_time)
+        assert hlo_body(likelihood._reduce_phase_time) == hlo_body(legacy_phase_time)
 
     def test_empty_tc_window_raises_at_construction(self, detectors_and_waveform):
         ifos, waveform, fmin, fmax, gps = detectors_and_waveform

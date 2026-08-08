@@ -421,6 +421,7 @@ class TestJimPriorLikelihoodConsistencyChecks:
         self,
         waveform_parameter_names: tuple[str, ...],
         fixed_parameters: Optional[dict] = None,
+        likelihood_only_parameter_names: tuple[str, ...] = (),
     ):
         from jaxtyping import Float
         from ripplegw.interfaces import Waveform as RippleWaveform
@@ -439,14 +440,21 @@ class TestJimPriorLikelihoodConsistencyChecks:
                 return {"p": axis, "c": axis}
 
         class FakeSingleEventLikelihood(SingleEventLikelihood):
-            def __init__(self, waveform, fixed_parameters):
+            def __init__(
+                self, waveform, fixed_parameters, likelihood_only_parameter_names
+            ):
                 self.waveform = waveform
                 self.fixed_parameters = fixed_parameters or {}
+                self._likelihood_only_parameter_names = likelihood_only_parameter_names
                 self.trigger_time = 0.0
                 self.gmst = 0.0
                 self.time_marginalization = False
                 self.phase_marginalization = False
                 self.distance_marginalization = False
+
+            @property
+            def likelihood_only_parameter_names(self) -> tuple[str, ...]:
+                return self._likelihood_only_parameter_names
 
             def _evaluate(self, params) -> Float:
                 return 0.0
@@ -460,6 +468,7 @@ class TestJimPriorLikelihoodConsistencyChecks:
         return FakeSingleEventLikelihood(
             waveform=MockWaveform(waveform_parameter_names),
             fixed_parameters=fixed_parameters or {},
+            likelihood_only_parameter_names=likelihood_only_parameter_names,
         )
 
     def test_prior_shadows_fixed_parameter_raises(self):
@@ -486,6 +495,25 @@ class TestJimPriorLikelihoodConsistencyChecks:
             waveform_parameter_names=("M_c", "ra", "dec", "psi", "t_c"),
         )
         with pytest.raises(ValueError, match="not consumed by the likelihood"):
+            Jim(likelihood=lh, prior=prior, sampler_config=_tiny_flowmc_config())
+
+    def test_missing_likelihood_only_parameter_raises(self):
+        prior = CombinePrior(
+            [
+                UniformPrior(10.0, 80.0, parameter_names=["M_c"]),
+                UniformPrior(0.0, 3.14, parameter_names=["ra"]),
+                UniformPrior(-1.57, 1.57, parameter_names=["dec"]),
+                UniformPrior(0.0, 3.14, parameter_names=["psi"]),
+                UniformPrior(-0.1, 0.1, parameter_names=["t_c"]),
+            ]
+        )
+        lh = self._make_mock_single_event_likelihood(
+            waveform_parameter_names=("M_c", "ra", "dec", "psi", "t_c"),
+            likelihood_only_parameter_names=("time_jitter",),
+        )
+        lh.time_jitter_bounds = (-0.01, 0.01)
+
+        with pytest.raises(ValueError, match="time_jitter.*UniformPrior"):
             Jim(likelihood=lh, prior=prior, sampler_config=_tiny_flowmc_config())
 
     def test_likelihood_requires_missing_parameter_raises(self):
