@@ -169,7 +169,9 @@ class TestTransientLikelihoodFD:
         for mask in likelihood.frequency_masks:
             assert bool(jnp.all(mask))
 
-    def test_identical_mask_fast_path_is_bit_identical(self, detectors_and_waveform):
+    def test_identical_mask_time_marg_fast_path_matches_slow_path(
+        self, detectors_and_waveform
+    ):
         ifos, waveform, fmin, fmax, gps = detectors_and_waveform
         kwargs = {
             "detectors": ifos,
@@ -182,13 +184,84 @@ class TestTransientLikelihoodFD:
         }
         fast = TransientLikelihoodFD(**kwargs)
         slow = TransientLikelihoodFD(**kwargs)
-        # Force the pre-change gather/scatter path on one instance; the fast
-        # path must reproduce it exactly (identity gather and all-indices
-        # scatter-add are bit-exact rewrites).
+        # Force the per-detector gather/scatter path on one instance. The
+        # detector-summed fast path reassociates additions, so equivalence is
+        # numerical rather than bit-exact.
         slow._identical_masks = False
         params = example_params()
-        np.testing.assert_array_equal(
-            np.asarray(fast.evaluate(params)), np.asarray(slow.evaluate(params))
+        np.testing.assert_allclose(
+            np.asarray(fast.evaluate(params)),
+            np.asarray(slow.evaluate(params)),
+            rtol=1e-12,
+        )
+
+    def test_time_marg_fast_path_matches_per_detector_reference(
+        self, detectors_and_waveform
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={},
+            phase_marginalization=True,
+        )
+        assert likelihood._identical_masks
+        params = example_params()
+        result = float(likelihood.evaluate(params))
+
+        # Reference: the mixed-grid slow path, which keeps the pre-change
+        # per-detector semantics (scatter accumulation + per-detector
+        # inner_product) and shares Tasks 1-2's pure-function changes, so it
+        # matches the pre-change value to ~1 ulp. Forcing it exercises the
+        # full old code shape end-to-end.
+        reference = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={},
+            phase_marginalization=True,
+        )
+        reference._identical_masks = False
+        np.testing.assert_allclose(
+            result, float(reference.evaluate(params)), rtol=1e-10
+        )
+
+    def test_time_marg_fast_path_emits_optimization_barrier(
+        self, detectors_and_waveform
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={},
+        )
+        jaxpr = jax.make_jaxpr(likelihood.evaluate)(example_params())
+        barriers = [
+            eqn
+            for eqn in jaxpr.jaxpr.eqns
+            if eqn.primitive.name == "optimization_barrier"
+        ]
+        assert len(barriers) == 1
+
+        n_freq = len(likelihood.frequencies)
+        expected_avals = [
+            ((n_freq,), jnp.dtype(jnp.complex128)),
+            ((n_freq,), jnp.dtype(jnp.float64)),
+        ]
+        barrier = barriers[0]
+        assert [(var.aval.shape, var.aval.dtype) for var in barrier.invars] == (
+            expected_avals
+        )
+        assert [(var.aval.shape, var.aval.dtype) for var in barrier.outvars] == (
+            expected_avals
         )
 
     def test_identical_mask_fast_path_plain_likelihood(self, detectors_and_waveform):

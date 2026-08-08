@@ -440,25 +440,53 @@ class TransientLikelihoodFD(SingleEventLikelihood):
 
         # --- choose accumulation type based on flags ---
         if self.time_marginalization:
-            # Per-frequency complex array for FFT-based time marginalization
-            complex_d_inner_h = jnp.zeros(len(self.frequencies), dtype=jnp.complex128)
             log_likelihood: FloatScalar = jnp.zeros(())
-
-            for i, ifo in enumerate(self.detectors):
-                psd = ifo.sliced_psd
-                waveform_sky_ifo = self._sliced_waveform_sky(waveform_sky, i)
-                h_dec = ifo.fd_response(
-                    ifo.sliced_frequencies, waveform_sky_ifo, params
+            if self._identical_masks:
+                # One elementwise pass over the shared grid: the detector-summed
+                # data integrand and the real |h|^2/S integrand. The barrier
+                # stops XLA's reduce-fusion emitter (which caps kernels at 32
+                # registers for occupancy) from swallowing this f64/complex
+                # chain; it compiles as an unconstrained elementwise kernel and
+                # the sums below stay trivially bandwidth-bound.
+                n_freq = len(self.frequencies)
+                complex_d_inner_h = jnp.zeros(n_freq, dtype=jnp.complex128)
+                hh_over_psd = jnp.zeros(n_freq)
+                for i, ifo in enumerate(self.detectors):
+                    h_dec = ifo.fd_response(
+                        ifo.sliced_frequencies,
+                        self._sliced_waveform_sky(waveform_sky, i),
+                        params,
+                    )
+                    complex_d_inner_h = complex_d_inner_h + (
+                        4
+                        * h_dec
+                        * jnp.conj(ifo.sliced_fd_data)
+                        / ifo.sliced_psd
+                        * self.df
+                    )
+                    hh_over_psd = hh_over_psd + (
+                        (h_dec.real**2 + h_dec.imag**2) / ifo.sliced_psd
+                    )
+                complex_d_inner_h, hh_over_psd = jax.lax.optimization_barrier(
+                    (complex_d_inner_h, hh_over_psd)
                 )
-                contribution = 4 * h_dec * jnp.conj(ifo.sliced_fd_data) / psd * self.df
-                if self._identical_masks:
-                    complex_d_inner_h = complex_d_inner_h + contribution
-                else:
+                # sum_k (h_k|h_k)/2 = 2 df * sum(|h|^2/S)
+                log_likelihood += -(2.0 * self.df) * jnp.sum(hh_over_psd)
+            else:
+                complex_d_inner_h = jnp.zeros(
+                    len(self.frequencies), dtype=jnp.complex128
+                )
+                for i, ifo in enumerate(self.detectors):
+                    psd = ifo.sliced_psd
+                    waveform_sky_ifo = self._sliced_waveform_sky(waveform_sky, i)
+                    h_dec = ifo.fd_response(
+                        ifo.sliced_frequencies, waveform_sky_ifo, params
+                    )
                     complex_d_inner_h = complex_d_inner_h.at[
                         self.frequency_masks[i]
-                    ].add(contribution)
-                optimal_SNR = inner_product(h_dec, h_dec, psd, self.df)
-                log_likelihood += -optimal_SNR / 2
+                    ].add(4 * h_dec * jnp.conj(ifo.sliced_fd_data) / psd * self.df)
+                    optimal_SNR = inner_product(h_dec, h_dec, psd, self.df)
+                    log_likelihood += -optimal_SNR / 2
 
             if self.phase_marginalization:
                 # joint time + phase marginalization
