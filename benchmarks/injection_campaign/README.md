@@ -3,11 +3,12 @@
 This directory turns the measured `paper-15d` benchmark into a reproducible,
 resumable injection-recovery campaign. Each recovery uses the benchmark's
 15-dimensional precessing-tidal waveform and physical prior, plus a sampled
-periodic `time_jitter` offset in its own eighth SwiG block. The resulting
+periodic `time_jitter` offset coupled to the mass/tidal SwiG block. The resulting
 16-dimensional sampler uses 512 live points, 64 deletions per outer step, one
-Gibbs sweep, and four-way device sharding. Phase and geocentric time are
-injected but analytically marginalized; `time_jitter` only shifts the numerical
-FFT grid, so the P–P test continues to cover the 15 physical parameters.
+Gibbs sweep across seven blocks, and four-way device sharding. Phase and
+geocentric time are injected but analytically marginalized; `time_jitter` only
+shifts the numerical FFT grid, so the P–P test continues to cover the 15
+physical parameters.
 
 The default noise curves are the Bilby-packaged Advanced LIGO zero-detuned
 high-power and Advanced Virgo design PSDs. `prepare_campaign` interpolates and
@@ -83,7 +84,9 @@ Calibration-specific configuration and outputs:
   `time_marginalization_jitter_time`. The campaign constructs a uniform,
   periodic `time_jitter` prior from the likelihood's one-cell bounds. Sampling
   that offset integrates over grid alignment without the runtime cost of 16 or
-  32 phase-ramped FFTs per likelihood evaluation.
+  32 phase-ramped FFTs per likelihood evaluation. It shares the mass/tidal
+  block so covariance-shaped proposals can follow the high-SNR
+  mass--grid-alignment ridge without adding slice steps.
 - Older manifests without the jitter key retain their stored behavior: missing
   upsampling also means factor 1, while manifests that requested factor 32
   continue to use factor 32 with no sampled jitter.

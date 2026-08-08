@@ -44,11 +44,12 @@ def test_campaign_config_samples_one_cell_time_jitter_without_upsampling() -> No
     assert common.DEFAULT_CONFIG["time_marginalization_jitter_time"] is True
 
 
-def test_campaign_config_gives_time_jitter_its_own_swig_block() -> None:
+def test_campaign_config_couples_time_jitter_to_the_mass_swig_block() -> None:
     blocks = common.DEFAULT_CONFIG["blocks"]
     flattened = [name for block in blocks for name in block]
 
-    assert blocks[-1] == ["time_jitter"]
+    assert blocks[0] == ["M_c", "q", "lambda_1", "lambda_2", "time_jitter"]
+    assert all(block != ["time_jitter"] for block in blocks)
     assert len(flattened) == 16
     assert len(set(flattened)) == 16
 
@@ -204,7 +205,13 @@ def test_prepare_campaign_round_trip_and_input_integrity(tmp_path: Path) -> None
     assert manifest["config"]["n_devices"] == 4
     assert manifest["config"]["time_marginalization_upsample_factor"] == 1
     assert manifest["config"]["time_marginalization_jitter_time"] is True
-    assert manifest["config"]["blocks"][-1] == ["time_jitter"]
+    assert manifest["config"]["blocks"][0] == [
+        "M_c",
+        "q",
+        "lambda_1",
+        "lambda_2",
+        "time_jitter",
+    ]
     assert len(catalogue) == 4
     assert set(catalogue[0]) == set(common.CATALOGUE_FIELDS)
     assert "time_jitter" not in catalogue[0]

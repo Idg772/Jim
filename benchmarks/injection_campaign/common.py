@@ -65,14 +65,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "num_gibbs_sweeps": 1,
     "termination_dlogz": 0.0485873516,
     "blocks": [
-        ["M_c", "q", "lambda_1", "lambda_2"],
+        ["M_c", "q", "lambda_1", "lambda_2", "time_jitter"],
         ["s1_mag", "s1_theta", "s1_phi"],
         ["s2_mag", "s2_theta", "s2_phi"],
         ["iota"],
         ["zenith", "azimuth"],
         ["psi"],
         ["d_L"],
-        ["time_jitter"],
     ],
     "prior": {
         "M_c": {"distribution": "uniform", "range": [1.18, 1.21]},
