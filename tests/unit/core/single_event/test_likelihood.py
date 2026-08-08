@@ -25,12 +25,26 @@ from jimgw.core.single_event.transforms import (
     GeocentricArrivalTimeToDetectorArrivalTimeTransform,
     MassRatioToSymmetricMassRatioTransform,
 )
+from jimgw.core.single_event.utils import complex_inner_product, inner_product
 from jimgw.core.single_event.waveform import RippleIMRPhenomD
 from jimgw.core.utils import log_i0
 from jimgw.samplers.config import BlackJAXSwiGConfig
 from tests.utils import assert_all_finite, common_keys_allclose
 
 FIXTURES_DIR = Path(__file__).parent.parent.parent.parent / "fixtures"
+
+
+def test_inner_product_matches_real_part_of_complex_inner_product():
+    rng = np.random.default_rng(2)
+    n = 1024
+    h1 = jnp.asarray(rng.normal(size=n) + 1j * rng.normal(size=n))
+    h2 = jnp.asarray(rng.normal(size=n) + 1j * rng.normal(size=n))
+    psd = jnp.asarray(rng.uniform(0.5, 2.0, size=n))
+    df = 0.25
+    expected = complex_inner_product(h1, h2, psd, df).real
+    result = inner_product(h1, h2, psd, df)
+    assert jnp.iscomplexobj(result) is False
+    np.testing.assert_allclose(float(result), float(expected), rtol=1e-13)
 
 
 @pytest.fixture

@@ -103,7 +103,9 @@ def inner_product(
 ) -> FloatScalar:
     """Compute the real noise-weighted inner product of two frequency-domain waveforms.
 
-    Returns the real part of `complex_inner_product`:
+    Computes the real part of the complex inner product in real arithmetic,
+    using ``Re[h1* h2] = Re[h1]Re[h2] + Im[h1]Im[h2]`` so the sum does not
+    emit a complex reduction:
 
         $$
 
@@ -124,4 +126,5 @@ def inner_product(
         Float: Real noise-weighted inner product. When both waveforms are equal,
             this equals the optimal SNR squared.
     """
-    return complex_inner_product(h1, h2, psd, df).real
+    integrand = (h1.real * h2.real + h1.imag * h2.imag) / psd
+    return 4.0 * jnp.sum(integrand) * df
