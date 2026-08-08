@@ -53,6 +53,26 @@ jobs:
           COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
         run: uv run --no-sync coveralls
 
+  device-parallel-nested-sampling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Install Python and test dependencies
+        run: |
+          uv python install 3.12
+          uv sync --python 3.12 --group test
+      - name: Run simulated four-device nested-sampling tests
+        env:
+          XLA_FLAGS: --xla_force_host_platform_device_count=4
+        run: |
+          uv run --no-sync pytest \
+            tests/unit/samplers/blackjax/test_sharding.py \
+            tests/integration/test_sampler_sharding.py \
+            -v --tb=short
+
   pre-commit:
     runs-on: ubuntu-latest
     steps:
@@ -76,7 +96,7 @@ jobs:
         run: uv run --no-sync pyright src/
 
   publish:
-    needs: [test, pre-commit]
+    needs: [test, device-parallel-nested-sampling, pre-commit]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     environment:
@@ -114,7 +134,7 @@ jobs:
           git push --force origin "$NEXT"
 
   publish-testpypi:
-    needs: [test, pre-commit]
+    needs: [test, device-parallel-nested-sampling, pre-commit]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment:
