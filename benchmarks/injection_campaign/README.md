@@ -2,13 +2,13 @@
 
 This directory turns the measured `paper-15d` benchmark into a reproducible,
 resumable injection-recovery campaign. Each recovery uses the benchmark's
-15-dimensional precessing-tidal waveform and physical prior, plus a sampled
-periodic `time_jitter` offset coupled to the mass/tidal SwiG block. The resulting
-16-dimensional sampler uses 512 live points, 64 deletions per outer step, one
-Gibbs sweep across seven blocks, and four-way device sharding. Phase and
-geocentric time are injected but analytically marginalized; `time_jitter` only
-shifts the numerical FFT grid, so the P–P test continues to cover the 15
-physical parameters.
+15-dimensional precessing-tidal waveform and physical prior, plus an
+explicitly sampled coalescence time `t_c` in the covariance-shaped
+mass/tidal SwiG block. The resulting 16-dimensional sampler uses 512 live
+points, 64 deletions per outer step, one Gibbs sweep across seven blocks,
+and four-way device sharding. Phase is injected but analytically
+marginalized; `t_c` is sampled (uniform, non-periodic, ±30 ms around the
+trigger), so the P–P test covers the 15 physical parameters plus `t_c`.
 
 The default noise curves are the Bilby-packaged Advanced LIGO zero-detuned
 high-power and Advanced Virgo design PSDs. `prepare_campaign` interpolates and
@@ -80,16 +80,18 @@ The compact tracking artifacts are:
 
 Calibration-specific configuration and outputs:
 
-- New manifests use `time_marginalization_upsample_factor=1` and enable
-  `time_marginalization_jitter_time`. The campaign constructs a uniform,
-  periodic `time_jitter` prior from the likelihood's one-cell bounds. Sampling
-  that offset integrates over grid alignment without the runtime cost of 16 or
-  32 phase-ramped FFTs per likelihood evaluation. It shares the mass/tidal
-  block so covariance-shaped proposals can follow the high-SNR
-  mass--grid-alignment ridge without adding slice steps.
-- Older manifests without the jitter key retain their stored behavior: missing
-  upsampling also means factor 1, while manifests that requested factor 32
-  continue to use factor 32 with no sampled jitter.
+- `sample_coalescence_time` / `coalescence_time_range_seconds`: new campaigns
+  sample `t_c` directly and build the likelihood without FFT time
+  marginalization. The earlier FFT-grid treatments (deterministic
+  `upsample_factor`, sampled one-cell `time_jitter`) produced a wrapped
+  "comb" posterior at high SNR — alignment slabs separated by up to
+  ~165 logL — whose teeth local slice moves cross only by luck; sampled
+  `t_c` restores the smooth t_c–mass ridge that covariance-shaped
+  proposals follow natively, and matches the reference paper's own P-P
+  configuration. `t_c` joins the P-P outputs as a sixteenth parameter.
+- Older manifests without `sample_coalescence_time` retain their stored
+  behavior exactly (FFT marginalization with their recorded
+  `upsample_factor`/`jitter_time` settings), including under `--force`.
 - New catalogues use an independently shuffled Latin hypercube for every parameter, so each marginal covers every prior stratum once.
 - `pp/summary.csv` reports truth-draw KS statistics and rank-minus-truth-quantile residual means and standard errors.
 
