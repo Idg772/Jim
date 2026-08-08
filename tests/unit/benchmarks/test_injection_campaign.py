@@ -39,17 +39,20 @@ def _prepared_campaign(tmp_path: Path, n_injections: int = 4) -> Path:
     return campaign
 
 
-def test_campaign_config_samples_one_cell_time_jitter_without_upsampling() -> None:
-    assert common.DEFAULT_CONFIG["time_marginalization_upsample_factor"] == 1
-    assert common.DEFAULT_CONFIG["time_marginalization_jitter_time"] is True
+def test_campaign_config_samples_coalescence_time() -> None:
+    assert common.DEFAULT_CONFIG["sample_coalescence_time"] is True
+    assert common.DEFAULT_CONFIG["coalescence_time_range_seconds"] == [-0.03, 0.03]
+    assert "time_marginalization_tc_range_seconds" not in common.DEFAULT_CONFIG
+    assert "time_marginalization_upsample_factor" not in common.DEFAULT_CONFIG
+    assert "time_marginalization_jitter_time" not in common.DEFAULT_CONFIG
 
 
-def test_campaign_config_couples_time_jitter_to_the_mass_swig_block() -> None:
+def test_campaign_config_puts_tc_in_the_mass_swig_block() -> None:
     blocks = common.DEFAULT_CONFIG["blocks"]
     flattened = [name for block in blocks for name in block]
 
-    assert blocks[0] == ["M_c", "q", "lambda_1", "lambda_2", "time_jitter"]
-    assert all(block != ["time_jitter"] for block in blocks)
+    assert blocks[0] == ["M_c", "q", "lambda_1", "lambda_2", "t_c"]
+    assert all("time_jitter" not in block for block in blocks)
     assert len(flattened) == 16
     assert len(set(flattened)) == 16
 
@@ -262,18 +265,19 @@ def test_prepare_campaign_round_trip_and_input_integrity(tmp_path: Path) -> None
 
     assert manifest["n_injections"] == 4
     assert manifest["config"]["n_devices"] == 4
-    assert manifest["config"]["time_marginalization_upsample_factor"] == 1
-    assert manifest["config"]["time_marginalization_jitter_time"] is True
+    assert manifest["config"]["sample_coalescence_time"] is True
+    assert manifest["config"]["coalescence_time_range_seconds"] == [-0.03, 0.03]
     assert manifest["config"]["blocks"][0] == [
         "M_c",
         "q",
         "lambda_1",
         "lambda_2",
-        "time_jitter",
+        "t_c",
     ]
     assert len(catalogue) == 4
     assert set(catalogue[0]) == set(common.CATALOGUE_FIELDS)
     assert "time_jitter" not in catalogue[0]
+    assert "t_c" in catalogue[0]
     assert (campaign / "status.csv").is_file()
     with np.load(campaign / "inputs/psd/aLIGO-design.npz") as archive:
         assert archive["frequencies"].shape == (262145,)

@@ -52,9 +52,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "f_min_hz": 20.0,
     "f_max_hz": 2048.0 - 1.0 / 128.0,
     "phase_marginalization": True,
-    "time_marginalization_tc_range_seconds": [-0.03, 0.03],
-    "time_marginalization_upsample_factor": 1,
-    "time_marginalization_jitter_time": True,
+    "sample_coalescence_time": True,
+    "coalescence_time_range_seconds": [-0.03, 0.03],
     "waveform": "IMRPhenomPv2_NRTidalv2",
     "waveform_f_ref_hz": 20.0,
     "n_devices": 4,
@@ -65,7 +64,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "num_gibbs_sweeps": 1,
     "termination_dlogz": 0.0485873516,
     "blocks": [
-        ["M_c", "q", "lambda_1", "lambda_2", "time_jitter"],
+        ["M_c", "q", "lambda_1", "lambda_2", "t_c"],
         ["s1_mag", "s1_theta", "s1_phi"],
         ["s2_mag", "s2_theta", "s2_phi"],
         ["iota"],
@@ -88,6 +87,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "sky": "isotropic",
         "psi": {"distribution": "uniform", "range_radians": [0.0, "pi"]},
+        "t_c": {"distribution": "uniform", "range_seconds": [-0.03, 0.03]},
     },
     "psd": {
         "family": "design-sensitivity",
