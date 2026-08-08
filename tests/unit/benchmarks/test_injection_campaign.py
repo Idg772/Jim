@@ -35,6 +35,10 @@ def _prepared_campaign(tmp_path: Path, n_injections: int = 4) -> Path:
     return campaign
 
 
+def test_campaign_config_requests_upsampled_time_marginalization() -> None:
+    assert common.DEFAULT_CONFIG["time_marginalization_upsample_factor"] == 32
+
+
 def test_catalogue_is_deterministic_and_inside_the_recovery_prior() -> None:
     first = common.generate_catalogue(8, 42)
     second = common.generate_catalogue(8, 42)

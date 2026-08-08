@@ -53,6 +53,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "f_max_hz": 2048.0 - 1.0 / 128.0,
     "phase_marginalization": True,
     "time_marginalization_tc_range_seconds": [-0.03, 0.03],
+    "time_marginalization_upsample_factor": 32,
     "waveform": "IMRPhenomPv2_NRTidalv2",
     "waveform_f_ref_hz": 20.0,
     "n_devices": 4,

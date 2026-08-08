@@ -237,7 +237,10 @@ def run_injection(args: argparse.Namespace) -> dict[str, Any]:
         f_max=float(config["f_max_hz"]),
         phase_marginalization=True,
         time_marginalization={
-            "tc_range": tuple(config["time_marginalization_tc_range_seconds"])
+            "tc_range": tuple(config["time_marginalization_tc_range_seconds"]),
+            "upsample_factor": int(
+                config.get("time_marginalization_upsample_factor", 1)
+            ),
         },
     )
     sampler_config = BlackJAXSwiGConfig(
