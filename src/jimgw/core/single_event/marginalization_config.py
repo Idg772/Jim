@@ -18,6 +18,7 @@ class TimeMargConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
     tc_range: tuple[float, float] = (-0.1, 0.1)
+    upsample_factor: int = Field(default=1, ge=1)
 
 
 class DistanceMargConfig(BaseModel):
