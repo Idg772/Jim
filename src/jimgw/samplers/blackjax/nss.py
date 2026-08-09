@@ -23,6 +23,8 @@ from blackjax.ns.nss import (
     sample_direction_from_covariance,
 )
 from blackjax.ns.utils import finalise
+from blackjax.smc.tuning.from_particles import particles_covariance_matrix
+from jax.flatten_util import ravel_pytree
 from jax.sharding import Mesh
 from jaxtyping import Array, Float, Key
 
@@ -56,6 +58,42 @@ class _FsmParticleState(NamedTuple):
     cache: object
 
 
+def _sample_direction_from_covariance_factor(
+    rng_key, position, covariance_factor: Array
+):
+    """Draw a direction with Mahalanobis norm two from a precomputed factor."""
+    _, unravel_fn = ravel_pytree(position)
+    standard_direction = jax.random.normal(
+        rng_key,
+        shape=(covariance_factor.shape[-1],),
+        dtype=covariance_factor.dtype,
+    )
+    direction = (
+        2.0
+        * (covariance_factor @ standard_direction)
+        / jnp.linalg.norm(standard_direction)
+    )
+    return unravel_fn(direction)
+
+
+def _live_covariance_factor(rng_key, state, info, params=None):
+    """Factor the live covariance once for the next outer NS-FSM step."""
+    del rng_key, info, params
+    covariance = jnp.atleast_2d(particles_covariance_matrix(state.particles.position))
+    return {"covariance_factor": jnp.linalg.cholesky(covariance)}
+
+
+def _resolve_covariance_factor(cov, covariance_factor):
+    """Resolve optimized parameters, accepting legacy covariance checkpoints."""
+    if covariance_factor is None:
+        if cov is None:
+            raise ValueError("Specify either covariance_factor or cov.")
+        return jnp.linalg.cholesky(cov)
+    if cov is not None:
+        raise ValueError("Specify only one of covariance_factor and cov.")
+    return covariance_factor
+
+
 def _build_nss_fsm_constrained_step(
     *,
     log_prior_fn: Callable,
@@ -74,22 +112,30 @@ def _build_nss_fsm_constrained_step(
     def eval_candidate(position, cache):
         return log_prior_fn(position), log_likelihood_fn(position), cache
 
-    def constrained_step(keys, state, loglikelihood_0, cov):
+    def constrained_step(
+        keys,
+        state,
+        loglikelihood_0,
+        cov=None,
+        *,
+        covariance_factor=None,
+    ):
+        covariance_factor = _resolve_covariance_factor(cov, covariance_factor)
         prop_keys, level_u, bracket_u, bracket_v, shrink_key_data = (
             slice_randoms_from_keys(keys)
         )
         direction_template = jnp.zeros_like(state.position)
-        # A vmap changes x64 covariance-normalization rounding relative to the
-        # BlackJAX scan. Keep these static draws unrolled so the folded segment
+        # A vmap changes x64 direction-normalization rounding relative to the
+        # reference scan. Keep these static draws unrolled so the folded segment
         # remains bitwise pathwise-equivalent without a preprocessing loop.
         directions = jnp.stack(
             tuple(
                 cast(
                     Array,
-                    sample_direction_from_covariance(
+                    _sample_direction_from_covariance_factor(
                         prop_keys[slice_idx],
                         direction_template,
-                        cov,
+                        covariance_factor,
                     ),
                 )
                 for slice_idx in range(prop_keys.shape[0])
@@ -196,6 +242,50 @@ class BlackJAXNSSSampler(Sampler):
     def _update_inner_kernel_params_fn(self) -> Callable:
         return live_covariance
 
+    @property
+    def _fsm_update_inner_kernel_params_fn(self) -> Callable:
+        return _live_covariance_factor
+
+    def _inner_kernel_params_fn_for_mesh(self, mesh: Optional[Mesh]) -> Callable:
+        if mesh is None:
+            return self._update_inner_kernel_params_fn
+        return self._fsm_update_inner_kernel_params_fn
+
+    def _normalise_inner_kernel_params_for_mesh(
+        self, state: AdaptiveNSState, mesh: Optional[Mesh]
+    ) -> AdaptiveNSState:
+        """Convert checkpoint parameters to the representation a path expects."""
+        try:
+            params = state.inner_kernel_params
+        except AttributeError as error:
+            raise ValueError(
+                "checkpoint state has no inner-kernel parameters"
+            ) from error
+        keys = set(params)
+        if mesh is None:
+            if keys == {"cov"}:
+                return state
+            if keys == {"covariance_factor"}:
+                return state._replace(
+                    inner_kernel_params=self._update_inner_kernel_params_fn(
+                        None, state, None
+                    )
+                )
+        else:
+            if keys == {"covariance_factor"}:
+                return state
+            if keys == {"cov"}:
+                return state._replace(
+                    inner_kernel_params=self._fsm_update_inner_kernel_params_fn(
+                        None, state, None
+                    )
+                )
+        expected = "cov" if mesh is None else "covariance_factor"
+        raise ValueError(
+            "checkpoint has incompatible inner-kernel parameters: "
+            f"expected {expected!r}, found {sorted(keys)!r}"
+        )
+
     def _build_nested_sampler(self, n_delete: int, mesh: Optional[Mesh] = None):
         config = self._config
         num_inner_steps = config.num_inner_steps_per_dim * self.n_dims
@@ -209,7 +299,7 @@ class BlackJAXNSSSampler(Sampler):
             kernel = build_replicated_from_mcmc_kernel(
                 constrained_step,
                 n_inner_steps=num_inner_steps,
-                update_inner_kernel_params_fn=self._update_inner_kernel_params_fn,
+                update_inner_kernel_params_fn=self._fsm_update_inner_kernel_params_fn,
                 n_delete=n_delete,
                 mesh=mesh,
                 fold_inner_steps=True,
@@ -280,6 +370,7 @@ class BlackJAXNSSSampler(Sampler):
             return arr
 
         nested_sampler = self._build_nested_sampler(n_delete, mesh)
+        update_inner_kernel_params_fn = self._inner_kernel_params_fn_for_mesh(mesh)
 
         # Bypass BlackJAX's jax.vmap(init_state_fn) to avoid peak-memory OOM.
         # A full vmap over all live particles materialises O(n_live) concurrent
@@ -304,7 +395,7 @@ class BlackJAXNSSSampler(Sampler):
                 state = _ns_adaptive_init(
                     positions,
                     init_state_fn=_batched_fn,
-                    update_inner_kernel_params_fn=self._update_inner_kernel_params_fn,
+                    update_inner_kernel_params_fn=update_inner_kernel_params_fn,
                 )
                 phase_seconds["init_total"] = time.perf_counter() - _init_t0
                 return state
@@ -330,7 +421,7 @@ class BlackJAXNSSSampler(Sampler):
             state = _ns_adaptive_init(
                 initial_particles.position,
                 init_state_fn=lambda _: initial_particles,
-                update_inner_kernel_params_fn=self._update_inner_kernel_params_fn,
+                update_inner_kernel_params_fn=update_inner_kernel_params_fn,
             )
             state = place_replicated_state(state, mesh)
             phase_seconds["init_total"] = time.perf_counter() - _init_t0
@@ -348,6 +439,7 @@ class BlackJAXNSSSampler(Sampler):
                     _ckpt = pickle.load(_f)
                 self._validate_checkpoint(_ckpt)
                 state = _ckpt["state"]
+                state = self._normalise_inner_kernel_params_for_mesh(state, mesh)
                 dead = _ckpt["dead"]
                 rng_key = _ckpt["rng_key"]
                 if mesh is not None:

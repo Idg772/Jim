@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 from blackjax.ns.adaptive import init as adaptive_init
 from blackjax.ns.base import StateWithLogLikelihood, init_state_strategy
+from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 from jimgw.samplers.blackjax.nss import BlackJAXNSSSampler
@@ -74,10 +75,15 @@ def nss_transition_results(request):
         logprior_fn=_log_prior,
         loglikelihood_fn=_log_likelihood,
     )
-    state = adaptive_init(
+    one_device_state = adaptive_init(
         positions,
         init_state_fn=jax.vmap(single_init),
         update_inner_kernel_params_fn=sampler._update_inner_kernel_params_fn,
+    )
+    fsm_state = adaptive_init(
+        positions,
+        init_state_fn=jax.vmap(single_init),
+        update_inner_kernel_params_fn=sampler._fsm_update_inner_kernel_params_fn,
     )
     mesh = make_live_mesh(n_devices, n_live, n_delete)
     assert mesh is not None
@@ -85,17 +91,16 @@ def nss_transition_results(request):
     keys = jax.random.split(jax.random.key(11), 5)
     one_device_step = (
         jax.jit(sampler._build_nested_sampler(n_delete).step)
-        .lower(keys[0], state)
+        .lower(keys[0], one_device_state)
         .compile()
     )
-    replicated_state = place_replicated_state(state, mesh)
+    replicated_state = place_replicated_state(fsm_state, mesh)
     replicated_key = place_key(keys[0], mesh)
     four_device_step = jax.jit(sampler._build_nested_sampler(n_delete, mesh).step)
     executable = four_device_step.lower(replicated_key, replicated_state).compile()
 
     one_device_results = []
     sharded_results = []
-    one_device_state = state
     for key in keys:
         one_device_result = one_device_step(key, one_device_state)
         sharded_result = executable(place_key(key, mesh), replicated_state)
@@ -141,19 +146,24 @@ def swig_transition_results():
         logprior_fn=_log_prior,
         loglikelihood_fn=_log_likelihood,
     )
-    state = adaptive_init(
+    one_device_state = adaptive_init(
         positions,
         init_state_fn=jax.vmap(single_init),
         update_inner_kernel_params_fn=sampler._update_inner_kernel_params_fn,
+    )
+    fsm_state = adaptive_init(
+        positions,
+        init_state_fn=jax.vmap(single_init),
+        update_inner_kernel_params_fn=sampler._fsm_update_inner_kernel_params_fn,
     )
     mesh = make_live_mesh(4, n_live, n_delete)
     assert mesh is not None
 
     key = jax.random.key(21)
     one_device_result = jax.jit(sampler._build_nested_sampler(n_delete).step)(
-        key, state
+        key, one_device_state
     )
-    replicated_state = place_replicated_state(state, mesh)
+    replicated_state = place_replicated_state(fsm_state, mesh)
     replicated_key = place_key(key, mesh)
     sharded_step = jax.jit(sampler._build_nested_sampler(n_delete, mesh).step)
     executable = sharded_step.lower(replicated_key, replicated_state).compile()
@@ -189,14 +199,34 @@ def test_replicated_steps_are_pathwise_equivalent_and_have_target_placement(
     ):
         one_device_host = jax.device_get(one_device_result)
         sharded_host = jax.device_get(sharded_result)
-        for expected, actual in zip(
-            jax.tree.leaves(one_device_host),
-            jax.tree.leaves(sharded_host),
-            strict=True,
+        one_device_state, one_device_info = one_device_host
+        sharded_state, sharded_info = sharded_host
+        for expected_tree, actual_tree in (
+            (one_device_state.particles, sharded_state.particles),
+            (one_device_state.integrator, sharded_state.integrator),
+            (one_device_info, sharded_info),
         ):
-            np.testing.assert_allclose(
-                actual, expected, rtol=1e-14, atol=1e-14, equal_nan=True
-            )
+            for expected, actual in zip(
+                jax.tree.leaves(expected_tree),
+                jax.tree.leaves(actual_tree),
+                strict=True,
+            ):
+                np.testing.assert_allclose(
+                    actual,
+                    expected,
+                    rtol=1e-14,
+                    atol=1e-14,
+                    equal_nan=True,
+                )
+
+        covariance = one_device_state.inner_kernel_params["cov"]
+        covariance_factor = sharded_state.inner_kernel_params["covariance_factor"]
+        np.testing.assert_allclose(
+            covariance_factor @ covariance_factor.T,
+            covariance,
+            rtol=1e-14,
+            atol=1e-14,
+        )
 
     state, info = sharded_results[-1]
     for leaf in jax.tree.leaves(state):
@@ -212,6 +242,154 @@ def test_replicated_step_lowers_to_one_endpoint_all_gather(nss_transition_result
     assert len(re.findall(r"\ball-gather\(", hlo)) == 1
     assert "all-reduce(" not in hlo
     assert "collective-permute(" not in hlo
+
+
+def test_nss_fsm_outer_step_migrates_legacy_covariance_params():
+    n_live = 8
+    n_delete = 4
+    config = BlackJAXNSSConfig(
+        n_live=n_live,
+        n_delete_frac=n_delete / n_live,
+        num_inner_steps_per_dim=1,
+        termination_dlogz=2.0,
+    )
+    sampler = BlackJAXNSSSampler(
+        n_dims=2,
+        log_prior_fn=_log_prior,
+        log_likelihood_fn=_log_likelihood,
+        log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+        config=config,
+    )
+    positions = jax.random.uniform(jax.random.key(12), (n_live, 2))
+    single_init = partial(
+        init_state_strategy,
+        logprior_fn=_log_prior,
+        loglikelihood_fn=_log_likelihood,
+    )
+    legacy_state = adaptive_init(
+        positions,
+        init_state_fn=jax.vmap(single_init),
+        update_inner_kernel_params_fn=sampler._update_inner_kernel_params_fn,
+    )
+    assert set(legacy_state.inner_kernel_params) == {"cov"}
+
+    mesh = Mesh(np.asarray(jax.devices()[:1]), axis_names=("replacement",))
+    state = place_replicated_state(legacy_state, mesh)
+    key = place_key(jax.random.key(13), mesh)
+    new_state, _ = jax.jit(sampler._build_nested_sampler(n_delete, mesh).step)(
+        key,
+        state,
+    )
+
+    assert set(new_state.inner_kernel_params) == {"covariance_factor"}
+    covariance_factor = new_state.inner_kernel_params["covariance_factor"]
+    covariance = jnp.cov(new_state.particles.position, ddof=0, rowvar=False)
+    np.testing.assert_allclose(
+        covariance_factor @ covariance_factor.T,
+        covariance,
+        rtol=1e-14,
+        atol=1e-14,
+    )
+
+
+def test_nss_checkpoint_params_are_retargeted_for_selected_topology():
+    n_live = 8
+    config = BlackJAXNSSConfig(
+        n_live=n_live,
+        n_delete_frac=0.5,
+        num_inner_steps_per_dim=1,
+        termination_dlogz=2.0,
+    )
+    sampler = BlackJAXNSSSampler(
+        n_dims=2,
+        log_prior_fn=_log_prior,
+        log_likelihood_fn=_log_likelihood,
+        log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+        config=config,
+    )
+    positions = jax.random.uniform(jax.random.key(14), (n_live, 2))
+    single_init = partial(
+        init_state_strategy,
+        logprior_fn=_log_prior,
+        loglikelihood_fn=_log_likelihood,
+    )
+    covariance_state = adaptive_init(
+        positions,
+        init_state_fn=jax.vmap(single_init),
+        update_inner_kernel_params_fn=sampler._update_inner_kernel_params_fn,
+    )
+    factor_state = adaptive_init(
+        positions,
+        init_state_fn=jax.vmap(single_init),
+        update_inner_kernel_params_fn=sampler._fsm_update_inner_kernel_params_fn,
+    )
+    mesh = Mesh(np.asarray(jax.devices()[:1]), axis_names=("replacement",))
+
+    for source, topology in ((factor_state, None), (covariance_state, mesh)):
+        retargeted = sampler._normalise_inner_kernel_params_for_mesh(source, topology)
+        covariance = jnp.cov(retargeted.particles.position, ddof=0, rowvar=False)
+        if topology is None:
+            assert set(retargeted.inner_kernel_params) == {"cov"}
+            np.testing.assert_allclose(
+                retargeted.inner_kernel_params["cov"], covariance, rtol=1e-14
+            )
+        else:
+            assert set(retargeted.inner_kernel_params) == {"covariance_factor"}
+            factor = retargeted.inner_kernel_params["covariance_factor"]
+            np.testing.assert_allclose(
+                factor @ factor.T, covariance, rtol=1e-14, atol=1e-14
+            )
+
+
+def test_swig_checkpoint_params_are_retargeted_for_selected_topology():
+    n_live = 8
+    config = BlackJAXSwiGConfig(
+        blocks=[["slow"], ["fast"]],
+        n_live=n_live,
+        n_delete_frac=0.5,
+        num_gibbs_sweeps=1,
+        termination_dlogz=2.0,
+    )
+    sampler = BlackJAXSwiGSampler(
+        n_dims=2,
+        log_prior_fn=_log_prior,
+        log_likelihood_fn=_log_likelihood,
+        log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+        config=config,
+        rebuild_required_by_block={(0,): True, (1,): False},
+        build_cache=_build_cache,
+        log_likelihood_from_cache_fn=_log_likelihood_from_cache,
+    )
+    positions = jax.random.uniform(jax.random.key(15), (n_live, 2))
+    single_init = partial(
+        init_state_strategy,
+        logprior_fn=_log_prior,
+        loglikelihood_fn=_log_likelihood,
+    )
+    covariance_state = adaptive_init(
+        positions,
+        init_state_fn=jax.vmap(single_init),
+        update_inner_kernel_params_fn=sampler._update_inner_kernel_params_fn,
+    )
+    factor_state = adaptive_init(
+        positions,
+        init_state_fn=jax.vmap(single_init),
+        update_inner_kernel_params_fn=sampler._fsm_update_inner_kernel_params_fn,
+    )
+    mesh = Mesh(np.asarray(jax.devices()[:1]), axis_names=("replacement",))
+
+    nonmesh = sampler._normalise_inner_kernel_params_for_mesh(factor_state, None)
+    sharded = sampler._normalise_inner_kernel_params_for_mesh(covariance_state, mesh)
+    assert set(nonmesh.inner_kernel_params) == {"block_covariances"}
+    assert set(sharded.inner_kernel_params) == {"block_covariance_factors"}
+    for covariance, factor in zip(
+        nonmesh.inner_kernel_params["block_covariances"],
+        sharded.inner_kernel_params["block_covariance_factors"],
+        strict=True,
+    ):
+        np.testing.assert_allclose(
+            factor @ factor.T, covariance, rtol=1e-14, atol=1e-14
+        )
 
 
 def test_particle_pack_round_trip_preserves_mixed_dtypes():
@@ -282,13 +460,30 @@ def test_distributed_initialisation_evaluates_each_likelihood_once():
 
 def test_replicated_swig_step_is_pathwise_equivalent(swig_transition_results):
     one_device_result, sharded_result, _ = swig_transition_results
-    for expected, actual in zip(
-        jax.tree.leaves(jax.device_get(one_device_result)),
-        jax.tree.leaves(jax.device_get(sharded_result)),
-        strict=True,
+    one_device_state, one_device_info = jax.device_get(one_device_result)
+    sharded_state, sharded_info = jax.device_get(sharded_result)
+    for expected_tree, actual_tree in (
+        (one_device_state.particles, sharded_state.particles),
+        (one_device_state.integrator, sharded_state.integrator),
+        (one_device_info, sharded_info),
     ):
+        for expected, actual in zip(
+            jax.tree.leaves(expected_tree),
+            jax.tree.leaves(actual_tree),
+            strict=True,
+        ):
+            np.testing.assert_allclose(
+                actual, expected, rtol=1e-14, atol=1e-14, equal_nan=True
+            )
+
+    covariances = one_device_state.inner_kernel_params["block_covariances"]
+    factors = sharded_state.inner_kernel_params["block_covariance_factors"]
+    for covariance, factor in zip(covariances, factors, strict=True):
         np.testing.assert_allclose(
-            actual, expected, rtol=1e-14, atol=1e-14, equal_nan=True
+            factor @ factor.T,
+            covariance,
+            rtol=1e-14,
+            atol=1e-14,
         )
 
     state, info = sharded_result

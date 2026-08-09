@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from blackjax import SamplingAlgorithm
 from blackjax.mcmc.slice import SliceInfo
 from blackjax.mcmc.slice import build_kernel as build_slice_kernel
+from blackjax.ns.adaptive import AdaptiveNSState
 from blackjax.ns.from_mcmc import build_kernel as build_from_mcmc_kernel
 from blackjax.ns.nss import sample_direction_from_covariance
 from blackjax.smc.tuning.from_particles import particles_covariance_matrix
@@ -22,7 +23,10 @@ from jimgw.samplers.blackjax._fsm import (
     slice_randoms_from_keys,
 )
 from jimgw.samplers.blackjax._slice import stepping_out_cached
-from jimgw.samplers.blackjax.nss import BlackJAXNSSSampler
+from jimgw.samplers.blackjax.nss import (
+    BlackJAXNSSSampler,
+    _sample_direction_from_covariance_factor,
+)
 from jimgw.samplers.blackjax.sharding import build_replicated_from_mcmc_kernel
 from jimgw.samplers.config import BlackJAXNSSConfig, BlackJAXSwiGConfig
 from jimgw.samplers.periodic import _build_masks_arrays
@@ -39,6 +43,24 @@ class CachedSliceState(NamedTuple):
     cache: object
 
 
+def _resolve_block_direction_parameters(
+    block_covariances,
+    block_covariance_factors,
+):
+    """Select the legacy covariance or optimized factor direction path."""
+    if block_covariance_factors is None:
+        if block_covariances is None:
+            raise ValueError(
+                "Specify either block_covariance_factors or block_covariances."
+            )
+        return block_covariances, sample_direction_from_covariance
+    if block_covariances is not None:
+        raise ValueError(
+            "Specify only one of block_covariance_factors and block_covariances."
+        )
+    return block_covariance_factors, _sample_direction_from_covariance_factor
+
+
 def _build_swig_constrained_step_lockstep(
     *,
     log_prior_fn: Callable,
@@ -52,7 +74,7 @@ def _build_swig_constrained_step_lockstep(
     periodic: Optional[dict[int, tuple[float, float]]],
     n_dims: int,
 ) -> Callable:
-    """Frozen pre-FSM reference implementation for bitwise equivalence tests."""
+    """Reference scan implementation for FSM pathwise-equivalence tests."""
     slice_kernel = build_slice_kernel(
         interval=stepping_out_cached,
         max_expansions=max_steps,
@@ -69,7 +91,20 @@ def _build_swig_constrained_step_lockstep(
             position,
         )
 
-    def constrained_step(rng_key, state, loglikelihood_0, block_covariances):
+    def constrained_step(
+        rng_key,
+        state,
+        loglikelihood_0,
+        block_covariances=None,
+        *,
+        block_covariance_factors=None,
+    ):
+        block_direction_parameters, sample_block_direction = (
+            _resolve_block_direction_parameters(
+                block_covariances,
+                block_covariance_factors,
+            )
+        )
         cache = build_cache(state.position)
         cached_state = CachedSliceState(
             position=state.position,
@@ -83,8 +118,10 @@ def _build_swig_constrained_step_lockstep(
         num_shrink = jnp.asarray(0)
 
         for _ in range(num_gibbs_sweeps):
-            for (parameter_indices, requires_rebuild), covariance in zip(
-                rebuild_required_by_block.items(), block_covariances, strict=True
+            for (parameter_indices, requires_rebuild), direction_parameter in zip(
+                rebuild_required_by_block.items(),
+                block_direction_parameters,
+                strict=True,
             ):
                 parameter_index_array = jnp.asarray(parameter_indices)
                 n_steps = num_inner_steps_per_dim * len(parameter_indices)
@@ -93,7 +130,7 @@ def _build_swig_constrained_step_lockstep(
                     carry,
                     key,
                     parameter_index_array=parameter_index_array,
-                    covariance=covariance,
+                    direction_parameter=direction_parameter,
                     requires_rebuild=requires_rebuild,
                 ):
                     current, all_accepted, expansions, shrink = carry
@@ -101,8 +138,10 @@ def _build_swig_constrained_step_lockstep(
                     def proposal_generator(direction_key, position, logdensity_fn):
                         del logdensity_fn
                         block_position = position[parameter_index_array]
-                        block_direction = sample_direction_from_covariance(
-                            direction_key, block_position, covariance
+                        block_direction = sample_block_direction(
+                            direction_key,
+                            block_position,
+                            direction_parameter,
                         )
                         direction = (
                             jnp.zeros_like(position)
@@ -217,7 +256,20 @@ def _build_swig_constrained_step(
 
         return eval_candidate
 
-    def constrained_step(rng_key, state, loglikelihood_0, block_covariances):
+    def constrained_step(
+        rng_key,
+        state,
+        loglikelihood_0,
+        block_covariances=None,
+        *,
+        block_covariance_factors=None,
+    ):
+        block_direction_parameters, sample_block_direction = (
+            _resolve_block_direction_parameters(
+                block_covariances,
+                block_covariance_factors,
+            )
+        )
         cache = build_cache(state.position)
         cached_state = CachedSliceState(
             position=state.position,
@@ -230,9 +282,9 @@ def _build_swig_constrained_step(
         slice_records = []
         key = rng_key
         for _ in range(num_gibbs_sweeps):
-            for (parameter_indices, requires_rebuild), covariance in zip(
+            for (parameter_indices, requires_rebuild), direction_parameter in zip(
                 rebuild_required_by_block.items(),
-                block_covariances,
+                block_direction_parameters,
                 strict=True,
             ):
                 parameter_index_array = jnp.asarray(parameter_indices)
@@ -246,18 +298,18 @@ def _build_swig_constrained_step(
                     bracket_v,
                     shrink_key_data,
                 ) = slice_randoms_from_keys(keys[1:])
-                # Do not vmap these floating-point draws: batched covariance
-                # normalization changes x64 rounding relative to the frozen
+                # Do not vmap these floating-point draws: batched direction
+                # normalization changes x64 rounding relative to the reference
                 # scan. Static unrolling preserves the bitwise path and adds no
                 # preprocessing loop ahead of the scheduler segments.
                 block_directions = jnp.stack(
                     [
                         cast(
                             Array,
-                            sample_direction_from_covariance(
+                            sample_block_direction(
                                 prop_keys[i],
                                 jnp.zeros_like(state.position[parameter_index_array]),
-                                covariance,
+                                direction_parameter,
                             ),
                         )
                         for i in range(n_steps)
@@ -394,12 +446,11 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
         self._log_likelihood_from_cache_fn = log_likelihood_from_cache_fn
         self._periodic = periodic
 
-        def update_block_covariances(rng_key, state, info, params=None):
-            del rng_key, info, params
+        def block_covariances(state):
             covariance = jnp.atleast_2d(
                 particles_covariance_matrix(state.particles.position)
             )
-            covariances = tuple(
+            return tuple(
                 covariance[
                     jnp.ix_(
                         jnp.asarray(parameter_indices),
@@ -408,9 +459,21 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
                 ]
                 for parameter_indices in self._rebuild_required_by_block
             )
-            return {"block_covariances": covariances}
+
+        def update_block_covariances(rng_key, state, info, params=None):
+            del rng_key, info, params
+            return {"block_covariances": block_covariances(state)}
+
+        def update_block_covariance_factors(rng_key, state, info, params=None):
+            del rng_key, info, params
+            covariance_factors = tuple(
+                jnp.linalg.cholesky(covariance)
+                for covariance in block_covariances(state)
+            )
+            return {"block_covariance_factors": covariance_factors}
 
         self._update_block_covariances = update_block_covariances
+        self._update_block_covariance_factors = update_block_covariance_factors
 
     @property
     def sampler_name(self) -> str:
@@ -419,6 +482,45 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
     @property
     def _update_inner_kernel_params_fn(self) -> Callable:
         return self._update_block_covariances
+
+    @property
+    def _fsm_update_inner_kernel_params_fn(self) -> Callable:
+        return self._update_block_covariance_factors
+
+    def _normalise_inner_kernel_params_for_mesh(
+        self, state: AdaptiveNSState, mesh: Optional[Mesh]
+    ) -> AdaptiveNSState:
+        """Convert SwiG checkpoint block parameters for the selected path."""
+        try:
+            params = state.inner_kernel_params
+        except AttributeError as error:
+            raise ValueError(
+                "checkpoint state has no inner-kernel parameters"
+            ) from error
+        keys = set(params)
+        if mesh is None:
+            if keys == {"block_covariances"}:
+                return state
+            if keys == {"block_covariance_factors"}:
+                return state._replace(
+                    inner_kernel_params=self._update_inner_kernel_params_fn(
+                        None, state, None
+                    )
+                )
+        else:
+            if keys == {"block_covariance_factors"}:
+                return state
+            if keys == {"block_covariances"}:
+                return state._replace(
+                    inner_kernel_params=self._fsm_update_inner_kernel_params_fn(
+                        None, state, None
+                    )
+                )
+        expected = "block_covariances" if mesh is None else "block_covariance_factors"
+        raise ValueError(
+            "checkpoint has incompatible SwiG inner-kernel parameters: "
+            f"expected {expected!r}, found {sorted(keys)!r}"
+        )
 
     def _build_nested_sampler(
         self, n_delete: int, mesh: Optional[Mesh] = None
@@ -446,7 +548,7 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
             kernel = build_replicated_from_mcmc_kernel(
                 constrained_step,
                 n_inner_steps=1,
-                update_inner_kernel_params_fn=self._update_block_covariances,
+                update_inner_kernel_params_fn=self._fsm_update_inner_kernel_params_fn,
                 n_delete=n_delete,
                 mesh=mesh,
             )

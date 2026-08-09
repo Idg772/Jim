@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import pickle
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
+from blackjax.ns.adaptive import init as adaptive_init
+from blackjax.ns.base import init_state_strategy
 
 blackjax = pytest.importorskip("blackjax")
 
@@ -65,6 +70,102 @@ def _make_sampler(n_live: int = 100) -> BlackJAXNSSSampler:
 def test_nss_construction():
     sampler = _make_sampler()
     assert sampler.n_dims == 2
+
+
+def test_nss_fsm_update_params_returns_one_cholesky_factor(monkeypatch):
+    sampler = _make_sampler(n_live=5)
+    positions = jnp.asarray(
+        [
+            [-2.0, -1.0],
+            [-1.0, 0.5],
+            [0.0, 2.0],
+            [1.0, 1.0],
+            [2.0, -2.0],
+        ]
+    )
+    state = SimpleNamespace(particles=SimpleNamespace(position=positions))
+    covariance = jnp.cov(positions, ddof=0, rowvar=False)
+
+    original_cholesky = jnp.linalg.cholesky
+    factorized_shapes = []
+
+    def recording_cholesky(matrix):
+        factorized_shapes.append(matrix.shape)
+        return original_cholesky(matrix)
+
+    monkeypatch.setattr(jnp.linalg, "cholesky", recording_cholesky)
+    params = sampler._fsm_update_inner_kernel_params_fn(
+        jax.random.key(0),
+        state,
+        None,
+    )
+
+    assert set(params) == {"covariance_factor"}
+    assert factorized_shapes == [(2, 2)]
+    factor = params["covariance_factor"]
+    np.testing.assert_allclose(factor @ factor.T, covariance, rtol=1e-6)
+    np.testing.assert_array_equal(factor, jnp.tril(factor))
+
+    legacy_params = sampler._update_inner_kernel_params_fn(
+        jax.random.key(1),
+        state,
+        None,
+    )
+    assert set(legacy_params) == {"cov"}
+
+
+def test_nss_factor_checkpoint_resumes_on_nonmesh_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(BlackJAXNSSConfig, "configure_jax_cache", lambda self: None)
+    n_live = 8
+
+    def log_prior(position):
+        return jnp.where(jnp.all((position >= 0.0) & (position <= 1.0)), 0.0, -jnp.inf)
+
+    def log_likelihood(position):
+        return -20.0 * jnp.sum((position - 0.5) ** 2)
+
+    config = BlackJAXNSSConfig(
+        n_live=n_live,
+        n_delete_frac=0.5,
+        num_inner_steps_per_dim=1,
+        termination_dlogz=1e6,
+        checkpoint_dir=tmp_path,
+        checkpoint_interval=60.0,
+    )
+    sampler = BlackJAXNSSSampler(
+        n_dims=2,
+        log_prior_fn=log_prior,
+        log_likelihood_fn=log_likelihood,
+        log_posterior_fn=lambda x: log_prior(x) + log_likelihood(x),
+        config=config,
+    )
+    positions = jax.random.uniform(jax.random.key(20), (n_live, 2))
+    single_init = partial(
+        init_state_strategy,
+        logprior_fn=log_prior,
+        loglikelihood_fn=log_likelihood,
+    )
+    factor_state = adaptive_init(
+        positions,
+        init_state_fn=jax.vmap(single_init),
+        update_inner_kernel_params_fn=sampler._fsm_update_inner_kernel_params_fn,
+    )
+    checkpoint = {
+        "state": jax.device_get(factor_state),
+        "dead": [],
+        "rng_key": jax.device_get(jax.random.key(21)),
+        "n_iter": 0,
+        "sampler_name": sampler.sampler_name,
+        "elapsed_time": 17.0,
+    }
+    with (tmp_path / "checkpoint.pkl").open("wb") as stream:
+        pickle.dump(checkpoint, stream)
+
+    sampler.sample(jax.random.key(999), jnp.zeros_like(positions))
+
+    assert sampler._prev_elapsed == 17.0
+    assert sampler.get_diagnostics()["n_iterations"] > 0
+    assert not (tmp_path / "checkpoint.pkl").exists()
 
 
 def test_nss_get_samples_before_sample_raises():

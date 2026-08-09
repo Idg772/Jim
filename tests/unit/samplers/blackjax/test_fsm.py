@@ -12,7 +12,7 @@ from blackjax.mcmc.slice import SliceInfo
 from blackjax.mcmc.slice import build_kernel as build_slice_kernel
 from blackjax.ns.base import NSState, StateWithLogLikelihood
 from blackjax.ns.base import init_state_strategy as _init_state_strategy
-from blackjax.ns.nss import sample_direction_from_covariance, slice_constrained_step
+from blackjax.ns.nss import slice_constrained_step
 from jax.sharding import Mesh
 
 from jimgw.samplers.blackjax._fsm import (
@@ -21,7 +21,10 @@ from jimgw.samplers.blackjax._fsm import (
     slice_randoms_from_keys,
 )
 from jimgw.samplers.blackjax._slice import stepping_out_cached
-from jimgw.samplers.blackjax.nss import _build_nss_fsm_constrained_step
+from jimgw.samplers.blackjax.nss import (
+    _build_nss_fsm_constrained_step,
+    _sample_direction_from_covariance_factor,
+)
 from jimgw.samplers.blackjax.sharding import update_with_mcmc_take_last_replicated
 from jimgw.samplers.blackjax.swig import (
     CachedSliceState,
@@ -236,8 +239,17 @@ def _swig_builders(per_slice_info=False):
     return lockstep, fsm
 
 
-def _covariances():
-    return tuple(jnp.eye(len(idx)) * 0.5 for idx in _REBUILD_BY_BLOCK)
+def _block_covariances():
+    return (
+        jnp.asarray([[1.0, 0.35], [0.35, 0.6]]),
+        jnp.asarray([[0.4]]),
+        jnp.asarray([[0.7]]),
+        jnp.asarray([[0.8, -0.2], [-0.2, 0.5]]),
+    )
+
+
+def _block_covariance_factors():
+    return tuple(jnp.linalg.cholesky(cov) for cov in _block_covariances())
 
 
 def _particle_state(position, loglikelihood_0):
@@ -259,11 +271,16 @@ def test_swig_fsm_constrained_step_matches_lockstep_bitwise():
     keys = jax.random.split(jax.random.key(3), n_lanes)
     positions = jax.random.normal(jax.random.key(4), (n_lanes, _N_DIMS)) * 0.5
     thresholds = jnp.linspace(-30.0, -2.0, n_lanes)
-    covs = _covariances()
+    covariance_factors = _block_covariance_factors()
 
     def run(step_fn):
         def one(key, pos, l0):
-            return step_fn(key, _particle_state(pos, l0), l0, covs)
+            return step_fn(
+                key,
+                _particle_state(pos, l0),
+                l0,
+                block_covariance_factors=covariance_factors,
+            )
 
         return jax.jit(jax.vmap(one))(keys, positions, thresholds)
 
@@ -278,15 +295,79 @@ def test_swig_fsm_constrained_step_matches_lockstep_bitwise():
     np.testing.assert_array_equal(new_info.num_shrink, ref_info.num_shrink)
 
 
+def test_swig_factor_direction_has_mahalanobis_norm_two():
+    covariance = jnp.asarray([[1.5, 0.4], [0.4, 0.8]])
+    covariance_factor = jnp.linalg.cholesky(covariance)
+    direction = _sample_direction_from_covariance_factor(
+        jax.random.key(27),
+        jnp.zeros(2),
+        covariance_factor,
+    )
+
+    whitened_direction = jnp.linalg.solve(covariance_factor, direction)
+    np.testing.assert_allclose(
+        whitened_direction @ whitened_direction,
+        4.0,
+        rtol=1e-6,
+    )
+
+
+def test_swig_legacy_covariance_path_matches_lockstep_bitwise():
+    lockstep, fsm = _swig_builders()
+    key = jax.random.key(29)
+    position = jnp.linspace(-0.4, 0.4, _N_DIMS)
+    threshold = jnp.asarray(-25.0)
+    state = _particle_state(position, threshold)
+    block_covariances = _block_covariances()
+
+    reference_result = jax.jit(
+        lambda: lockstep(
+            key,
+            state,
+            threshold,
+            block_covariances,
+        )
+    )()
+    legacy_result = jax.jit(
+        lambda: fsm(
+            key,
+            state,
+            threshold,
+            block_covariances,
+        )
+    )()
+
+    for actual, expected in zip(
+        jax.tree.leaves(legacy_result),
+        jax.tree.leaves(reference_result),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(actual, expected)
+
+
 def test_swig_fsm_per_slice_info_shapes_and_totals():
     _, fsm_scalar = _swig_builders(per_slice_info=False)
     _, fsm_vector = _swig_builders(per_slice_info=True)
     key = jax.random.key(11)
     pos = jnp.zeros(_N_DIMS)
     l0 = jnp.asarray(-25.0)
-    covs = _covariances()
-    _, info_s = jax.jit(lambda: fsm_scalar(key, _particle_state(pos, l0), l0, covs))()
-    _, info_v = jax.jit(lambda: fsm_vector(key, _particle_state(pos, l0), l0, covs))()
+    covariance_factors = _block_covariance_factors()
+    _, info_s = jax.jit(
+        lambda: fsm_scalar(
+            key,
+            _particle_state(pos, l0),
+            l0,
+            block_covariance_factors=covariance_factors,
+        )
+    )()
+    _, info_v = jax.jit(
+        lambda: fsm_vector(
+            key,
+            _particle_state(pos, l0),
+            l0,
+            block_covariance_factors=covariance_factors,
+        )
+    )()
     n_slices_total = 2 * (2 + 1 + 1 + 2)
     assert info_v.num_expansions.shape == (n_slices_total,)
     assert info_v.num_shrink.shape == (n_slices_total,)
@@ -315,12 +396,13 @@ def test_swig_fsm_hit_segments_never_reference_build_cache():
     )
     key = jax.random.key(0)
     l0 = jnp.asarray(-25.0)
+    covariance_factors = _block_covariance_factors()
     jax.make_jaxpr(
         lambda: fsm(
             key,
             _particle_state(jnp.zeros(_N_DIMS), l0),
             l0,
-            _covariances(),
+            block_covariance_factors=covariance_factors,
         )
     )()
     # Two sweeps x one rebuild segment per sweep, plus the chain-entry build.
@@ -333,7 +415,7 @@ def test_swig_fsm_lowers_to_one_while_per_segment():
     keys = jax.random.split(jax.random.key(0), n_lanes)
     positions = jnp.zeros((n_lanes, _N_DIMS))
     thresholds = jnp.full((n_lanes,), -25.0)
-    covs = _covariances()
+    covariance_factors = _block_covariance_factors()
 
     def batched(keys, positions, thresholds):
         return jax.vmap(
@@ -341,7 +423,7 @@ def test_swig_fsm_lowers_to_one_while_per_segment():
                 key,
                 _particle_state(position, threshold),
                 threshold,
-                covs,
+                block_covariance_factors=covariance_factors,
             )
         )(keys, positions, thresholds)
 
@@ -352,14 +434,34 @@ def test_swig_fsm_lowers_to_one_while_per_segment():
     assert main_text.count("stablehlo.while") == 4
 
 
+def test_swig_fsm_does_not_factor_covariance_inside_slice_path():
+    _, fsm = _swig_builders()
+    key = jax.random.key(31)
+    threshold = jnp.asarray(-25.0)
+    state = _particle_state(jnp.zeros(_N_DIMS), threshold)
+    covariance_factors = _block_covariance_factors()
+
+    jaxpr = jax.make_jaxpr(
+        lambda: fsm(
+            key,
+            state,
+            threshold,
+            block_covariance_factors=covariance_factors,
+        )
+    )()
+
+    assert "cholesky" not in str(jaxpr).lower()
+
+
 _NSS_PERIODIC = {1: (0.0, 2.0)}
+_NSS_DIMS = 3
 
 
 def _toy_nss_loglik(position):
     return -jnp.sum((position - 0.15) ** 2) * 4.0
 
 
-def _build_nss_reference_step():
+def _build_nss_factor_reference_step():
     init_state_fn = partial(
         _init_state_strategy,
         logprior_fn=_toy_log_prior,
@@ -372,8 +474,8 @@ def _build_nss_reference_step():
     )
     proposal = to_prior_space_proposal(
         _NSS_PERIODIC,
-        _N_DIMS,
-        sample_direction_from_covariance,
+        _NSS_DIMS,
+        _sample_direction_from_covariance_factor,
     )
     return slice_constrained_step(init_state_fn, kernel, proposal)
 
@@ -383,30 +485,37 @@ def _nss_reference_chain(
     chain_key,
     state,
     loglikelihood_0,
-    cov,
+    covariance_factor,
     n_inner_steps,
 ):
     keys = jax.random.split(chain_key, n_inner_steps)
 
     def body(carry, key):
-        return step(key, carry, loglikelihood_0, cov=cov)
+        return step(key, carry, loglikelihood_0, cov=covariance_factor)
 
     return jax.lax.scan(body, state, keys)
 
 
-def test_nss_fsm_constrained_step_matches_blackjax_scan_bitwise():
+def test_nss_fsm_constrained_step_matches_factor_scan_bitwise():
     n_lanes, n_inner_steps = 512, 8
-    reference_step = _build_nss_reference_step()
+    reference_step = _build_nss_factor_reference_step()
     fsm_step = _build_nss_fsm_constrained_step(
         log_prior_fn=_toy_log_prior,
         log_likelihood_fn=_toy_nss_loglik,
         periodic=_NSS_PERIODIC,
-        n_dims=_N_DIMS,
+        n_dims=_NSS_DIMS,
     )
     chain_keys = jax.random.split(jax.random.key(21), n_lanes)
-    positions = jax.random.normal(jax.random.key(22), (n_lanes, _N_DIMS)) * 0.4
+    positions = jax.random.normal(jax.random.key(22), (n_lanes, _NSS_DIMS)) * 0.4
     thresholds = jnp.linspace(-20.0, -1.0, n_lanes)
-    cov = jnp.eye(_N_DIMS) * 0.3
+    covariance = jnp.asarray(
+        [
+            [0.5, 0.12, -0.04],
+            [0.12, 0.35, 0.08],
+            [-0.04, 0.08, 0.25],
+        ]
+    )
+    covariance_factor = jnp.linalg.cholesky(covariance)
 
     def particle(position, loglikelihood_0):
         return StateWithLogLikelihood(
@@ -423,7 +532,7 @@ def test_nss_fsm_constrained_step_matches_blackjax_scan_bitwise():
                 key,
                 particle(position, threshold),
                 threshold,
-                cov,
+                covariance_factor,
                 n_inner_steps,
             )
         )
@@ -434,7 +543,7 @@ def test_nss_fsm_constrained_step_matches_blackjax_scan_bitwise():
                 jax.random.split(key, n_inner_steps),
                 particle(position, threshold),
                 threshold,
-                cov=cov,
+                covariance_factor=covariance_factor,
             )
         )
     )(chain_keys, positions, thresholds)
@@ -451,6 +560,79 @@ def test_nss_fsm_constrained_step_matches_blackjax_scan_bitwise():
         strict=True,
     ):
         np.testing.assert_array_equal(actual, expected)
+
+
+def test_nss_fsm_legacy_covariance_matches_precomputed_factor():
+    n_inner_steps = 5
+    fsm_step = _build_nss_fsm_constrained_step(
+        log_prior_fn=_toy_log_prior,
+        log_likelihood_fn=_toy_nss_loglik,
+        periodic=_NSS_PERIODIC,
+        n_dims=_NSS_DIMS,
+    )
+    covariance = jnp.asarray(
+        [
+            [0.5, 0.12, -0.04],
+            [0.12, 0.35, 0.08],
+            [-0.04, 0.08, 0.25],
+        ]
+    )
+    covariance_factor = jnp.linalg.cholesky(covariance)
+    keys = jax.random.split(jax.random.key(33), n_inner_steps)
+    threshold = jnp.asarray(-12.0)
+    state = StateWithLogLikelihood(
+        position=jnp.asarray([0.1, 0.2, 0.3]),
+        logdensity=_toy_log_prior(jnp.asarray([0.1, 0.2, 0.3])),
+        loglikelihood=_toy_nss_loglik(jnp.asarray([0.1, 0.2, 0.3])),
+        loglikelihood_birth=threshold,
+    )
+
+    factor_result = jax.jit(
+        lambda: fsm_step(
+            keys,
+            state,
+            threshold,
+            covariance_factor=covariance_factor,
+        )
+    )()
+    legacy_result = jax.jit(lambda: fsm_step(keys, state, threshold, covariance))()
+
+    for actual, expected in zip(
+        jax.tree.leaves(legacy_result),
+        jax.tree.leaves(factor_result),
+        strict=True,
+    ):
+        np.testing.assert_allclose(actual, expected, rtol=1e-14, atol=1e-14)
+
+
+def test_nss_fsm_does_not_factor_covariance_inside_slice_path():
+    fsm_step = _build_nss_fsm_constrained_step(
+        log_prior_fn=_toy_log_prior,
+        log_likelihood_fn=_toy_nss_loglik,
+        periodic=_NSS_PERIODIC,
+        n_dims=_NSS_DIMS,
+    )
+    covariance_factor = jnp.linalg.cholesky(jnp.eye(_NSS_DIMS) * 0.3)
+    keys = jax.random.split(jax.random.key(35), 5)
+    threshold = jnp.asarray(-12.0)
+    position = jnp.asarray([0.1, 0.2, 0.3])
+    state = StateWithLogLikelihood(
+        position=position,
+        logdensity=_toy_log_prior(position),
+        loglikelihood=_toy_nss_loglik(position),
+        loglikelihood_birth=threshold,
+    )
+
+    jaxpr = jax.make_jaxpr(
+        lambda: fsm_step(
+            keys,
+            state,
+            threshold,
+            covariance_factor=covariance_factor,
+        )
+    )()
+
+    assert "cholesky" not in str(jaxpr).lower()
 
 
 def test_replicated_update_can_fold_inner_steps_without_changing_info_shape():

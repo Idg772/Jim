@@ -108,9 +108,7 @@ def _collective_census(hlo: str) -> dict[str, dict[str, Any]]:
         # CPU HLO commonly keeps collectives synchronous (``all-gather``),
         # while GPU HLO rewrites them to an asynchronous start/done pair.
         # Count the start as the single logical collective and ignore the done.
-        pattern = re.compile(
-            rf"(?:^|\s){re.escape(operation)}(?:-start)?\("
-        )
+        pattern = re.compile(rf"(?:^|\s){re.escape(operation)}(?:-start)?\(")
         instructions = [
             _normalise_hlo_instruction(line)
             for line in hlo.splitlines()
@@ -262,6 +260,12 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         logprior_fn=log_prior,
         loglikelihood_fn=log_likelihood,
     )
+    callback_selector = getattr(sampler, "_inner_kernel_params_fn_for_mesh", None)
+    update_inner_kernel_params_fn = (
+        callback_selector(mesh)
+        if callback_selector is not None
+        else sampler._update_inner_kernel_params_fn
+    )
     state = adaptive_init(
         positions,
         init_state_fn=lambda pos: jax.lax.map(
@@ -269,7 +273,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             pos,
             batch_size=args.n_delete,
         ),
-        update_inner_kernel_params_fn=sampler._update_inner_kernel_params_fn,
+        update_inner_kernel_params_fn=update_inner_kernel_params_fn,
     )
     if mesh is not None:
         state = place_benchmark_state(state, mesh)
