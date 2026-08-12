@@ -83,6 +83,20 @@ def test_trivial_sampler_works():
     assert result["log_likelihood"].shape == (3,)
 
 
+def test_weighted_samples_are_an_explicit_optional_capability():
+    lp, ll, lpost = _make_callables(n_dims=2)
+    sampler = _TrivialSampler(
+        n_dims=2,
+        log_prior_fn=lp,
+        log_likelihood_fn=ll,
+        log_posterior_fn=lpost,
+        config=_TrivialConfig(),
+    )
+
+    with pytest.raises(NotImplementedError, match="does not expose weighted"):
+        sampler.get_weighted_samples()
+
+
 def test_trivial_sampler_get_diagnostics_returns_dict():
     lp, ll, lpost = _make_callables(n_dims=1)
     s = _TrivialSampler(

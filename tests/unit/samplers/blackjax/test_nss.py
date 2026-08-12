@@ -174,6 +174,12 @@ def test_nss_get_samples_before_sample_raises():
         sampler.get_samples()
 
 
+def test_nss_get_weighted_samples_before_sample_raises():
+    sampler = _make_sampler()
+    with pytest.raises(RuntimeError, match="before sample"):
+        sampler.get_weighted_samples()
+
+
 def _init_pos(n_live: int, seed: int = 99) -> jax.Array:
     return jax.random.uniform(jax.random.key(seed), (n_live, 2))
 
@@ -251,6 +257,7 @@ def test_nss_sample_phase_seconds():
         "init_total",
         "likelihood_jit",
         "initial_likelihood_eval",
+        "sampler_kernel_jit",
         "ns_loop",
         "finalise",
     }
@@ -267,9 +274,14 @@ def test_nss_sample_phase_seconds():
         assert jit_s > 0.0 and eval_s > 0.0
         assert jit_s + eval_s <= phases["init_total"] + 1e-6
 
+    sampler_jit_s = phases["sampler_kernel_jit"]
+    assert sampler_jit_s is not None and sampler_jit_s > 0.0
+
     # Phases must fit inside the overall reported sampling time (small
     # slack for the un-timed terminate checks between steps).
-    accounted = phases["init_total"] + phases["ns_loop"] + phases["finalise"]
+    accounted = (
+        phases["init_total"] + sampler_jit_s + phases["ns_loop"] + phases["finalise"]
+    )
     assert accounted <= diag["sampling_time"] + 0.5
 
 

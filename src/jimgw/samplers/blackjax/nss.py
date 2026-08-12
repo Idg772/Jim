@@ -27,6 +27,7 @@ from blackjax.smc.tuning.from_particles import particles_covariance_matrix
 from jax.flatten_util import ravel_pytree
 from jax.sharding import Mesh
 from jaxtyping import Array, Float, Key
+from scipy.special import logsumexp
 
 from jimgw.samplers.base import Sampler
 from jimgw.samplers.blackjax._fsm import (
@@ -356,6 +357,7 @@ class BlackJAXNSSSampler(Sampler):
             "init_total": None,
             "likelihood_jit": None,
             "initial_likelihood_eval": None,
+            "sampler_kernel_jit": None,
             "ns_loop": None,
             "finalise": None,
         }
@@ -486,7 +488,24 @@ class BlackJAXNSSSampler(Sampler):
             dlogz = jnp.logaddexp(0, state.integrator.logZ_live - state.integrator.logZ)
             return bool(jnp.isfinite(dlogz) and dlogz < config.termination_dlogz)
 
-        step_fn = jax.jit(nested_sampler.step)
+        # Compile the outer sampler kernel explicitly so its one-off cost is
+        # measured independently of steady-state nested-sampling work.  This
+        # mirrors the paper's timing convention, which quotes likelihood and
+        # sampler-kernel JIT separately from sampling wall time.  The fallback
+        # preserves benchmark observers that intentionally wrap ``jax.jit``
+        # with a plain callable to time the lazy first invocation themselves.
+        jitted_step_fn = jax.jit(nested_sampler.step)
+        step_fn: Callable[[Any, Any], Any]
+        lower_step = getattr(jitted_step_fn, "lower", None)
+        if callable(lower_step):
+            _sampler_jit_t0 = time.perf_counter()
+            compile_step = getattr(lower_step(rng_key, state), "compile", None)
+            if not callable(compile_step):
+                raise TypeError("lowered sampler kernel is not compilable")
+            step_fn = cast(Callable[[Any, Any], Any], compile_step())
+            phase_seconds["sampler_kernel_jit"] = time.perf_counter() - _sampler_jit_t0
+        else:
+            step_fn = cast(Callable[[Any, Any], Any], jitted_step_fn)
         _last_ckpt_t = time.perf_counter()
 
         _loop_t0 = time.perf_counter()
@@ -556,6 +575,36 @@ class BlackJAXNSSSampler(Sampler):
         samples = np.asarray(posterior.iloc[:, : self.n_dims])
         log_L = np.asarray(posterior["logL"])
         return {"samples": samples, "log_likelihood": log_L}
+
+    def get_weighted_samples(self) -> dict[str, np.ndarray]:
+        """Return the original nested points and normalized posterior log-weights.
+
+        Unlike [`get_samples`][jimgw.samplers.blackjax.nss.BlackJAXNSSSampler.get_samples],
+        this method performs no posterior resampling.  The weights are the
+        nested-sampling quadrature weights from `NestedSamples.logw`, normalized
+        in log space using 64-bit arithmetic.
+
+        Returns:
+            Dict with ``"samples"`` (shape ``(n, n_dims)``), death-contour
+            ``"log_likelihood"`` and birth-contour
+            ``"log_likelihood_birth"`` (both shape ``(n,)``), and normalized
+            ``"log_weights"`` (shape ``(n,)``). All arrays retain the original
+            nested-point ordering.
+        """
+        if not self._sampled:
+            raise RuntimeError("get_weighted_samples() called before sample()")
+
+        samples = np.asarray(self._nested_samples.iloc[:, : self.n_dims])
+        log_likelihood = np.asarray(self._nested_samples["logL"])
+        log_likelihood_birth = np.asarray(self._nested_samples["logL_birth"])
+        log_weights = np.asarray(self._nested_samples.logw(), dtype=np.float64)
+        log_weights = log_weights - logsumexp(log_weights)
+        return {
+            "samples": samples,
+            "log_likelihood": log_likelihood,
+            "log_likelihood_birth": log_likelihood_birth,
+            "log_weights": log_weights,
+        }
 
     def _get_diagnostics(self) -> dict[str, Any]:
         """Return NSS run diagnostics.

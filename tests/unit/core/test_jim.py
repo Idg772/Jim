@@ -224,6 +224,54 @@ class TestGetSamples:
         assert samples["M_c"].shape[0] == n_available
 
 
+class TestGetWeightedSamples:
+    def test_get_weighted_samples_reverses_transforms_and_preserves_alignment(
+        self, jim_with_sample_transforms, monkeypatch
+    ):
+        sample_space = np.array(
+            [
+                [0.25, 0.0],
+                [0.50, np.log(3.0)],
+                [0.75, -np.log(3.0)],
+            ]
+        )
+        log_likelihood = np.array([-3.0, -2.0, -1.0])
+        log_likelihood_birth = np.array([-np.inf, -3.0, -2.0])
+        log_weights = np.log(np.array([0.2, 0.3, 0.5], dtype=np.float64))
+        monkeypatch.setattr(
+            jim_with_sample_transforms.sampler,
+            "get_weighted_samples",
+            lambda: {
+                "samples": sample_space,
+                "log_likelihood": log_likelihood,
+                "log_likelihood_birth": log_likelihood_birth,
+                "log_weights": log_weights,
+            },
+        )
+
+        result = jim_with_sample_transforms.get_weighted_samples()
+
+        assert set(result) == {
+            "M_c",
+            "q",
+            "log_likelihood",
+            "log_likelihood_birth",
+            "log_weights",
+        }
+        np.testing.assert_allclose(result["M_c"], [45.0, 62.5, 27.5])
+        np.testing.assert_allclose(result["q"], sample_space[:, 0])
+        np.testing.assert_array_equal(result["log_likelihood"], log_likelihood)
+        np.testing.assert_array_equal(
+            result["log_likelihood_birth"], log_likelihood_birth
+        )
+        np.testing.assert_array_equal(result["log_weights"], log_weights)
+        assert result["log_weights"].dtype == np.float64
+
+    def test_get_weighted_samples_rejects_unsupported_backend(self, basic_jim):
+        with pytest.raises(NotImplementedError, match="does not expose weighted"):
+            basic_jim.get_weighted_samples()
+
+
 # ---------------------------------------------------------------------------
 # TestJimInitialization
 # ---------------------------------------------------------------------------

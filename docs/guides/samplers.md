@@ -355,6 +355,32 @@ Pass `n_samples` to `jim.get_samples()` to further downsample uniformly without 
 samples = jim.get_samples(n_samples=2000)
 ```
 
+Nested-sampling backends also expose their original weighted point collection:
+
+```python
+weighted = jim.get_weighted_samples()
+# prior parameter names, plus aligned nested-sampling metadata
+weighted["log_likelihood"]        # death contour
+weighted["log_likelihood_birth"]  # birth contour; -inf for initial live points
+weighted["log_weights"]           # normalized posterior log weights
+```
+
+Use `jimgw.samplers.insertion_index_diagnostic` to test the finite-birth
+replacement points against the discrete-uniform insertion-index distribution:
+
+```python
+from jimgw.samplers import insertion_index_diagnostic
+
+insertion = insertion_index_diagnostic(
+    weighted["log_likelihood"],
+    weighted["log_likelihood_birth"],
+    n_live=512,
+)
+```
+
+The returned statistic and p-value diagnose constrained-replacement calibration;
+they are not a posterior goodness-of-fit test.
+
 ---
 
 ## Run diagnostics

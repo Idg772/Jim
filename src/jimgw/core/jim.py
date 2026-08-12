@@ -621,6 +621,43 @@ class Jim:
         out["log_likelihood"] = np.asarray(log_likelihood)
         return out
 
+    def get_weighted_samples(self) -> dict[str, np.ndarray]:
+        """Retrieve original weighted posterior samples in prior space.
+
+        This is the non-resampling counterpart to [`get_samples`][jimgw.core.jim.Jim.get_samples]
+        for sampler backends that retain their weighted posterior collection.
+        Sample-space transforms are reversed exactly as they are for
+        `get_samples`, while the original nested-point ordering and aligned
+        normalized log weights are preserved.
+
+        Returns:
+            Dict mapping prior parameter names to 1-D numpy arrays, plus
+            ``"log_likelihood"`` and ``"log_weights"``. Nested-sampling
+            backends also provide the aligned ``"log_likelihood_birth"``
+            field. The log weights are normalized such that
+            ``scipy.special.logsumexp(log_weights) == 0``.
+
+        Raises:
+            NotImplementedError: If the configured sampler does not expose
+                weighted posterior samples.
+        """
+        result = self.sampler.get_weighted_samples()
+        sample_array = result["samples"]
+
+        # Backward-transform from sampling space to prior space without changing
+        # the row order, so the likelihoods and weights remain aligned.
+        named = jax.vmap(self.add_name)(jnp.array(sample_array))
+        for transform in reversed(self.sample_transforms):
+            named = jax.vmap(transform.backward)(named)
+        out = {k: np.array(named[k]) for k in self.prior_parameter_names}
+        out["log_likelihood"] = np.asarray(result["log_likelihood"])
+        if "log_likelihood_birth" in result:
+            out["log_likelihood_birth"] = np.asarray(
+                result["log_likelihood_birth"]
+            )
+        out["log_weights"] = np.asarray(result["log_weights"])
+        return out
+
     def get_diagnostics(self) -> dict[str, Any]:
         """Return run-level diagnostics from the most recent `sample` call.
 

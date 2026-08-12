@@ -23,6 +23,7 @@ from jimgw.samplers.config import (
     FlowMCConfig,
     SamplerConfig,
 )
+from jimgw.samplers.diagnostics import insertion_index_diagnostic
 
 __all__ = [
     "BaseSamplerConfig",
@@ -34,6 +35,7 @@ __all__ = [
     "Sampler",
     "SamplerConfig",
     "build_sampler",
+    "insertion_index_diagnostic",
     "register_sampler",
 ]
 

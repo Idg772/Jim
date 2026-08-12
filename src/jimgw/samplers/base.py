@@ -9,6 +9,8 @@ prior/likelihood details beyond what the injected callables provide.
 Jim is responsible for building those callables and for converting
 the sampling-space arrays returned by `Sampler.get_samples` back to a
 named prior-space dict via [`Jim.get_samples`][jimgw.core.jim.Jim.get_samples].
+Backends that retain their original weighted sample collection may also expose
+it through `Sampler.get_weighted_samples`.
 """
 
 import time
@@ -127,6 +129,34 @@ class Sampler(ABC):
 
         Only valid after `sample` has been called.
         """
+
+    def get_weighted_samples(self) -> dict[str, np.ndarray]:
+        """Return the backend's original weighted posterior sample collection.
+
+        Weighted backends may override this method to return a dict with the
+        following keys:
+
+        * ``"samples"`` — 2-D ``np.ndarray`` of shape ``(n, n_dims)`` in the
+          sampling space, without importance resampling.
+        * ``"log_likelihood"`` — 1-D ``np.ndarray`` of shape ``(n,)`` with the
+          per-sample log-likelihood values.
+        * ``"log_weights"`` — 1-D ``np.ndarray`` of shape ``(n,)`` containing
+          normalized log posterior weights, aligned row-for-row with ``samples``.
+
+        Nested-sampling backends additionally return
+        ``"log_likelihood_birth"``, the aligned birth-contour likelihood for
+        each nested point. Other backends may omit this additive metadata key.
+
+        The default implementation makes the capability boundary explicit for
+        backends that only expose equally-weighted samples.
+
+        Raises:
+            NotImplementedError: If this sampler does not retain a weighted
+                posterior sample collection.
+        """
+        raise NotImplementedError(
+            f"{self.sampler_name} does not expose weighted posterior samples"
+        )
 
     def get_diagnostics(self) -> dict[str, Any]:
         """Return run-level diagnostics.

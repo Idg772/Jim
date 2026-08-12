@@ -186,7 +186,10 @@ times:
 
 Per-phase raw numbers are in `timing_seconds.sample_phases`
 (`init_total`, `likelihood_jit`, `initial_likelihood_eval`, `ns_loop`,
-`finalise`).
+`sampler_kernel_jit`, `finalise`). The injection-campaign runner uses the
+direct `sampler_kernel_jit` measurement; the full-run comparison keeps its
+first-step observer for compatibility with historical revisions that do not
+expose that phase.
 
 ### Warm-cache protocol
 
