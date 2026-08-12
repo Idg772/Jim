@@ -6,6 +6,7 @@ import pytest
 from benchmarks.device_parallel_nss.paper_model import (
     RippleIMRPhenomPv2NRTidalv2,
     _apply_time_shift,
+    _phenomd_peak_time_shift,
 )
 
 EXPECTED_PARAMETER_NAMES = (
@@ -92,6 +93,110 @@ def test_parameter_schema_matches_the_paper_model() -> None:
     waveform = RippleIMRPhenomPv2NRTidalv2(f_ref=20.0)
 
     assert waveform.parameter_names == EXPECTED_PARAMETER_NAMES
+
+
+def test_default_time_anchor_is_the_original_nrtidal_merger_alignment() -> None:
+    frequencies = jnp.linspace(20.0, 1024.0, 257)
+    implicit = RippleIMRPhenomPv2NRTidalv2(f_ref=20.0)(
+        frequencies, PAPER_PARAMETERS
+    )
+    explicit = RippleIMRPhenomPv2NRTidalv2(
+        f_ref=20.0,
+        time_anchor="nrtidal-merger",
+    )(frequencies, PAPER_PARAMETERS)
+
+    for polarization in ("p", "c"):
+        np.testing.assert_array_equal(implicit[polarization], explicit[polarization])
+
+
+def test_unknown_time_anchor_is_rejected_eagerly() -> None:
+    with pytest.raises(ValueError, match="unknown time anchor"):
+        RippleIMRPhenomPv2NRTidalv2(time_anchor="not-a-time-anchor")
+
+
+def test_imrphenomd_time_anchor_changes_only_the_common_affine_phase() -> None:
+    frequencies = np.linspace(20.0, 1024.0, 1005)
+    local = RippleIMRPhenomPv2NRTidalv2(time_anchor="nrtidal-merger")(
+        jnp.asarray(frequencies), PAPER_PARAMETERS
+    )
+    author = RippleIMRPhenomPv2NRTidalv2(time_anchor="imrphenomd")(
+        jnp.asarray(frequencies), PAPER_PARAMETERS
+    )
+
+    fitted_slopes: list[float] = []
+    for polarization in ("p", "c"):
+        local_values = np.asarray(local[polarization])
+        author_values = np.asarray(author[polarization])
+        populated = (np.abs(local_values) > 0.0) & (np.abs(author_values) > 0.0)
+        np.testing.assert_allclose(
+            np.abs(author_values[populated]),
+            np.abs(local_values[populated]),
+            rtol=2e-12,
+            atol=0.0,
+        )
+        phase_difference = np.unwrap(
+            np.angle(author_values[populated] / local_values[populated])
+        )
+        phase_line = np.polyfit(frequencies[populated], phase_difference, deg=1)
+        residual = phase_difference - np.polyval(
+            phase_line, frequencies[populated]
+        )
+        assert np.max(np.abs(residual)) < 2e-9
+        fitted_slopes.append(float(phase_line[0]))
+
+    # Twist-up commutes with the carrier time shift, so plus and cross must
+    # receive exactly the same affine phase.  The nonzero slope proves the
+    # diagnostic selected a genuinely different time origin.
+    np.testing.assert_allclose(fitted_slopes[0], fitted_slopes[1], atol=2e-12)
+    assert abs(fitted_slopes[0]) > 1e-3
+
+
+def test_imrphenomd_peak_shift_locks_the_coauthor_sign_and_units() -> None:
+    from ripplegw.constants import MTSUN
+    from ripplegw.conversions import Mc_eta_to_ms
+    from ripplegw.waveforms.cbc.IMRPhenomD.IMRPhenomD_utils import get_coeffs
+    from ripplegw.waveforms.cbc.IMRPhenomD.IMRPhenomPv2_utils import convert_spins
+
+    primary_mass, secondary_mass = Mc_eta_to_ms(
+        jnp.array([PAPER_PARAMETERS["M_c"], PAPER_PARAMETERS["eta"]])
+    )
+    converted = convert_spins(
+        secondary_mass,
+        primary_mass,
+        20.0,
+        PAPER_PARAMETERS["phase_c"],
+        PAPER_PARAMETERS["iota"],
+        PAPER_PARAMETERS["s2_x"],
+        PAPER_PARAMETERS["s2_y"],
+        PAPER_PARAMETERS["s2_z"],
+        PAPER_PARAMETERS["s1_x"],
+        PAPER_PARAMETERS["s1_y"],
+        PAPER_PARAMETERS["s1_z"],
+    )
+    bbh_intrinsic = jnp.array(
+        [primary_mass, secondary_mass, converted[1], converted[0]]
+    )
+
+    shift = _phenomd_peak_time_shift(
+        (primary_mass + secondary_mass) * MTSUN,
+        bbh_intrinsic,
+        get_coeffs(bbh_intrinsic),
+    )
+
+    assert float(shift) == pytest.approx(-0.0005591921787999368, abs=5e-10)
+
+
+def test_imrphenomd_time_anchor_is_jittable() -> None:
+    waveform = RippleIMRPhenomPv2NRTidalv2(time_anchor="imrphenomd")
+    frequencies = jnp.linspace(20.0, 1024.0, 257)
+
+    eager = waveform(frequencies, PAPER_PARAMETERS)
+    compiled = jax.jit(waveform)(frequencies, PAPER_PARAMETERS)
+
+    for polarization in ("p", "c"):
+        np.testing.assert_allclose(
+            compiled[polarization], eager[polarization], rtol=1e-10, atol=0.0
+        )
 
 
 def test_waveform_output_is_finite_and_jittable() -> None:

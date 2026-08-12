@@ -31,7 +31,11 @@ from ripplegw.typing import FloatLike
 from ripplegw.waveforms.cbc.IMRPhenom_NRTidal.IMRPhenomD_NRTidalv2 import (
     _get_merger_frequency,
 )
-from ripplegw.waveforms.cbc.IMRPhenomD.IMRPhenomD_utils import get_coeffs
+from ripplegw.waveforms.cbc.IMRPhenomD.IMRPhenomD import get_IIb_raw_phase
+from ripplegw.waveforms.cbc.IMRPhenomD.IMRPhenomD_utils import (
+    get_coeffs,
+    get_transition_frequencies,
+)
 from ripplegw.waveforms.cbc.IMRPhenomD.IMRPhenomPv2 import PhenomPCoreTwistUp
 from ripplegw.waveforms.cbc.IMRPhenomD.IMRPhenomPv2_utils import (
     ComputeNNLOanglecoeffs,
@@ -60,6 +64,7 @@ else:  # pragma: no cover - exercised by the frozen benchmark harness
     )
 
 _PHENOMD_POLARIZATION_NORM = 2.0 * jnp.sqrt(5.0 / (64.0 * jnp.pi))
+_TIME_ANCHORS = frozenset(("nrtidal-merger", "imrphenomd"))
 
 
 def _apply_time_shift(
@@ -73,12 +78,42 @@ def _apply_time_shift(
     return carrier * jax.lax.complex(jnp.cos(angle), jnp.sin(angle))
 
 
+def _phenomd_peak_time_shift(
+    M_s: FloatLike,
+    bbh_intrinsic: Float[Array, 4],
+    coefficients: Float[Array, 19],
+) -> FloatLike:
+    """Return Ripple's IMRPhenomD peak-alignment shift in seconds.
+
+    This is the affine time convention inherited by the coauthor combined
+    Pv2+NRTidal implementation: the derivative is taken from the raw
+    IMRPhenomD merger-ringdown phase at the BBH amplitude transition.  It is
+    intentionally separate from the NRTidal merger derivative used by this
+    benchmark's original reconstruction.
+    """
+
+    _, _, _, f4, f_rd, f_damp = get_transition_frequencies(
+        bbh_intrinsic,
+        coefficients[5],
+        coefficients[6],
+    )
+    dimensionless_slope = jax.grad(get_IIb_raw_phase)(
+        f4 * M_s,
+        bbh_intrinsic,
+        coefficients,
+        f_rd,
+        f_damp,
+    )
+    return -(M_s * dimensionless_slope) / (2.0 * jnp.pi)
+
+
 def _carrier_and_geometry(
     frequency: Float[Array, " n_freq"],
     theta: Float[Array, 13],
     f_ref: float,
     *,
     no_taper: bool,
+    time_anchor: str,
     basis: FrequencyPowerBasis | None = None,
 ) -> tuple[
     Complex[Array, " n_freq"],
@@ -233,11 +268,19 @@ def _carrier_and_geometry(
     phase = carrier_phase_for_basis(basis)
     carrier = corrected_amplitude * (jnp.cos(phase) + 1.0j * jnp.sin(phase))
 
-    # LAL aligns the tidal waveform at the NRTidal merger frequency, not the
-    # BBH ringdown frequency used by plain Pv2.  Autodiff is the differentiable
-    # analogue of LAL's local phase-spline derivative.
-    merger_frequency = _get_merger_frequency(tidal_intrinsic)
-    time_shift = jax.grad(carrier_phase)(merger_frequency) / (2.0 * jnp.pi)
+    if time_anchor == "nrtidal-merger":
+        # LAL aligns the tidal waveform at the NRTidal merger frequency, not
+        # the BBH ringdown frequency used by plain Pv2. Autodiff is the
+        # differentiable analogue of LAL's local phase-spline derivative.
+        merger_frequency = _get_merger_frequency(tidal_intrinsic)
+        time_shift = jax.grad(carrier_phase)(merger_frequency) / (2.0 * jnp.pi)
+    elif time_anchor == "imrphenomd":
+        time_shift = _phenomd_peak_time_shift(M_s, bbh_intrinsic, coefficients)
+    else:  # Defensive validation for callers of the functional interface.
+        raise ValueError(
+            f"unknown time anchor {time_anchor!r}; expected one of "
+            f"{sorted(_TIME_ANCHORS)}"
+        )
     carrier = _apply_time_shift(carrier, frequency, time_shift)
 
     return (
@@ -260,6 +303,7 @@ def gen_imrphenompv2_nrtidalv2_hphc(
     f_ref: float,
     *,
     no_taper: bool = False,
+    time_anchor: str = "nrtidal-merger",
     basis: FrequencyPowerBasis | None = None,
 ) -> tuple[Complex[Array, " n_freq"], Complex[Array, " n_freq"]]:
     """Generate precessing NRTidalv2 plus/cross polarizations."""
@@ -275,7 +319,14 @@ def gen_imrphenompv2_nrtidalv2_hphc(
         alpha_offset,
         epsilon_offset,
         polarization_rotation,
-    ) = _carrier_and_geometry(frequency, theta, f_ref, no_taper=no_taper, basis=basis)
+    ) = _carrier_and_geometry(
+        frequency,
+        theta,
+        f_ref,
+        no_taper=no_taper,
+        time_anchor=time_anchor,
+        basis=basis,
+    )
 
     primary_mass, secondary_mass = Mc_eta_to_ms(theta[:2])
     total_mass = primary_mass + secondary_mass
@@ -304,9 +355,21 @@ class RippleIMRPhenomPv2NRTidalv2(
 ):
     """Benchmark-local JAX implementation of ``IMRPhenomPv2_NRTidalv2``."""
 
-    def __init__(self, f_ref: float = 20.0, *, no_taper: bool = False) -> None:
+    def __init__(
+        self,
+        f_ref: float = 20.0,
+        *,
+        no_taper: bool = False,
+        time_anchor: str = "nrtidal-merger",
+    ) -> None:
+        if time_anchor not in _TIME_ANCHORS:
+            raise ValueError(
+                f"unknown time anchor {time_anchor!r}; expected one of "
+                f"{sorted(_TIME_ANCHORS)}"
+            )
         self.f_ref = f_ref
         self.no_taper = no_taper
+        self.time_anchor = time_anchor
         self._basis_memo: list[tuple[Array, FrequencyPowerBasis]] = []
 
     def _basis_for(self, frequency: Array) -> FrequencyPowerBasis | None:
@@ -369,13 +432,16 @@ class RippleIMRPhenomPv2NRTidalv2(
             theta,
             self.f_ref,
             no_taper=self.no_taper,
+            time_anchor=self.time_anchor,
             basis=self._basis_for(frequency),
         )
         return {"p": hp, "c": hc}
 
     def __repr__(self) -> str:
         return (
-            f"RippleIMRPhenomPv2NRTidalv2(f_ref={self.f_ref}, no_taper={self.no_taper})"
+            "RippleIMRPhenomPv2NRTidalv2("
+            f"f_ref={self.f_ref}, no_taper={self.no_taper}, "
+            f"time_anchor={self.time_anchor!r})"
         )
 
 
