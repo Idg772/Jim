@@ -17,6 +17,7 @@ from jimgw.core.single_event.likelihood import (
     MultibandedTransientLikelihoodFD,
     TransientLikelihoodFD,
     ZeroLikelihood,
+    _build_time_marginalization_fine_window,
 )
 from jimgw.core.single_event.time_utils import (
     greenwich_mean_sidereal_time as compute_gmst,
@@ -32,6 +33,48 @@ from jimgw.samplers.config import BlackJAXSwiGConfig
 from tests.utils import assert_all_finite, common_keys_allclose
 
 FIXTURES_DIR = Path(__file__).parent.parent.parent.parent / "fixtures"
+
+
+def test_upsampled_fine_window_handles_signed_wrap_and_strict_bounds():
+    candidates, fine_mask, fine_step = _build_time_marginalization_fine_window(
+        n_total=3,
+        upsample_factor=2,
+        duration=3.0,
+        tc_range=(-1.6, -1.4),
+    )
+
+    assert fine_step == 0.5
+    np.testing.assert_array_equal(candidates, np.asarray([1]))
+    np.testing.assert_array_equal(fine_mask, np.asarray([[False], [True]]))
+
+    fine_step = 1.0 / 10.0
+    candidates, fine_mask, _ = _build_time_marginalization_fine_window(
+        n_total=2,
+        upsample_factor=5,
+        duration=1.0,
+        tc_range=(-3 * fine_step, -1.5 * fine_step),
+    )
+    np.testing.assert_array_equal(candidates, np.asarray([1]))
+    np.testing.assert_array_equal(
+        fine_mask,
+        np.asarray([[False], [False], [False], [True], [False]]),
+    )
+
+
+@pytest.mark.parametrize(
+    "tc_range",
+    [(1e300, 1e301), (np.nan, 0.0), (0.0, np.nan), (1.0, -1.0)],
+)
+def test_upsampled_fine_window_rejects_invalid_ranges(tc_range):
+    candidates, fine_mask, _ = _build_time_marginalization_fine_window(
+        n_total=3,
+        upsample_factor=2,
+        duration=3.0,
+        tc_range=tc_range,
+    )
+
+    assert candidates.size == 0
+    assert fine_mask.shape == (2, 0)
 
 
 def test_inner_product_matches_real_part_of_complex_inner_product():
@@ -593,6 +636,141 @@ class TestTransientLikelihoodFD:
             time_marginalization={"tc_range": custom_range},
         )
         assert likelihood.tc_range == custom_range
+
+    def test_time_marg_upsample_factor_validation(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={"upsample_factor": 4},
+        )
+        assert likelihood.tc_upsample == 4
+        with pytest.raises(ValueError):
+            TransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                time_marginalization={"upsample_factor": 0},
+            )
+
+    def test_time_marg_rejects_included_nyquist_endpoint(self, detectors_and_waveform):
+        ifos, waveform, fmin, _, gps = detectors_and_waveform
+        nyquist = float(ifos[0].data.sampling_frequency) / 2.0
+        with pytest.raises(ValueError, match="excludes the Nyquist endpoint"):
+            TransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=nyquist,
+                trigger_time=gps,
+                time_marginalization={"upsample_factor": 4},
+            )
+
+    def test_upsampled_reduction_matches_zero_padded_fft(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        upsample = 4
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={"upsample_factor": upsample},
+        )
+        rng = np.random.default_rng(0)
+        n_freq = len(likelihood.frequencies)
+        d_inner_h = jnp.asarray(rng.normal(size=n_freq) + 1j * rng.normal(size=n_freq))
+
+        padded = jnp.concatenate((likelihood.pad_low, d_inner_h, likelihood.pad_high))
+        n_total = padded.size
+        fine_fft = jnp.fft.fft(
+            jnp.concatenate(
+                (padded, jnp.zeros((upsample - 1) * n_total, dtype=padded.dtype))
+            ),
+            norm="backward",
+        )
+        duration = float(likelihood.detectors[0].data.duration)
+        fine_tc = jnp.fft.fftfreq(n_total * upsample, 1.0 / duration)
+        in_window = (fine_tc > likelihood.tc_range[0]) & (
+            fine_tc < likelihood.tc_range[1]
+        )
+        norm = jnp.log(n_total * upsample)
+
+        ref_time = logsumexp(jnp.where(in_window, fine_fft.real, -jnp.inf)) - norm
+        np.testing.assert_allclose(
+            float(likelihood._reduce_time(d_inner_h)), float(ref_time), rtol=1e-12
+        )
+        np.testing.assert_allclose(
+            float(jax.jit(likelihood._reduce_time)(d_inner_h)),
+            float(ref_time),
+            rtol=1e-12,
+        )
+        ref_phase_time = (
+            logsumexp(jnp.where(in_window, log_i0(jnp.absolute(fine_fft)), -jnp.inf))
+            - norm
+        )
+        np.testing.assert_allclose(
+            float(likelihood._reduce_phase_time(d_inner_h)),
+            float(ref_phase_time),
+            rtol=1e-12,
+        )
+
+    def test_upsampled_time_marg_accepts_fine_only_window(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        duration = float(ifos[0].data.duration)
+        n_total = int(duration * ifos[0].data.sampling_frequency / 2)
+        dt = duration / n_total
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={
+                "tc_range": (0.2 * dt, 0.3 * dt),
+                "upsample_factor": 4,
+            },
+        )
+
+        assert likelihood._tc_window_indices.size == 0
+        assert int(jnp.sum(likelihood._tc_fine_mask)) == 1
+        d_inner_h = jnp.ones(len(likelihood.frequencies), dtype=jnp.complex128)
+        assert jnp.isfinite(likelihood._reduce_time(d_inner_h))
+        assert jnp.isfinite(likelihood._reduce_phase_time(d_inner_h))
+
+    def test_upsampling_removes_grid_alignment_swing(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+
+        def build(upsample):
+            return TransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                time_marginalization={"upsample_factor": upsample},
+            )
+
+        coarse, fine = build(1), build(32)
+        freqs = coarse.frequencies
+        duration = float(coarse.detectors[0].data.duration)
+        dt = duration / len(coarse.tc_array)
+        amplitude = 50.0 / len(freqs)
+
+        def marginalised_value(likelihood, t0):
+            z = amplitude * jnp.exp(2j * jnp.pi * freqs * t0)
+            return float(likelihood._reduce_phase_time(z))
+
+        offsets = np.linspace(0.0, dt, 9)
+        coarse_values = np.asarray([marginalised_value(coarse, t0) for t0 in offsets])
+        fine_values = np.asarray([marginalised_value(fine, t0) for t0 in offsets])
+        assert np.ptp(coarse_values) > 1.0
+        assert np.ptp(fine_values) < 0.05
 
     def test_windowed_time_reduction_matches_masked_logsumexp(
         self, detectors_and_waveform

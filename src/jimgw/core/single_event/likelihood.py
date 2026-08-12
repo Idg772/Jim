@@ -38,6 +38,52 @@ from jimgw.typing import ComplexScalar, FloatLike, FloatScalar
 logger = logging.getLogger(__name__)
 
 
+def _build_time_marginalization_fine_window(
+    n_total: int,
+    upsample_factor: int,
+    duration: float,
+    tc_range: tuple[float, float],
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Return coarse FFT candidates, their fine-time mask, and fine step."""
+
+    n_fine = n_total * upsample_factor
+    fine_step = duration / n_fine
+    q_min = -(n_fine // 2)
+    q_max = (n_fine - 1) // 2
+    support_min = q_min * fine_step
+    support_max = q_max * fine_step
+    empty_candidates = np.empty(0, dtype=int)
+    empty_mask = np.empty((upsample_factor, 0), dtype=bool)
+    if (
+        not tc_range[0] < tc_range[1]
+        or tc_range[0] >= support_max
+        or tc_range[1] <= support_min
+    ):
+        return empty_candidates, empty_mask, fine_step
+
+    if tc_range[0] <= support_min:
+        q_start = q_min
+    else:
+        q_start = max(q_min, int(np.floor(tc_range[0] / fine_step)) - 1)
+    if tc_range[1] >= support_max:
+        q_stop = q_max
+    else:
+        q_stop = min(q_max, int(np.ceil(tc_range[1] / fine_step)) + 1)
+    nearby_q = np.arange(q_start, q_stop + 1, dtype=int)
+    nearby_tc = nearby_q * fine_step
+    valid_q = nearby_q[(nearby_tc > tc_range[0]) & (nearby_tc < tc_range[1])]
+    fine_storage = np.where(valid_q >= 0, valid_q, valid_q + n_fine)
+    fine_candidates = np.unique(fine_storage // upsample_factor)
+
+    m_grid = (
+        fine_candidates[None, :] * upsample_factor + np.arange(upsample_factor)[:, None]
+    )
+    q_grid = np.where(m_grid <= q_max, m_grid, m_grid - n_fine)
+    fine_tc = q_grid * fine_step
+    fine_mask = (fine_tc > tc_range[0]) & (fine_tc < tc_range[1])
+    return fine_candidates, fine_mask, fine_step
+
+
 class SingleEventLikelihood(LikelihoodBase):
     detectors: Sequence[Detector]
     waveform: Waveform
@@ -557,20 +603,76 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         tc_window = np.flatnonzero(
             (tc_array > self.tc_range[0]) & (tc_array < self.tc_range[1])
         )
-        if tc_window.size == 0:
+        self._tc_window_indices = jnp.asarray(tc_window)
+        self.tc_upsample = int(config.upsample_factor)
+        if self.tc_upsample == 1 and tc_window.size == 0:
             raise ValueError(
                 f"time_marginalization tc_range {self.tc_range} contains no FFT "
                 "time samples; widen the range."
             )
-        self._tc_window_indices = jnp.asarray(tc_window)
+        if self.tc_upsample > 1:
+            n_total = len(self.tc_array)
+            self._marg_frequencies = jnp.arange(n_total) / duration
+            fine_candidates, fine_mask, fine_step = (
+                _build_time_marginalization_fine_window(
+                    n_total,
+                    self.tc_upsample,
+                    duration,
+                    self.tc_range,
+                )
+            )
+            self._tc_fine_offsets = fine_step * jnp.arange(self.tc_upsample)
+            self._tc_fine_candidate_indices = jnp.asarray(fine_candidates)
+            if not fine_mask.any():
+                raise ValueError(
+                    f"time_marginalization tc_range {self.tc_range} contains no "
+                    "FFT time samples; widen the range."
+                )
+            self._tc_fine_mask = jnp.asarray(fine_mask)
         self.pad_low = jnp.zeros(int(self.frequencies[0] * duration))
         n_pad_high = int(
             (fs / 2.0 - 1.0 / duration - float(self.frequencies[-1])) * duration
         )
         self.pad_high = jnp.zeros(max(0, n_pad_high))
+        padded_size = len(self.pad_low) + len(self.frequencies) + len(self.pad_high)
+        if padded_size != len(self.tc_array):
+            raise ValueError(
+                "time_marginalization requires a one-sided frequency grid that "
+                "excludes the Nyquist endpoint; lower f_max by one frequency bin"
+            )
+
+    def _windowed_fft(
+        self, complex_d_inner_h: Float[Array, " n_freq"]
+    ) -> Complex[Array, "upsample n_window"]:
+        """Evaluate the tc-window matched filter on a sub-grid.
+
+        For an upsample factor ``U``, ``U`` phase-ramped FFTs reproduce the
+        same band-limited samples as a ``U``-times zero-padded FFT while
+        keeping the live FFT workspace linear in the original grid size.
+        """
+
+        padded = jnp.concatenate((self.pad_low, complex_d_inner_h, self.pad_high))
+        if self.tc_upsample == 1:
+            fft_d_inner_h = jnp.fft.fft(padded, norm="backward")
+            return fft_d_inner_h[self._tc_window_indices][None, :]
+
+        def one_offset(delta: FloatScalar) -> Complex[Array, " n_window"]:
+            angle = (-2.0 * jnp.pi) * self._marg_frequencies * delta
+            shifted = padded * jax.lax.complex(jnp.cos(angle), jnp.sin(angle))
+            return jnp.fft.fft(shifted, norm="backward")[
+                self._tc_fine_candidate_indices
+            ]
+
+        return jax.lax.map(one_offset, self._tc_fine_offsets)
 
     def _reduce_time(self, complex_d_inner_h: Float[Array, " n_freq"]) -> FloatScalar:
         """FFT-based time marginalization (real part)."""
+        if self.tc_upsample > 1:
+            window = self._windowed_fft(complex_d_inner_h).real
+            return logsumexp(jnp.where(self._tc_fine_mask, window, -jnp.inf)) - jnp.log(
+                len(self.tc_array) * self.tc_upsample
+            )
+
         complex_d_inner_h_positive_f = jnp.concatenate(
             (self.pad_low, complex_d_inner_h, self.pad_high)
         )
@@ -655,6 +757,12 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         self, complex_d_inner_h: Float[Array, " n_freq"]
     ) -> FloatScalar:
         """FFT-based time + phase marginalization (Bessel-weighted FFT)."""
+        if self.tc_upsample > 1:
+            window = jnp.absolute(self._windowed_fft(complex_d_inner_h))
+            return logsumexp(
+                jnp.where(self._tc_fine_mask, log_i0(window), -jnp.inf)
+            ) - jnp.log(len(self.tc_array) * self.tc_upsample)
+
         complex_d_inner_h_positive_f = jnp.concatenate(
             (self.pad_low, complex_d_inner_h, self.pad_high)
         )
