@@ -341,6 +341,16 @@ def _verify_workspace_archive(archive: Path) -> dict[str, Any]:
                 raise ValueError(f"package manifest has no {label} file inventory")
             if section.get("file_count") != len(files):
                 raise ValueError(f"package manifest has a wrong {label} file count")
+            advertised_tree = section.get("tree_sha256")
+            if (
+                not isinstance(advertised_tree, str)
+                or re.fullmatch(r"[0-9a-f]{64}", advertised_tree) is None
+            ):
+                raise ValueError(
+                    f"package manifest has an invalid {label} tree SHA-256"
+                )
+            tree_entries: list[tuple[PurePosixPath, str]] = []
+            seen_relative_paths: set[PurePosixPath] = set()
             for entry in files:
                 if not isinstance(entry, dict):
                     raise ValueError(  # noqa: TRY004
@@ -352,6 +362,9 @@ def _verify_workspace_archive(archive: Path) -> dict[str, Any]:
                 if not isinstance(relative_value, str):
                     raise ValueError(f"invalid {label} inventory path")  # noqa: TRY004
                 relative = _normalise_archive_path(relative_value)
+                if relative in seen_relative_paths:
+                    raise ValueError(f"duplicate {label} inventory path: {relative}")
+                seen_relative_paths.add(relative)
                 path = relative if root == PurePosixPath(".") else root / relative
                 member = regular_members.get(path)
                 if member is None:
@@ -369,7 +382,15 @@ def _verify_workspace_archive(archive: Path) -> dict[str, Any]:
                 actual_digest = hashlib.sha256(stream.read()).hexdigest()
                 if actual_digest != digest:
                     raise ValueError(f"archive SHA-256 mismatch for {path}")
+                tree_entries.append((relative, digest))
                 expected_files.add(path)
+            aggregate = hashlib.sha256()
+            for relative, digest in sorted(tree_entries):
+                aggregate.update(relative.as_posix().encode())
+                aggregate.update(b"\0")
+                aggregate.update(bytes.fromhex(digest))
+            if aggregate.hexdigest() != advertised_tree:
+                raise ValueError(f"package {label} tree SHA-256 mismatch")
 
         unexpected = sorted(set(regular_members) - expected_files)
         if unexpected:

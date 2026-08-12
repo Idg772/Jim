@@ -68,7 +68,15 @@ required_paths = {
         "benchmarks/device_parallel_nss/summarize_gw170817_diagnostics.py",
         "benchmarks/injection_campaign/__init__.py",
         "benchmarks/injection_campaign/common.py",
+        "benchmarks/injection_campaign/evaluate_time_marginalization_diagnostic.py",
+        "benchmarks/injection_campaign/evaluate_historical_stress.py",
         "benchmarks/injection_campaign/prepare_campaign.py",
+        "benchmarks/injection_campaign/prepare_baseline_diagnostic.py",
+        "benchmarks/injection_campaign/prepare_fsm_diagnostic.py",
+        "benchmarks/injection_campaign/prepare_historical_stress.py",
+        "benchmarks/injection_campaign/prepare_time_anchor_diagnostic.py",
+        "benchmarks/injection_campaign/prepare_time_marginalization_diagnostic.py",
+        "benchmarks/injection_campaign/probe_likelihood.py",
         "benchmarks/injection_campaign/run_injection.py",
         "benchmarks/injection_campaign/run_campaign.py",
         "benchmarks/injection_campaign/plot_pp.py",
@@ -91,6 +99,8 @@ required_paths = {
         "tests/unit/benchmarks/test_compare_gw170817_full_run.py",
         "tests/unit/benchmarks/test_paper_model.py",
         "tests/unit/benchmarks/test_paper_model_basis.py",
+        "tests/unit/benchmarks/test_time_anchor_diagnostic.py",
+        "tests/unit/benchmarks/test_time_marginalization_diagnostic.py",
         "tests/unit/samplers/blackjax/test_sharding.py",
         "tests/unit/samplers/blackjax/test_slice.py",
     )
@@ -130,7 +140,7 @@ import hashlib
 import json
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 repository = Path(sys.argv[1]).resolve()
@@ -169,7 +179,7 @@ status = subprocess.run(
 manifest = {
     "schema_version": 1,
     "package": "jim-gw170817-runpod",
-    "created_at_utc": datetime.now(UTC).isoformat(),
+    "created_at_utc": datetime.now(timezone.utc).isoformat(),
     "provenance": {
         "generator": "benchmarks/device_parallel_nss/runpod/package_workspace.sh",
         "archive_layout": "curated working-tree candidate plus exported baseline src/jimgw",

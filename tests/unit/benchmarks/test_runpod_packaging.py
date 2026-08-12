@@ -22,6 +22,15 @@ def _inventory_entry(path: str, data: bytes) -> dict[str, object]:
     }
 
 
+def _tree_sha256(path: str, data: bytes) -> str:
+    digest = hashlib.sha256(data).digest()
+    aggregate = hashlib.sha256()
+    aggregate.update(path.encode())
+    aggregate.update(b"\0")
+    aggregate.update(digest)
+    return aggregate.hexdigest()
+
+
 def _add_bytes(archive: tarfile.TarFile, name: str, data: bytes) -> None:
     member = tarfile.TarInfo(name)
     member.size = len(data)
@@ -31,6 +40,7 @@ def _add_bytes(archive: tarfile.TarFile, name: str, data: bytes) -> None:
 def _write_valid_package(
     path: Path,
     *,
+    candidate_tree_sha256: str | None = None,
     extra_members: tuple[tarfile.TarInfo, ...] = (),
     extra_files: tuple[tuple[str, bytes], ...] = (),
 ) -> None:
@@ -44,12 +54,15 @@ def _write_valid_package(
         "provenance": {"git_metadata_included": False},
         "candidate": {
             "revision": CANDIDATE_REVISION,
+            "tree_sha256": candidate_tree_sha256
+            or _tree_sha256(candidate_path, candidate_data),
             "file_count": 1,
             "files": [_inventory_entry(candidate_path, candidate_data)],
         },
         "baseline": {
             "revision": BASELINE_REVISION,
             "root": BASELINE_ROOT,
+            "tree_sha256": _tree_sha256(baseline_path, baseline_data),
             "file_count": 1,
             "files": [_inventory_entry(baseline_path, baseline_data)],
         },
@@ -80,6 +93,14 @@ def test_verify_workspace_archive_accepts_curated_package(tmp_path: Path) -> Non
 
     assert manifest["candidate"]["revision"] == CANDIDATE_REVISION
     assert manifest["baseline"]["revision"] == BASELINE_REVISION
+
+
+def test_verify_workspace_archive_rejects_false_tree_digest(tmp_path: Path) -> None:
+    archive = tmp_path / "workspace.tar.gz"
+    _write_valid_package(archive, candidate_tree_sha256="0" * 64)
+
+    with pytest.raises(ValueError, match="candidate tree SHA-256 mismatch"):
+        upload_and_run._verify_workspace_archive(archive)
 
 
 def test_ssh_options_pin_a_per_run_known_hosts_file(tmp_path: Path) -> None:
