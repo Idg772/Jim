@@ -477,6 +477,8 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
 
     @property
     def sampler_name(self) -> str:
+        if self._swig_config.scheduler == "pre-fsm-lockstep":
+            return "BlackJAX SwiG pre-FSM lockstep"
         return "BlackJAX SwiG"
 
     @property
@@ -485,6 +487,8 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
 
     @property
     def _fsm_update_inner_kernel_params_fn(self) -> Callable:
+        if self._swig_config.scheduler == "pre-fsm-lockstep":
+            return self._update_block_covariances
         return self._update_block_covariance_factors
 
     def _normalise_inner_kernel_params_for_mesh(
@@ -498,7 +502,10 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
                 "checkpoint state has no inner-kernel parameters"
             ) from error
         keys = set(params)
-        if mesh is None:
+        use_covariance_factors = (
+            mesh is not None and self._swig_config.scheduler == "fsm"
+        )
+        if not use_covariance_factors:
             if keys == {"block_covariances"}:
                 return state
             if keys == {"block_covariance_factors"}:
@@ -516,7 +523,11 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
                         None, state, None
                     )
                 )
-        expected = "block_covariances" if mesh is None else "block_covariance_factors"
+        expected = (
+            "block_covariance_factors"
+            if use_covariance_factors
+            else "block_covariances"
+        )
         raise ValueError(
             "checkpoint has incompatible SwiG inner-kernel parameters: "
             f"expected {expected!r}, found {sorted(keys)!r}"
@@ -525,7 +536,12 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
     def _build_nested_sampler(
         self, n_delete: int, mesh: Optional[Mesh] = None
     ) -> SamplingAlgorithm:
-        constrained_step = _build_swig_constrained_step(
+        constrained_step_builder = (
+            _build_swig_constrained_step_lockstep
+            if self._swig_config.scheduler == "pre-fsm-lockstep"
+            else _build_swig_constrained_step
+        )
+        constrained_step = constrained_step_builder(
             log_prior_fn=self._log_prior_fn,
             build_cache=self._build_cache,
             log_likelihood_from_cache_fn=self._log_likelihood_from_cache_fn,

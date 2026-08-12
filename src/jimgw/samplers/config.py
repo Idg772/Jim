@@ -386,6 +386,7 @@ class BlackJAXSwiGConfig(
     type: Literal["blackjax-swig"] = "blackjax-swig"
 
     blocks: list[list[str]]
+    scheduler: Literal["fsm", "pre-fsm-lockstep"] = "fsm"
     n_live: int = 500
     n_delete_frac: float = 0.125
     num_gibbs_sweeps: int = Field(default=2, ge=1)

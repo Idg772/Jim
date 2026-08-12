@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from jimgw.samplers.blackjax import swig
 from jimgw.samplers.blackjax.swig import BlackJAXSwiGSampler
 from jimgw.samplers.config import BlackJAXSwiGConfig
 
@@ -165,6 +166,66 @@ def test_swig_fsm_update_params_factors_each_block_once(monkeypatch):
         expected = covariance[jnp.ix_(jnp.asarray(indices), jnp.asarray(indices))]
         np.testing.assert_allclose(factor @ factor.T, expected, rtol=1e-6)
         np.testing.assert_array_equal(factor, jnp.tril(factor))
+
+
+def test_pre_fsm_lockstep_selects_reference_builder_and_covariances(monkeypatch):
+    config = BlackJAXSwiGConfig(
+        blocks=[["slow"], ["fast"]],
+        scheduler="pre-fsm-lockstep",
+        n_live=24,
+        n_delete_frac=0.25,
+        n_devices=2,
+    )
+    sampler = BlackJAXSwiGSampler(
+        n_dims=2,
+        log_prior_fn=_log_prior,
+        log_likelihood_fn=_log_likelihood,
+        log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+        config=config,
+        rebuild_required_by_block={(0,): True, (1,): False},
+        build_cache=_build_cache,
+        log_likelihood_from_cache_fn=_log_likelihood_from_cache,
+    )
+    selected = {}
+
+    def lockstep_builder(**kwargs):
+        selected["builder"] = kwargs
+        return lambda *args, **kwargs: None
+
+    def reject_fsm_builder(**kwargs):
+        raise AssertionError(f"FSM builder selected: {kwargs}")
+
+    def replicated_builder(
+        constrained_step,
+        *,
+        n_inner_steps,
+        update_inner_kernel_params_fn,
+        n_delete,
+        mesh,
+    ):
+        selected["update"] = update_inner_kernel_params_fn
+        return lambda *args, **kwargs: None
+
+    monkeypatch.setattr(swig, "_build_swig_constrained_step_lockstep", lockstep_builder)
+    monkeypatch.setattr(swig, "_build_swig_constrained_step", reject_fsm_builder)
+    monkeypatch.setattr(
+        swig,
+        "build_replicated_from_mcmc_kernel",
+        replicated_builder,
+    )
+
+    mesh = object()
+    sampler._build_nested_sampler(6, mesh=mesh)
+    positions = jnp.asarray([[0.1, 0.2], [0.3, 0.4], [0.8, 0.6]])
+    state = SimpleNamespace(particles=SimpleNamespace(position=positions))
+    params = sampler._inner_kernel_params_fn_for_mesh(mesh)(
+        jax.random.key(0), state, None
+    )
+
+    assert selected["builder"]
+    assert selected["update"] is sampler._fsm_update_inner_kernel_params_fn
+    assert set(params) == {"block_covariances"}
+    assert sampler.sampler_name == "BlackJAX SwiG pre-FSM lockstep"
 
 
 def test_swig_checkpoint_records_sampler_name(tmp_path, monkeypatch):

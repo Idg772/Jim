@@ -66,6 +66,14 @@ def test_swig_sampling_defaults():
     assert config.num_gibbs_sweeps == 2
     assert config.termination_dlogz == pytest.approx(0.1)
     assert config.n_devices == 1
+    assert config.scheduler == "fsm"
+
+
+def test_swig_scheduler_is_validated():
+    config = BlackJAXSwiGConfig(blocks=[["x"]], scheduler="pre-fsm-lockstep")
+    assert config.scheduler == "pre-fsm-lockstep"
+    with pytest.raises(ValidationError, match="scheduler"):
+        BlackJAXSwiGConfig(blocks=[["x"]], scheduler="unknown")
 
 
 def test_sampler_configs_do_not_advertise_cache_capabilities():
