@@ -86,6 +86,8 @@ class Detector(ABC):
         frequency: Float[Array, " n_sample"],
         h_sky: dict[str, Float[Array, " n_sample"]],
         params: dict,
+        *,
+        optimize: bool = True,
     ) -> Complex[Array, " n_sample"]:
         """Modulate the waveform in the sky frame by the detector response in the frequency domain.
 
@@ -383,6 +385,8 @@ class GroundBased2G(Detector):
         frequency: Float[Array, " n_sample"],
         h_sky: dict[str, Float[Array, " n_sample"]],
         params: dict[str, Float],
+        *,
+        optimize: bool = True,
     ) -> Complex[Array, " n_sample"]:
         """Modulate the waveform in the sky frame by the detector response in the frequency domain.
 
@@ -417,12 +421,15 @@ class GroundBased2G(Detector):
             jnp.stack(jax.tree_util.tree_leaves(h_detector)), axis=0
         )
 
-        # Real-angle phasor: exp(-2πi f Δt) with a complex-typed argument
-        # forces XLA's generic complex exp (two f64 exps plus inf/zero
-        # edge-case selects per bin). cos/sin of the real angle is the same
-        # rotation without any of that.
         phase_angle = (-2.0 * jnp.pi) * frequency * time_shift
-        phase_shift = jax.lax.complex(jnp.cos(phase_angle), jnp.sin(phase_angle))
+        if optimize:
+            # Real-angle phasor: exp(-2πi f Δt) with a complex-typed
+            # argument forces XLA's generic complex exp. cos/sin of the real
+            # angle is the same rotation without that overhead.
+            phase_shift = jax.lax.complex(jnp.cos(phase_angle), jnp.sin(phase_angle))
+        else:
+            # Diagnostic reference matching the pre-optimization formula.
+            phase_shift = jnp.exp(1j * phase_angle)
         return projected_strain * phase_shift
 
     def td_response(

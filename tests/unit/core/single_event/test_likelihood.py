@@ -212,6 +212,28 @@ class TestTransientLikelihoodFD:
         for mask in likelihood.frequency_masks:
             assert bool(jnp.all(mask))
 
+    def test_baseline_likelihood_ablation_matches_optimized_active_path(
+        self, detectors_and_waveform
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        kwargs = {
+            "detectors": ifos,
+            "waveform": waveform,
+            "f_min": fmin,
+            "f_max": fmax,
+            "trigger_time": gps,
+            "phase_marginalization": True,
+        }
+        optimized = TransientLikelihoodFD(**kwargs, likelihood_optimizations=True)
+        baseline = TransientLikelihoodFD(**kwargs, likelihood_optimizations=False)
+        assert optimized._identical_masks is True
+        assert baseline._identical_masks is False
+        np.testing.assert_allclose(
+            np.asarray(optimized.evaluate(example_params())),
+            np.asarray(baseline.evaluate(example_params())),
+            rtol=1e-12,
+        )
+
     def test_identical_mask_time_marg_fast_path_matches_slow_path(
         self, detectors_and_waveform
     ):

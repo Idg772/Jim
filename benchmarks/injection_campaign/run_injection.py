@@ -314,6 +314,7 @@ class InjectionRuntime:
     constant_handling: dict[str, Any]
     cache_diagnostics: _JaxCompilerDiagnostics | None
     initialization_seconds: float
+    sampler_ablation: dict[str, str] | None = None
 
 
 def prepare_injection_runtime(
@@ -374,6 +375,17 @@ def prepare_injection_runtime(
     from jimgw.core.single_event.likelihood import TransientLikelihoodFD
     from jimgw.samplers.config import BlackJAXSwiGConfig
 
+    sampler_ablation: dict[str, str] | None = None
+    sampler_ablation_variant = config.get("sampler_ablation_variant")
+    if sampler_ablation_variant is not None:
+        if not isinstance(sampler_ablation_variant, str):
+            raise TypeError("sampler_ablation_variant must be a string")
+        from benchmarks.device_parallel_nss.sampler_ablation import (
+            install_sampler_ablation,
+        )
+
+        sampler_ablation = install_sampler_ablation(sampler_ablation_variant)
+
     devices = _device_report(jax, n_devices, simulate_cpu)
     catalogue = read_catalogue(campaign_dir / manifest["catalogue"]["path"])
     return InjectionRuntime(
@@ -396,6 +408,7 @@ def prepare_injection_runtime(
         devices=devices,
         constant_handling=constant_handling,
         cache_diagnostics=compiler_diagnostics,
+        sampler_ablation=sampler_ablation,
         initialization_seconds=time.perf_counter() - initialization_started,
     )
 
@@ -513,6 +526,14 @@ def _transient_likelihood_kwargs(
             "distance_prior": components["distance_prior"],
             "n_dist_points": int(distance_config["n_grid_points"]),
         }
+    likelihood_implementation = config.get("likelihood_implementation", "optimized")
+    if likelihood_implementation not in {"optimized", "baseline"}:
+        raise ValueError("likelihood_implementation must be 'optimized' or 'baseline'")
+    optimization_axes = config.get("likelihood_optimization_axes")
+    if optimization_axes is not None:
+        if not isinstance(optimization_axes, Mapping):
+            raise TypeError("likelihood_optimization_axes must be a mapping")
+        optimization_axes = dict(optimization_axes)
     return {
         "trigger_time": float(config["trigger_time_gps"]),
         "f_min": float(config["f_min_hz"]),
@@ -520,6 +541,8 @@ def _transient_likelihood_kwargs(
         "phase_marginalization": bool(config["phase_marginalization"]),
         "time_marginalization": time_settings,
         "distance_marginalization": distance_settings,
+        "likelihood_optimizations": likelihood_implementation == "optimized",
+        "likelihood_optimization_axes": optimization_axes,
     }
 
 
@@ -1098,6 +1121,13 @@ def run_injection(
             "runtime_initialization_seconds": runtime.initialization_seconds,
         },
         "implementation": implementation,
+        "likelihood_implementation": config.get(
+            "likelihood_implementation", "optimized"
+        ),
+        "likelihood_optimization_axes": dict(
+            getattr(likelihood, "likelihood_optimization_axes", {})
+        ),
+        "sampler_ablation": runtime.sampler_ablation,
     }
     if cache_diagnostics is not None:
         summary["jax_cache_diagnostics"] = cache_diagnostics

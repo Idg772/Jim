@@ -65,6 +65,7 @@ required_paths = {
         "benchmarks/device_parallel_nss/compare_gw170817_full_run.py",
         "benchmarks/device_parallel_nss/paper_model.py",
         "benchmarks/device_parallel_nss/paper_model_basis.py",
+        "benchmarks/device_parallel_nss/sampler_ablation.py",
         "benchmarks/device_parallel_nss/summarize_gw170817_diagnostics.py",
         "benchmarks/injection_campaign/__init__.py",
         "benchmarks/injection_campaign/common.py",

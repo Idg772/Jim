@@ -341,6 +341,26 @@ def test_appendix_a_parameter_treatment_samples_distance_and_marginalizes_time()
     assert likelihood_kwargs["distance_marginalization"] is None
 
 
+def test_attribution_likelihood_axes_are_forwarded_without_collapsing() -> None:
+    config = copy.deepcopy(common.DEFAULT_CONFIG)
+    axes = {
+        "shared_frequency_grid": True,
+        "detector_phasor": False,
+        "real_inner_product": True,
+    }
+    config["likelihood_implementation"] = "baseline"
+    config["likelihood_optimization_axes"] = axes
+
+    kwargs = _transient_likelihood_kwargs(
+        config,
+        {"distance_prior": object()},
+    )
+
+    assert kwargs["likelihood_optimizations"] is False
+    assert kwargs["likelihood_optimization_axes"] == axes
+    assert kwargs["likelihood_optimization_axes"] is not axes
+
+
 @pytest.mark.parametrize("upsample_factor", [0, True, 1.9, "32"])
 def test_time_marginalization_requires_an_exact_positive_upsample_factor(
     upsample_factor: object,

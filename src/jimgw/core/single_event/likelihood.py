@@ -1,6 +1,6 @@
 import logging
 from abc import abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any, Optional, Union
 
@@ -36,6 +36,10 @@ from jimgw.core.utils import log_i0, round_up_to_power_of_two
 from jimgw.typing import ComplexScalar, FloatLike, FloatScalar
 
 logger = logging.getLogger(__name__)
+
+_LIKELIHOOD_OPTIMIZATION_AXES = frozenset(
+    {"shared_frequency_grid", "detector_phasor", "real_inner_product"}
+)
 
 
 def _build_time_marginalization_fine_window(
@@ -363,8 +367,35 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         distance_marginalization: Optional[
             Union[DistanceMargConfig, dict, bool]
         ] = None,
+        likelihood_optimizations: bool = True,
+        likelihood_optimization_axes: Optional[Mapping[str, bool]] = None,
     ) -> None:
         super().__init__(detectors, waveform, fixed_parameters)
+        if type(likelihood_optimizations) is not bool:
+            raise TypeError("likelihood_optimizations must be a bool")
+        self.likelihood_optimizations = likelihood_optimizations
+        optimization_axes = {
+            name: likelihood_optimizations for name in _LIKELIHOOD_OPTIMIZATION_AXES
+        }
+        if likelihood_optimization_axes is not None:
+            unknown = set(likelihood_optimization_axes) - _LIKELIHOOD_OPTIMIZATION_AXES
+            if unknown:
+                raise ValueError(
+                    "unknown likelihood optimization axes: "
+                    + ", ".join(sorted(unknown))
+                )
+            invalid = [
+                name
+                for name, enabled in likelihood_optimization_axes.items()
+                if type(enabled) is not bool
+            ]
+            if invalid:
+                raise TypeError(
+                    "likelihood optimization axes must be bools: "
+                    + ", ".join(sorted(invalid))
+                )
+            optimization_axes.update(likelihood_optimization_axes)
+        self.likelihood_optimization_axes = optimization_axes
 
         # --- frequency setup ---
         _frequencies = self._set_detector_frequency_bounds(f_min, f_max)
@@ -386,7 +417,7 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         # All-True masks mean every detector shares the union grid: the mask
         # gather is the identity and the scatter-add is a dense add. Detected
         # at trace time so the fast path emits no gather/scatter ops at all.
-        self._identical_masks = all(
+        self._identical_masks = optimization_axes["shared_frequency_grid"] and all(
             bool(jnp.all(mask)) for mask in self.frequency_masks
         )
 
@@ -477,6 +508,18 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         mask = self.frequency_masks[detector_index]
         return {key: waveform_sky[key][mask] for key in waveform_sky}
 
+    def _real_inner_product(
+        self,
+        h1: Complex[Array, " n_freq"],
+        h2: Complex[Array, " n_freq"],
+        psd: Float[Array, " n_freq"],
+    ) -> FloatScalar:
+        """Select optimized or pre-optimization real reduction semantics."""
+
+        if self.likelihood_optimization_axes["real_inner_product"]:
+            return inner_product(h1, h2, psd, self.df)
+        return complex_inner_product(h1, h2, psd, self.df).real
+
     def _likelihood(
         self,
         params: dict[str, Float],
@@ -502,6 +545,7 @@ class TransientLikelihoodFD(SingleEventLikelihood):
                         ifo.sliced_frequencies,
                         self._sliced_waveform_sky(waveform_sky, i),
                         params,
+                        optimize=self.likelihood_optimization_axes["detector_phasor"],
                     )
                     complex_d_inner_h = complex_d_inner_h + (
                         4
@@ -526,12 +570,15 @@ class TransientLikelihoodFD(SingleEventLikelihood):
                     psd = ifo.sliced_psd
                     waveform_sky_ifo = self._sliced_waveform_sky(waveform_sky, i)
                     h_dec = ifo.fd_response(
-                        ifo.sliced_frequencies, waveform_sky_ifo, params
+                        ifo.sliced_frequencies,
+                        waveform_sky_ifo,
+                        params,
+                        optimize=self.likelihood_optimization_axes["detector_phasor"],
                     )
                     complex_d_inner_h = complex_d_inner_h.at[
                         self.frequency_masks[i]
                     ].add(4 * h_dec * jnp.conj(ifo.sliced_fd_data) / psd * self.df)
-                    optimal_SNR = inner_product(h_dec, h_dec, psd, self.df)
+                    optimal_SNR = self._real_inner_product(h_dec, h_dec, psd)
                     log_likelihood += -optimal_SNR / 2
 
             if self.phase_marginalization:
@@ -552,17 +599,20 @@ class TransientLikelihoodFD(SingleEventLikelihood):
                 psd = ifo.sliced_psd
                 waveform_sky_ifo = self._sliced_waveform_sky(waveform_sky, i)
                 h_dec = ifo.fd_response(
-                    ifo.sliced_frequencies, waveform_sky_ifo, params
+                    ifo.sliced_frequencies,
+                    waveform_sky_ifo,
+                    params,
+                    optimize=self.likelihood_optimization_axes["detector_phasor"],
                 )
                 if self.phase_marginalization:
                     complex_d_inner_h += complex_inner_product(
                         h_dec, ifo.sliced_fd_data, psd, self.df
                     )
                 else:
-                    match_filter_snr += inner_product(
-                        h_dec, ifo.sliced_fd_data, psd, self.df
+                    match_filter_snr += self._real_inner_product(
+                        h_dec, ifo.sliced_fd_data, psd
                     )
-                optimal_snr += inner_product(h_dec, h_dec, psd, self.df)
+                optimal_snr += self._real_inner_product(h_dec, h_dec, psd)
 
             if self.phase_marginalization and self.distance_marginalization:
                 # joint phase + distance marginalization
@@ -581,12 +631,15 @@ class TransientLikelihoodFD(SingleEventLikelihood):
                 psd = ifo.sliced_psd
                 waveform_sky_ifo = self._sliced_waveform_sky(waveform_sky, i)
                 h_dec = ifo.fd_response(
-                    ifo.sliced_frequencies, waveform_sky_ifo, params
+                    ifo.sliced_frequencies,
+                    waveform_sky_ifo,
+                    params,
+                    optimize=self.likelihood_optimization_axes["detector_phasor"],
                 )
-                match_filter_SNR = inner_product(
-                    h_dec, ifo.sliced_fd_data, psd, self.df
+                match_filter_SNR = self._real_inner_product(
+                    h_dec, ifo.sliced_fd_data, psd
                 )
-                optimal_SNR = inner_product(h_dec, h_dec, psd, self.df)
+                optimal_SNR = self._real_inner_product(h_dec, h_dec, psd)
                 log_likelihood += match_filter_SNR - optimal_SNR / 2
             return log_likelihood
 
