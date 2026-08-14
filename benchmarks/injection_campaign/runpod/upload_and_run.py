@@ -113,6 +113,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "disable plotting by default."
         ),
     )
+    parser.add_argument(
+        "--fresh-processes",
+        action="store_true",
+        help=(
+            "Run each recovery in a fresh Python process. Required for campaigns "
+            "whose cells install process-local monkeypatches."
+        ),
+    )
     parser.add_argument("--timeout", type=_positive_int, default=1200)
     parser.add_argument("--poll-interval", type=_positive_int, default=10)
     parser.add_argument(
@@ -402,6 +410,8 @@ def _build_run_command(
         command.append("--require-existing-campaign")
         if not args.plot:
             command.append("--no-plot")
+    if getattr(args, "fresh_processes", False):
+        command.append("--fresh-processes")
     return command
 
 

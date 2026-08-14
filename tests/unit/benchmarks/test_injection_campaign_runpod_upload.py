@@ -214,6 +214,27 @@ def test_staged_command_requires_and_preserves_frozen_campaign() -> None:
     assert "--no-plot" in command
 
 
+def test_staged_command_can_request_one_process_per_recovery() -> None:
+    args = SimpleNamespace(
+        seed=123,
+        retry_count=0,
+        start=0,
+        stop=10,
+        plot=False,
+        fresh_processes=True,
+    )
+
+    command = upload_and_run._build_run_command(
+        args,
+        "/workspace/campaign",
+        n_injections=10,
+        catalogue_size=10,
+        frozen=True,
+    )
+
+    assert "--fresh-processes" in command
+
+
 def test_staged_upload_without_frozen_campaign_is_refused() -> None:
     with pytest.raises(SystemExit, match="require --campaign-input"):
         upload_and_run.main(

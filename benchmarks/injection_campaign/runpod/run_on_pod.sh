@@ -15,9 +15,10 @@ injection_ids=()
 require_existing_campaign=false
 plot=true
 implementation="candidate"
+fresh_processes=false
 
 usage() {
-  echo "Usage: $0 [--output-dir PATH] [--n-injections N] [--catalogue-size N] [--seed N] [--retry-count N] [--start N] [--stop N] [--injection-id N ...] [--require-existing-campaign] [--no-plot] [--implementation candidate|paper-baseline]"
+  echo "Usage: $0 [--output-dir PATH] [--n-injections N] [--catalogue-size N] [--seed N] [--retry-count N] [--start N] [--stop N] [--injection-id N ...] [--require-existing-campaign] [--no-plot] [--implementation candidate|paper-baseline] [--fresh-processes]"
 }
 
 while (($#)); do
@@ -33,6 +34,7 @@ while (($#)); do
     --require-existing-campaign) require_existing_campaign=true; shift ;;
     --no-plot) plot=false; shift ;;
     --implementation) implementation="$2"; shift 2 ;;
+    --fresh-processes) fresh_processes=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -341,10 +343,14 @@ plot_arguments=()
 if [[ "$plot" == true ]]; then
   plot_arguments+=(--plot)
 fi
+worker_arguments=(--long-lived-worker)
+if [[ "$fresh_processes" == true ]]; then
+  worker_arguments=()
+fi
 JAX_PLATFORMS=cuda uv run --directory "$repository" --no-sync python -m \
   benchmarks.injection_campaign.run_campaign \
   "$output_dir" --retry-count "$retry_count" \
-  --long-lived-worker --jax-cache-diagnostics \
+  "${worker_arguments[@]}" --jax-cache-diagnostics \
   "${range_arguments[@]}" "${plot_arguments[@]}"
 campaign_status=$?
 set -e

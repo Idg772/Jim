@@ -529,5 +529,7 @@ def test_pod_worker_sets_constant_handling_before_jax_and_enables_diagnostics() 
     first_jax_process = script.index("import jax")
     assert constant_export < first_jax_process
     assert "export JAX_EMBEDDED_CONSTANTS_MAX_BYTES" in script
-    assert "--long-lived-worker --jax-cache-diagnostics" in script
+    assert "worker_arguments=(--long-lived-worker)" in script
+    assert 'if [[ "$fresh_processes" == true ]]; then' in script
+    assert '"${worker_arguments[@]}" --jax-cache-diagnostics' in script
     assert 'range_arguments+=(--injection-id "$injection_id")' in script
