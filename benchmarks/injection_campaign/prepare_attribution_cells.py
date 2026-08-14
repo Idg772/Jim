@@ -208,7 +208,39 @@ def prepare_cells(
                     "detector_phasor": True,
                     "real_inner_product": True,
                 }
-            template_manifest["implementation_diagnostic"].update(reviewed_pin)
+            diagnostic = template_manifest["implementation_diagnostic"]
+            diagnostic.update(reviewed_pin)
+            diagnostic.update(
+                {
+                    "attribution_name": cell,
+                    "attribution_stage": int(cell[:2]),
+                    "sampler_scheduler": template_manifest["config"][
+                        "sampler_scheduler"
+                    ],
+                    "likelihood_implementation": template_manifest["config"][
+                        "likelihood_implementation"
+                    ],
+                    "likelihood_optimization_axes": copy.deepcopy(
+                        template_manifest["config"]["likelihood_optimization_axes"]
+                    ),
+                }
+            )
+            ablation_variant = template_manifest["config"].get(
+                "sampler_ablation_variant"
+            )
+            if ablation_variant is None:
+                diagnostic.pop("sampler_ablation_variant", None)
+            else:
+                diagnostic["sampler_ablation_variant"] = ablation_variant
+            controls = diagnostic.setdefault("factorial_controls", {})
+            controls.update(
+                {
+                    "cumulative_stage_order": list(CELL_NAMES),
+                    "n_devices": template_manifest["config"]["n_devices"],
+                    "num_gibbs_sweeps": template_manifest["config"]["num_gibbs_sweeps"],
+                    "source_injection_ids": list(selected_ids),
+                }
+            )
             manifest = _rewrite_manifest(
                 template_manifest,
                 source_campaign=source_campaign,

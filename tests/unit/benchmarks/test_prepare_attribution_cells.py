@@ -95,3 +95,13 @@ def test_cells_can_be_repinned_to_the_final_workspace_package(tmp_path):
         assert pin["implementation_label"] == "candidate"
         assert pin["implementation_revision"] == revision
         assert pin["implementation_tree_sha256"] == tree_sha256
+
+
+def test_attribution_diagnostic_controls_record_the_full_subset(tmp_path):
+    directories = prepare_cells(TEMPLATES, SOURCE, SUBSET, tmp_path)
+
+    for directory in directories:
+        diagnostic = json.loads(
+            (directory / "manifest.json").read_text(encoding="utf-8")
+        )["implementation_diagnostic"]
+        assert diagnostic["factorial_controls"]["source_injection_ids"] == SUBSET
