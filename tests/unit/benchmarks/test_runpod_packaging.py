@@ -220,6 +220,8 @@ def test_candidate_only_runner_makes_gpu_hlo_optional() -> None:
     ).read_text()
 
     assert '--samples-output "$samples_file"' in runner
+    assert 'nested_arguments=(--nested-output "$nested_file")' in runner
+    assert '--seed "$seed"' in runner
     assert '--profile-dir "$profile_dir"' in runner
     assert '--telemetry-output "$telemetry_file"' in runner
     assert 'slice_arguments=(--slice-data-output "$slice_file")' in runner
@@ -269,6 +271,30 @@ def test_upload_cli_keeps_hlo_enabled_by_default(
 
     assert args.no_hlo is False
     assert "--no-hlo" not in upload_and_run._build_run_command(args, "/remote/results")
+
+
+def test_upload_cli_forwards_candidate_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "upload_and_run.py",
+            "pod-123",
+            "workspace.tar.gz",
+            "--candidate-only",
+            "--candidate-seed",
+            "2",
+        ],
+    )
+
+    args = upload_and_run._parse_args()
+    command = upload_and_run._build_run_command(args, "/remote/results")
+
+    assert args.candidate_seed == 2
+    seed_index = command.index("--seed")
+    assert command[seed_index + 1] == "2"
 
 
 def test_upload_cli_accepts_frozen_data_for_candidate_only(

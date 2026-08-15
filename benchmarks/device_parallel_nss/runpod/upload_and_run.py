@@ -64,6 +64,13 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pod_id")
@@ -109,6 +116,12 @@ def _parse_args() -> argparse.Namespace:
             "Disable GPU HLO capture for --candidate-only while retaining "
             "profiling, telemetry, per-slice diagnostics, and posterior output."
         ),
+    )
+    parser.add_argument(
+        "--candidate-seed",
+        type=_nonnegative_int,
+        default=0,
+        help="Sampler seed forwarded to a --candidate-only run.",
     )
     single_run_group.add_argument(
         "--original-sharded-only",
@@ -414,7 +427,7 @@ def _build_run_command(
         args.workload,
     ]
     if args.candidate_only:
-        command.append("--candidate-only")
+        command.extend(["--seed", str(args.candidate_seed), "--candidate-only"])
         if args.no_hlo:
             command.append("--no-hlo")
     elif args.original_sharded_only:

@@ -10,11 +10,12 @@ workload="aligned-11d"
 candidate_only=false
 original_sharded_only=false
 no_hlo=false
+seed=0
 paper_baseline="86335bdb1e7ef6191937dd17b2ca53edbb1d899f"
 
 usage() {
   cat <<'EOF'
-Usage: run_on_pod.sh [--output-dir PATH] [--workload aligned-11d|paper-15d] [--candidate-only [--no-hlo]|--original-sharded-only]
+Usage: run_on_pod.sh [--output-dir PATH] [--workload aligned-11d|paper-15d] [--seed N] [--candidate-only [--no-hlo]|--original-sharded-only]
 
 The legacy positional output directory remains supported. The workload defaults
 to aligned-11d so existing invocations retain their historical behaviour.
@@ -24,6 +25,7 @@ per-slice diagnostics, posterior-sample persistence, and GPU HLO capture.
 profiling, telemetry, diagnostics, and posterior artifacts.
 --original-sharded-only runs the same analysis against the pinned paper-style
 sharded-live-state revision, without running the candidate.
+--seed selects the non-negative candidate or original-sharded sampler seed.
 EOF
 }
 
@@ -48,6 +50,14 @@ while [[ "$#" -gt 0 ]]; do
     --candidate-only)
       candidate_only=true
       shift
+      ;;
+    --seed)
+      if [[ "$#" -lt 2 ]]; then
+        echo "--seed requires a non-negative integer" >&2
+        exit 2
+      fi
+      seed="$2"
+      shift 2
       ;;
     --no-hlo)
       no_hlo=true
@@ -86,6 +96,11 @@ case "$workload" in
     exit 2
     ;;
 esac
+
+if ! [[ "$seed" =~ ^[0-9]+$ ]]; then
+  echo "--seed requires a non-negative integer" >&2
+  exit 2
+fi
 
 if [[ "$candidate_only" == true && "$original_sharded_only" == true ]]; then
   echo "--candidate-only and --original-sharded-only are mutually exclusive" >&2
@@ -220,28 +235,32 @@ if [[ "$candidate_only" == true || "$original_sharded_only" == true ]]; then
         "$implementation_revision"
       tar -xf "$implementation_archive" -C "$implementation_root"
     fi
-    run_stem="original-sharded-${workload}-g4-seed0"
+    run_stem="original-sharded-${workload}-g4-seed${seed}"
   else
     implementation_label="ours"
     implementation_revision="$candidate_revision"
     implementation_root="$repository"
-    run_stem="candidate-${workload}-g4-seed0"
+    run_stem="candidate-${workload}-g4-seed${seed}"
   fi
 
   data_file="$output_dir/data/gw170817.npz"
   report_file="$output_dir/${run_stem}.json"
   samples_file="$output_dir/posterior/${run_stem}.npz"
+  nested_file="$output_dir/nested/${run_stem}.npz"
   slice_file="$output_dir/per-slice/${run_stem}.npz"
   hlo_dir="$output_dir/gpu-hlo/${run_stem}"
   slice_arguments=()
+  nested_arguments=()
   if [[ "$candidate_only" == true ]]; then
     slice_arguments=(--slice-data-output "$slice_file")
+    nested_arguments=(--nested-output "$nested_file")
   fi
   profile_dir="$output_dir/profiles/${run_stem}"
   telemetry_file="$output_dir/telemetry/${run_stem}.dmon"
   mkdir -p \
     "$(dirname "$data_file")" \
     "$(dirname "$samples_file")" \
+    "$(dirname "$nested_file")" \
     "$(dirname "$slice_file")" \
     "$profile_dir" \
     "$(dirname "$telemetry_file")"
@@ -292,7 +311,7 @@ PY
     benchmarks/device_parallel_nss/benchmark_gw170817_full_run.py \
     --data-file "$data_file" \
     --workload "$workload" \
-    --seed 0 \
+    --seed "$seed" \
     --n-devices 4 \
     --implementation-root "$implementation_root" \
     --implementation-label "$implementation_label" \
@@ -303,6 +322,7 @@ PY
     --telemetry-output "$telemetry_file" \
     "${slice_arguments[@]}" \
     --samples-output "$samples_file" \
+    "${nested_arguments[@]}" \
     --output "$report_file"
 
   uv run --directory "$repository" --no-sync python - \

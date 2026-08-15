@@ -434,6 +434,34 @@ def test_write_posterior_samples_round_trip(tmp_path: Path) -> None:
             np.testing.assert_array_equal(saved[name], values)
 
 
+def test_write_nested_samples_round_trip(tmp_path: Path) -> None:
+    nested_file = tmp_path / "nested-samples.npz"
+    samples = {
+        "M_c": np.asarray([1.19, 1.20]),
+        "q": np.asarray([0.8, 0.9]),
+        "log_likelihood": np.asarray([100.0, 101.0]),
+        "log_likelihood_birth": np.asarray([-np.inf, 99.0]),
+        "log_weights": np.log(np.asarray([0.25, 0.75])),
+    }
+
+    artifact = benchmark._write_posterior_samples(
+        nested_file,
+        samples,
+        weighting="normalized nested-sampling log weights",
+    )
+
+    assert artifact["path"] == str(nested_file)
+    assert artifact["count"] == 2
+    assert artifact["fields"] == list(samples)
+    assert artifact["weighting"] == "normalized nested-sampling log weights"
+    assert artifact["sha256"] == benchmark._sha256(nested_file)
+    with np.load(nested_file, allow_pickle=False) as saved:
+        assert saved.files == artifact["fields"]
+        for name, values in samples.items():
+            np.testing.assert_array_equal(saved[name], values)
+        assert np.exp(saved["log_weights"]).sum() == pytest.approx(1.0)
+
+
 def test_write_posterior_samples_rejects_inconsistent_lengths(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="inconsistent lengths"):
         benchmark._write_posterior_samples(

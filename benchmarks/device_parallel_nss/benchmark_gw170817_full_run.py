@@ -298,6 +298,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--nested-output",
+        type=Path,
+        default=None,
+        help=(
+            "Write the full weighted nested-point collection in prior space, "
+            "including birth/death log-likelihoods and normalized log weights, "
+            "to an NPZ artifact."
+        ),
+    )
+    parser.add_argument(
         "--retain-per-slice-info",
         action="store_true",
         help=(
@@ -1571,8 +1581,10 @@ def _write_slice_data(path: Path, jim: Any, n_devices: int) -> dict[str, Any]:
 def _write_posterior_samples(
     path: Path,
     samples: dict[str, np.ndarray],
+    *,
+    weighting: str = "equal",
 ) -> dict[str, Any]:
-    """Atomically persist Jim's equally weighted posterior sample mapping."""
+    """Atomically persist an aligned mapping of samples in prior space."""
 
     if not samples:
         raise RuntimeError("posterior sample mapping is empty")
@@ -1596,9 +1608,7 @@ def _write_posterior_samples(
 
     resolved = path.expanduser().resolve()
     if resolved.suffix.lower() != ".npz":
-        raise SystemExit(
-            f"--samples-output must use the .npz extension; got {resolved}"
-        )
+        raise SystemExit(f"sample output must use the .npz extension; got {resolved}")
     _atomic_save_npz(resolved, arrays)
     return {
         "path": str(resolved),
@@ -1606,7 +1616,7 @@ def _write_posterior_samples(
         "bytes": resolved.stat().st_size,
         "format": "npz",
         "space": "prior",
-        "weighting": "equal",
+        "weighting": weighting,
         "count": next(iter(sample_counts.values())),
         "fields": list(arrays),
         "dtypes": {name: str(values.dtype) for name, values in arrays.items()},
@@ -1756,6 +1766,15 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         if args.samples_output is not None
         else None
     )
+    nested_artifact = (
+        _write_posterior_samples(
+            args.nested_output,
+            jim.get_weighted_samples(),
+            weighting="normalized nested-sampling log weights",
+        )
+        if args.nested_output is not None
+        else None
+    )
     result_extraction_seconds = time.perf_counter() - extraction_started
 
     step_timing = observer.report()
@@ -1841,6 +1860,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             "log_Z_error": _safe_float(diagnostics.get("log_Z_error")),
             "posterior_samples": posterior_count,
             "posterior_artifact": posterior_artifact,
+            "nested_artifact": nested_artifact,
             "posterior_effective_sample_size": posterior_ess,
             "posterior_ess_source": (
                 "anesthetic.NestedSamples.neff" if posterior_ess is not None else None
