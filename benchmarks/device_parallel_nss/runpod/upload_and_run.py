@@ -18,6 +18,9 @@ from typing import Any
 ALIGNED_WORKLOAD = "aligned-11d"
 PAPER_WORKLOAD = "paper-15d"
 WORKLOAD_CHOICES = (ALIGNED_WORKLOAD, PAPER_WORKLOAD)
+PAPER_BLOCKING_SCHEME = "paper"
+ALL_SLOW_BLOCKING_SCHEME = "all-slow"
+BLOCKING_SCHEME_CHOICES = (PAPER_BLOCKING_SCHEME, ALL_SLOW_BLOCKING_SCHEME)
 PACKAGE_MANIFEST_PATH = PurePosixPath(".runpod/package-manifest.json")
 
 
@@ -123,6 +126,15 @@ def _parse_args() -> argparse.Namespace:
         default=0,
         help="Sampler seed forwarded to a --candidate-only run.",
     )
+    parser.add_argument(
+        "--blocking-scheme",
+        choices=BLOCKING_SCHEME_CHOICES,
+        default=PAPER_BLOCKING_SCHEME,
+        help=(
+            "Candidate paper-workload sampler partition. all-slow forwards the "
+            "requested four-block partition to the pod runner."
+        ),
+    )
     single_run_group.add_argument(
         "--original-sharded-only",
         action="store_true",
@@ -136,6 +148,11 @@ def _parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.no_hlo and not args.candidate_only:
         parser.error("--no-hlo requires --candidate-only")
+    if args.blocking_scheme != PAPER_BLOCKING_SCHEME:
+        if not args.candidate_only:
+            parser.error("non-paper --blocking-scheme requires --candidate-only")
+        if args.workload != PAPER_WORKLOAD:
+            parser.error("non-paper --blocking-scheme requires --workload paper-15d")
     if args.data_file is not None and not args.candidate_only:
         parser.error("--data-file requires --candidate-only")
     return args
@@ -427,6 +444,8 @@ def _build_run_command(
         args.workload,
     ]
     if args.candidate_only:
+        if args.blocking_scheme != PAPER_BLOCKING_SCHEME:
+            command.extend(["--blocking-scheme", args.blocking_scheme])
         command.extend(["--seed", str(args.candidate_seed), "--candidate-only"])
         if args.no_hlo:
             command.append("--no-hlo")
@@ -467,6 +486,8 @@ def main() -> None:
             raise SystemExit(f"frozen data bundle does not exist: {data_file}")
         local_data_sha256 = _sha256_file(data_file)
     mode = "candidate" if args.candidate_only else "original-sharded"
+    if args.candidate_only and args.blocking_scheme != PAPER_BLOCKING_SCHEME:
+        mode = f"{mode}-{args.blocking_scheme}"
     local_archive_sha256 = _sha256_file(archive)
     remote_root = f"/workspace/Jim-{args.pod_id}-{mode}"
     remote_archive = f"/workspace/jim-gw170817-benchmark-{args.pod_id}-{mode}.tar.gz"

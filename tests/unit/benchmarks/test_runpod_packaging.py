@@ -221,6 +221,8 @@ def test_candidate_only_runner_makes_gpu_hlo_optional() -> None:
 
     assert '--samples-output "$samples_file"' in runner
     assert 'nested_arguments=(--nested-output "$nested_file")' in runner
+    assert 'blocking_arguments=(--blocking-scheme "$blocking_scheme")' in runner
+    assert 'run_stem="candidate-${workload}${blocking_suffix}-g4-seed${seed}"' in runner
     assert '--seed "$seed"' in runner
     assert '--profile-dir "$profile_dir"' in runner
     assert '--telemetry-output "$telemetry_file"' in runner
@@ -295,6 +297,32 @@ def test_upload_cli_forwards_candidate_seed(
     assert args.candidate_seed == 2
     seed_index = command.index("--seed")
     assert command[seed_index + 1] == "2"
+    assert "--blocking-scheme" not in command
+
+
+def test_upload_cli_forwards_all_slow_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "upload_and_run.py",
+            "pod-123",
+            "workspace.tar.gz",
+            "--candidate-only",
+            "--workload",
+            "paper-15d",
+            "--blocking-scheme",
+            "all-slow",
+        ],
+    )
+
+    args = upload_and_run._parse_args()
+    command = upload_and_run._build_run_command(args, "/remote/results")
+
+    blocking_index = command.index("--blocking-scheme")
+    assert command[blocking_index + 1] == "all-slow"
 
 
 def test_upload_cli_accepts_frozen_data_for_candidate_only(

@@ -104,6 +104,9 @@ TERMINATION_DLOGZ = 0.0485873516
 ALIGNED_WORKLOAD = "aligned-11d"
 PAPER_WORKLOAD = "paper-15d"
 WORKLOAD_CHOICES = (ALIGNED_WORKLOAD, PAPER_WORKLOAD)
+PAPER_BLOCKING_SCHEME = "paper"
+ALL_SLOW_BLOCKING_SCHEME = "all-slow"
+BLOCKING_SCHEME_CHOICES = (PAPER_BLOCKING_SCHEME, ALL_SLOW_BLOCKING_SCHEME)
 
 ALIGNED_BLOCKS = (
     ("M_c", "q", "lambda_1", "lambda_2"),
@@ -119,6 +122,25 @@ PAPER_BLOCKS = (
     ("s1_mag", "s1_theta", "s1_phi"),
     ("s2_mag", "s2_theta", "s2_phi"),
     ("iota",),
+    ("zenith", "azimuth"),
+    ("psi",),
+    ("d_L",),
+)
+
+PAPER_ALL_SLOW_BLOCKS = (
+    (
+        "M_c",
+        "q",
+        "lambda_1",
+        "lambda_2",
+        "s1_mag",
+        "s1_theta",
+        "s1_phi",
+        "s2_mag",
+        "s2_theta",
+        "s2_phi",
+        "iota",
+    ),
     ("zenith", "azimuth"),
     ("psi",),
     ("d_L",),
@@ -176,6 +198,16 @@ PAPER_LIMITATIONS = (
     ),
 )
 
+PAPER_ALL_SLOW_LIMITATIONS = (
+    (
+        "This preserves the paper's full-resolution 15-parameter GW170817 "
+        "model, priors, and marginalizations, but deliberately replaces its "
+        "seven-block sampler partition with the requested four-block all-slow "
+        "partition."
+    ),
+    *PAPER_LIMITATIONS[1:],
+)
+
 LIMITATIONS = ALIGNED_LIMITATIONS
 
 
@@ -211,6 +243,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Benchmark model: the historical 11D aligned-spin analogue or "
             "the paper's full 15D precessing-tidal GW170817 analysis."
+        ),
+    )
+    parser.add_argument(
+        "--blocking-scheme",
+        choices=BLOCKING_SCHEME_CHOICES,
+        default=PAPER_BLOCKING_SCHEME,
+        help=(
+            "Sampler partition. all-slow groups masses, tides, both spin "
+            "spheres, and iota into one 11D paper-workload block."
         ),
     )
     parser.add_argument(
@@ -349,6 +390,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
+    if (
+        args.blocking_scheme != PAPER_BLOCKING_SCHEME
+        and args.workload != PAPER_WORKLOAD
+    ):
+        parser.error("non-paper --blocking-scheme requires --workload paper-15d")
     if args.telemetry_output is not None and args.profile_dir is None:
         parser.error("--telemetry-output requires --profile-dir")
     return args
@@ -961,8 +1007,18 @@ def _device_metadata(jax: Any, n_devices: int) -> dict[str, Any]:
     }
 
 
-def _workload_spec(workload: str) -> dict[str, Any]:
+def _workload_spec(
+    workload: str,
+    blocking_scheme: str = PAPER_BLOCKING_SCHEME,
+) -> dict[str, Any]:
+    if blocking_scheme not in BLOCKING_SCHEME_CHOICES:
+        raise ValueError(
+            f"unknown blocking scheme {blocking_scheme!r}; "
+            f"expected one of {BLOCKING_SCHEME_CHOICES}"
+        )
     if workload == ALIGNED_WORKLOAD:
+        if blocking_scheme != PAPER_BLOCKING_SCHEME:
+            raise ValueError("non-standard blocking requires the paper-15d workload")
         return {
             "waveform": "IMRPhenomD_NRTidalv2",
             "sampled_dimensions": 11,
@@ -973,16 +1029,26 @@ def _workload_spec(workload: str) -> dict[str, Any]:
             "limitations": ALIGNED_LIMITATIONS,
         }
     if workload == PAPER_WORKLOAD:
+        blocks = (
+            PAPER_ALL_SLOW_BLOCKS
+            if blocking_scheme == ALL_SLOW_BLOCKING_SCHEME
+            else PAPER_BLOCKS
+        )
+        limitations = (
+            PAPER_ALL_SLOW_LIMITATIONS
+            if blocking_scheme == ALL_SLOW_BLOCKING_SCHEME
+            else PAPER_LIMITATIONS
+        )
         return {
             "waveform": "IMRPhenomPv2_NRTidalv2",
             "sampled_dimensions": 15,
-            "blocks": PAPER_BLOCKS,
+            "blocks": blocks,
             "mass_ratio_range": (0.125, 1.0),
             "distance_range_mpc": (1.0, 75.0),
             "spin_parameterization": (
                 "two isotropic spin spheres with magnitudes in [0, 0.05]"
             ),
-            "limitations": PAPER_LIMITATIONS,
+            "limitations": limitations,
         }
     raise ValueError(
         f"unknown workload {workload!r}; expected one of {WORKLOAD_CHOICES}"
@@ -993,11 +1059,13 @@ def _config_report(
     seed: int,
     n_devices: int,
     workload: str = ALIGNED_WORKLOAD,
+    blocking_scheme: str = PAPER_BLOCKING_SCHEME,
 ) -> dict[str, Any]:
-    spec = _workload_spec(workload)
+    spec = _workload_spec(workload, blocking_scheme)
     config: dict[str, Any] = {
         "seed": seed,
         "workload": workload,
+        "blocking_scheme": blocking_scheme,
         "event": "GW170817",
         "detectors": list(IFO_NAMES),
         "duration_seconds": DURATION,
@@ -1127,7 +1195,13 @@ def _likelihood_inputs_from_bundle(
     return strain, psd
 
 
-def _analysis_components(workload: str, jnp: Any, ifos: list[Any]) -> dict[str, Any]:
+def _analysis_components(
+    workload: str,
+    jnp: Any,
+    ifos: list[Any],
+    *,
+    blocking_scheme: str = PAPER_BLOCKING_SCHEME,
+) -> dict[str, Any]:
     """Construct the waveform, priors, transforms, and periods for a workload."""
 
     from jimgw.core.prior import (
@@ -1145,7 +1219,7 @@ def _analysis_components(workload: str, jnp: Any, ifos: list[Any]) -> dict[str, 
     )
     from jimgw.core.single_event.waveform import RippleIMRPhenomD_NRTidalv2
 
-    spec = _workload_spec(workload)
+    spec = _workload_spec(workload, blocking_scheme)
     if workload == PAPER_WORKLOAD:
         if __package__:
             from .paper_model import RippleIMRPhenomPv2NRTidalv2
@@ -1684,7 +1758,12 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     data_load_seconds = time.perf_counter() - data_started
 
     setup_started = time.perf_counter()
-    components = _analysis_components(args.workload, jnp, ifos)
+    components = _analysis_components(
+        args.workload,
+        jnp,
+        ifos,
+        blocking_scheme=args.blocking_scheme,
+    )
     workload_spec = components["spec"]
     likelihood = TransientLikelihoodFD(
         ifos,
@@ -1847,7 +1926,12 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             },
         },
         "config": {
-            **_config_report(args.seed, args.n_devices, args.workload),
+            **_config_report(
+                args.seed,
+                args.n_devices,
+                args.workload,
+                args.blocking_scheme,
+            ),
             "initial_positions_sha256": initial_positions_sha256,
         },
         "timing_seconds": timing,

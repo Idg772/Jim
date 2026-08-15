@@ -25,6 +25,35 @@ NESTED_FIELDS = {
     "log_weights",
 }
 WEIGHTING = "normalized nested-sampling log weights"
+PAPER_BLOCKING_SCHEME = "paper"
+ALL_SLOW_BLOCKING_SCHEME = "all-slow"
+PAPER_BLOCKS = (
+    ("M_c", "q", "lambda_1", "lambda_2"),
+    ("s1_mag", "s1_theta", "s1_phi"),
+    ("s2_mag", "s2_theta", "s2_phi"),
+    ("iota",),
+    ("zenith", "azimuth"),
+    ("psi",),
+    ("d_L",),
+)
+ALL_SLOW_BLOCKS = (
+    (
+        "M_c",
+        "q",
+        "lambda_1",
+        "lambda_2",
+        "s1_mag",
+        "s1_theta",
+        "s1_phi",
+        "s2_mag",
+        "s2_theta",
+        "s2_phi",
+        "iota",
+    ),
+    ("zenith", "azimuth"),
+    ("psi",),
+    ("d_L",),
+)
 
 
 @dataclass(frozen=True)
@@ -414,6 +443,8 @@ def _render_report(
     summaries: list[dict[str, Any]],
     *,
     bundle_sha256: str | None,
+    blocking_scheme: str | None,
+    blocks: tuple[tuple[str, ...], ...] | None,
     sanity: tuple[dict[str, Any], dict[str, Any]] | None,
 ) -> str:
     cross = _cross_seed(summaries)
@@ -501,6 +532,17 @@ def _render_report(
     lines = ["# GW170817 sampler-output analysis", ""]
     if bundle_sha256 is not None:
         lines.extend([f"Frozen bundle SHA-256: `{bundle_sha256}`.", ""])
+    if blocking_scheme is not None and blocks is not None:
+        lines.extend(
+            [
+                f"Blocking scheme: `{blocking_scheme}`.",
+                "",
+                "Resolved blocks: `"
+                + json.dumps([list(block) for block in blocks], separators=(",", ":"))
+                + "`.",
+                "",
+            ]
+        )
     lines.extend(
         [
             (
@@ -569,7 +611,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def _reports(paths: list[Path], nested_paths: list[Path]) -> tuple[list[int], str]:
+def _reports(
+    paths: list[Path],
+    nested_paths: list[Path],
+) -> tuple[list[int], str, str, tuple[tuple[str, ...], ...]]:
     reports = [json.loads(path.read_text()) for path in paths]
     seeds = [int(report["config"]["seed"]) for report in reports]
     if sorted(seeds) != [0, 1, 2]:
@@ -577,6 +622,32 @@ def _reports(paths: list[Path], nested_paths: list[Path]) -> tuple[list[int], st
     data_hashes = {report["data"]["sha256"] for report in reports}
     if len(data_hashes) != 1:
         raise ValueError(f"run reports use different frozen bundles: {data_hashes}")
+    blocking_schemes = {
+        report["config"].get("blocking_scheme", PAPER_BLOCKING_SCHEME)
+        for report in reports
+    }
+    if len(blocking_schemes) != 1:
+        raise ValueError(
+            f"run reports use different blocking schemes: {blocking_schemes}"
+        )
+    blocking_scheme = blocking_schemes.pop()
+    reported_blocks = {
+        tuple(tuple(name for name in block) for block in report["config"]["blocks"])
+        for report in reports
+    }
+    if len(reported_blocks) != 1:
+        raise ValueError("run reports use different resolved blocks")
+    blocks = reported_blocks.pop()
+    expected_blocks = {
+        PAPER_BLOCKING_SCHEME: PAPER_BLOCKS,
+        ALL_SLOW_BLOCKING_SCHEME: ALL_SLOW_BLOCKS,
+    }.get(blocking_scheme)
+    if expected_blocks is None:
+        raise ValueError(f"unknown blocking scheme in run reports: {blocking_scheme!r}")
+    if blocks != expected_blocks:
+        raise ValueError(
+            f"run reports record the wrong blocks for {blocking_scheme}: {blocks}"
+        )
     for report, nested_path in zip(reports, nested_paths, strict=True):
         config = report["config"]
         if (
@@ -591,7 +662,7 @@ def _reports(paths: list[Path], nested_paths: list[Path]) -> tuple[list[int], st
             raise ValueError("run report has no weighted nested artifact")
         if artifact.get("sha256") != _sha256(nested_path.resolve()):
             raise ValueError(f"nested artifact hash mismatch for {nested_path}")
-    return seeds, data_hashes.pop()
+    return seeds, data_hashes.pop(), blocking_scheme, blocks
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -626,8 +697,13 @@ def main(argv: list[str] | None = None) -> None:
             match = re.search(r"seed(\d+)", path.stem)
             seeds.append(int(match.group(1)) if match else index)
         bundle_sha256 = None
+        blocking_scheme = None
+        blocks = None
     else:
-        seeds, bundle_sha256 = _reports(args.run_reports, nested_paths)
+        seeds, bundle_sha256, blocking_scheme, blocks = _reports(
+            args.run_reports,
+            nested_paths,
+        )
 
     summaries = [
         _seed_summary(
@@ -651,6 +727,8 @@ def main(argv: list[str] | None = None) -> None:
     report = _render_report(
         summaries,
         bundle_sha256=bundle_sha256,
+        blocking_scheme=blocking_scheme,
+        blocks=blocks,
         sanity=sanity,
     )
     _atomic_write(args.output, report)

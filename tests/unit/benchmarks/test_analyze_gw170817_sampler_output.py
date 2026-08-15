@@ -1,8 +1,11 @@
 """Tests for the GW170817 weighted sampler-output analysis."""
 
 import heapq
+import json
+from pathlib import Path
 
 import numpy as np
+import pytest
 
 from benchmarks.device_parallel_nss import analyze_gw170817_sampler_output as analysis
 
@@ -55,3 +58,64 @@ def test_insertion_rank_ks_rejects_a_biased_nested_run() -> None:
 
     assert result.global_p_value < 1e-20
     assert result.worst_window_p_value < 1e-20
+
+
+def _write_report_triplet(
+    root: Path,
+    *,
+    schemes: list[str],
+    blocks: list[list[str]],
+) -> tuple[list[Path], list[Path]]:
+    nested_paths: list[Path] = []
+    report_paths: list[Path] = []
+    for seed, scheme in enumerate(schemes):
+        nested_path = root / f"nested-seed{seed}.npz"
+        nested_path.write_bytes(f"nested-{seed}".encode())
+        report_path = root / f"report-seed{seed}.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "config": {
+                        "seed": seed,
+                        "workload": "paper-15d",
+                        "sampled_dimensions": 15,
+                        "phase_marginalization": True,
+                        "distance_marginalization": False,
+                        "blocking_scheme": scheme,
+                        "blocks": blocks,
+                    },
+                    "data": {"sha256": "frozen-bundle"},
+                    "results": {
+                        "nested_artifact": {
+                            "weighting": analysis.WEIGHTING,
+                            "sha256": analysis._sha256(nested_path),
+                        }
+                    },
+                }
+            )
+        )
+        nested_paths.append(nested_path)
+        report_paths.append(report_path)
+    return report_paths, nested_paths
+
+
+def test_reports_reject_mixed_blocking_schemes(tmp_path: Path) -> None:
+    report_paths, nested_paths = _write_report_triplet(
+        tmp_path,
+        schemes=["all-slow", "all-slow", "paper"],
+        blocks=[list(block) for block in analysis.ALL_SLOW_BLOCKS],
+    )
+
+    with pytest.raises(ValueError, match="different blocking schemes"):
+        analysis._reports(report_paths, nested_paths)
+
+
+def test_reports_reject_wrong_all_slow_blocks(tmp_path: Path) -> None:
+    report_paths, nested_paths = _write_report_triplet(
+        tmp_path,
+        schemes=["all-slow"] * 3,
+        blocks=[list(block) for block in analysis.PAPER_BLOCKS],
+    )
+
+    with pytest.raises(ValueError, match="wrong blocks for all-slow"):
+        analysis._reports(report_paths, nested_paths)

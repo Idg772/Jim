@@ -11,11 +11,12 @@ candidate_only=false
 original_sharded_only=false
 no_hlo=false
 seed=0
+blocking_scheme="paper"
 paper_baseline="86335bdb1e7ef6191937dd17b2ca53edbb1d899f"
 
 usage() {
   cat <<'EOF'
-Usage: run_on_pod.sh [--output-dir PATH] [--workload aligned-11d|paper-15d] [--seed N] [--candidate-only [--no-hlo]|--original-sharded-only]
+Usage: run_on_pod.sh [--output-dir PATH] [--workload aligned-11d|paper-15d] [--blocking-scheme paper|all-slow] [--seed N] [--candidate-only [--no-hlo]|--original-sharded-only]
 
 The legacy positional output directory remains supported. The workload defaults
 to aligned-11d so existing invocations retain their historical behaviour.
@@ -26,6 +27,8 @@ profiling, telemetry, diagnostics, and posterior artifacts.
 --original-sharded-only runs the same analysis against the pinned paper-style
 sharded-live-state revision, without running the candidate.
 --seed selects the non-negative candidate or original-sharded sampler seed.
+--blocking-scheme selects the paper partition or requested four-block all-slow
+partition. all-slow requires paper-15d and --candidate-only.
 EOF
 }
 
@@ -50,6 +53,14 @@ while [[ "$#" -gt 0 ]]; do
     --candidate-only)
       candidate_only=true
       shift
+      ;;
+    --blocking-scheme)
+      if [[ "$#" -lt 2 ]]; then
+        echo "--blocking-scheme requires paper or all-slow" >&2
+        exit 2
+      fi
+      blocking_scheme="$2"
+      shift 2
       ;;
     --seed)
       if [[ "$#" -lt 2 ]]; then
@@ -97,6 +108,15 @@ case "$workload" in
     ;;
 esac
 
+case "$blocking_scheme" in
+  paper|all-slow) ;;
+  *)
+    echo "Unknown blocking scheme: $blocking_scheme" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
 if ! [[ "$seed" =~ ^[0-9]+$ ]]; then
   echo "--seed requires a non-negative integer" >&2
   exit 2
@@ -104,6 +124,16 @@ fi
 
 if [[ "$candidate_only" == true && "$original_sharded_only" == true ]]; then
   echo "--candidate-only and --original-sharded-only are mutually exclusive" >&2
+  exit 2
+fi
+
+if [[ "$blocking_scheme" == "all-slow" && "$workload" != "paper-15d" ]]; then
+  echo "all-slow blocking requires --workload paper-15d" >&2
+  exit 2
+fi
+
+if [[ "$blocking_scheme" == "all-slow" && "$candidate_only" == false ]]; then
+  echo "all-slow blocking requires --candidate-only" >&2
   exit 2
 fi
 
@@ -240,7 +270,11 @@ if [[ "$candidate_only" == true || "$original_sharded_only" == true ]]; then
     implementation_label="ours"
     implementation_revision="$candidate_revision"
     implementation_root="$repository"
-    run_stem="candidate-${workload}-g4-seed${seed}"
+    blocking_suffix=""
+    if [[ "$blocking_scheme" != "paper" ]]; then
+      blocking_suffix="-${blocking_scheme}"
+    fi
+    run_stem="candidate-${workload}${blocking_suffix}-g4-seed${seed}"
   fi
 
   data_file="$output_dir/data/gw170817.npz"
@@ -251,9 +285,11 @@ if [[ "$candidate_only" == true || "$original_sharded_only" == true ]]; then
   hlo_dir="$output_dir/gpu-hlo/${run_stem}"
   slice_arguments=()
   nested_arguments=()
+  blocking_arguments=()
   if [[ "$candidate_only" == true ]]; then
     slice_arguments=(--slice-data-output "$slice_file")
     nested_arguments=(--nested-output "$nested_file")
+    blocking_arguments=(--blocking-scheme "$blocking_scheme")
   fi
   profile_dir="$output_dir/profiles/${run_stem}"
   telemetry_file="$output_dir/telemetry/${run_stem}.dmon"
@@ -311,6 +347,7 @@ PY
     benchmarks/device_parallel_nss/benchmark_gw170817_full_run.py \
     --data-file "$data_file" \
     --workload "$workload" \
+    "${blocking_arguments[@]}" \
     --seed "$seed" \
     --n-devices 4 \
     --implementation-root "$implementation_root" \
@@ -327,7 +364,8 @@ PY
 
   uv run --directory "$repository" --no-sync python - \
     "$output_dir" "$workload" "$run_stem" \
-    "$implementation_label" "$implementation_revision" "$no_hlo" <<'PY'
+    "$implementation_label" "$implementation_revision" "$no_hlo" \
+    "$blocking_scheme" <<'PY'
 import hashlib
 import json
 import sys
@@ -341,6 +379,7 @@ run_stem = sys.argv[3]
 implementation_label = sys.argv[4]
 implementation_revision = sys.argv[5]
 no_hlo = sys.argv[6] == "true"
+blocking_scheme = sys.argv[7]
 report_path = root / f"{run_stem}.json"
 report = json.loads(report_path.read_text())
 artifact = report["results"]["posterior_artifact"]
@@ -378,6 +417,21 @@ if report["config"]["workload"] != workload:
     raise SystemExit("runner report recorded the wrong workload")
 if workload == "paper-15d" and report["config"]["sampled_dimensions"] != 15:
     raise SystemExit("paper workload did not report 15 sampled dimensions")
+if report["config"].get("blocking_scheme") != blocking_scheme:
+    raise SystemExit("runner report recorded the wrong blocking scheme")
+if blocking_scheme == "all-slow":
+    expected_blocks = [
+        [
+            "M_c", "q", "lambda_1", "lambda_2",
+            "s1_mag", "s1_theta", "s1_phi",
+            "s2_mag", "s2_theta", "s2_phi", "iota",
+        ],
+        ["zenith", "azimuth"],
+        ["psi"],
+        ["d_L"],
+    ]
+    if report["config"]["blocks"] != expected_blocks:
+        raise SystemExit("all-slow runner report recorded the wrong blocks")
 if report["implementation"]["label"] != implementation_label:
     raise SystemExit("runner report recorded the wrong implementation label")
 if report["implementation"]["revision"] != implementation_revision:
@@ -385,6 +439,7 @@ if report["implementation"]["revision"] != implementation_revision:
 
 verification = {
     "workload": workload,
+    "blocking_scheme": blocking_scheme,
     "posterior_samples": artifact["count"],
     "posterior_fields": artifact["fields"],
     "posterior_sha256": artifact["sha256"],

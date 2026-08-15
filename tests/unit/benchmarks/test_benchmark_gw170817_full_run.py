@@ -377,6 +377,30 @@ def test_paper_workload_matches_the_full_15d_gw170817_specification() -> None:
     assert config["time_marginalization_fft_sample_rate_hz"] == 4096
 
 
+def test_paper_workload_accepts_the_all_slow_blocking_scheme() -> None:
+    config = benchmark._config_report(
+        seed=0,
+        n_devices=4,
+        workload=benchmark.PAPER_WORKLOAD,
+        blocking_scheme=benchmark.ALL_SLOW_BLOCKING_SCHEME,
+    )
+
+    assert config["blocking_scheme"] == "all-slow"
+    assert config["blocks"] == [
+        list(block) for block in benchmark.PAPER_ALL_SLOW_BLOCKS
+    ]
+    assert [len(block) for block in config["blocks"]] == [11, 2, 1, 1]
+    assert sum(map(len, config["blocks"])) == 15
+    assert (
+        config["sha256"]
+        != benchmark._config_report(
+            0,
+            4,
+            benchmark.PAPER_WORKLOAD,
+        )["sha256"]
+    )
+
+
 def test_workloads_have_distinct_config_fingerprints() -> None:
     aligned = benchmark._config_report(0, 4, benchmark.ALIGNED_WORKLOAD)
     paper = benchmark._config_report(0, 4, benchmark.PAPER_WORKLOAD)
@@ -395,6 +419,37 @@ def test_cli_accepts_paper_workload(tmp_path: Path) -> None:
     )
 
     assert args.workload == benchmark.PAPER_WORKLOAD
+
+
+def test_cli_accepts_all_slow_blocking_for_paper_workload(tmp_path: Path) -> None:
+    args = benchmark._parse_args(
+        [
+            "--data-file",
+            str(tmp_path / "data.npz"),
+            "--workload",
+            benchmark.PAPER_WORKLOAD,
+            "--blocking-scheme",
+            benchmark.ALL_SLOW_BLOCKING_SCHEME,
+        ]
+    )
+
+    assert args.blocking_scheme == benchmark.ALL_SLOW_BLOCKING_SCHEME
+
+
+def test_cli_rejects_all_slow_blocking_for_aligned_workload(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(SystemExit):
+        benchmark._parse_args(
+            [
+                "--data-file",
+                str(tmp_path / "data.npz"),
+                "--workload",
+                benchmark.ALIGNED_WORKLOAD,
+                "--blocking-scheme",
+                benchmark.ALL_SLOW_BLOCKING_SCHEME,
+            ]
+        )
 
 
 def test_cli_accepts_posterior_sample_output(tmp_path: Path) -> None:
@@ -533,6 +588,55 @@ def test_paper_blocks_rebuild_only_for_waveform_shape_parameters() -> None:
     )
 
     assert list(rebuild.values()) == [True, True, True, True, False, False, False]
+
+
+def test_all_slow_blocks_rebuild_only_the_combined_first_block() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.blocked_likelihood import (
+        _build_rebuild_required_by_block,
+    )
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+
+    components = benchmark._analysis_components(
+        benchmark.PAPER_WORKLOAD,
+        jnp,
+        [get_H1(), get_L1(), get_V1()],
+        blocking_scheme=benchmark.ALL_SLOW_BLOCKING_SCHEME,
+    )
+    parameter_names = (
+        "M_c",
+        "q",
+        "s1_mag",
+        "s1_theta",
+        "s1_phi",
+        "s2_mag",
+        "s2_theta",
+        "s2_phi",
+        "iota",
+        "lambda_1",
+        "lambda_2",
+        "d_L",
+        "zenith",
+        "azimuth",
+        "psi",
+    )
+    likelihood = SimpleNamespace(
+        waveform=components["waveform"],
+        fixed_parameters={"phase_c": 0.0},
+        waveform_caches_distance=True,
+    )
+
+    rebuild = _build_rebuild_required_by_block(
+        likelihood,
+        benchmark.PAPER_ALL_SLOW_BLOCKS,
+        parameter_names=parameter_names,
+        sample_transforms=components["sample_transforms"],
+        likelihood_transforms=components["likelihood_transforms"],
+    )
+
+    assert components["spec"]["blocks"] == benchmark.PAPER_ALL_SLOW_BLOCKS
+    assert list(rebuild.values()) == [True, False, False, False]
 
 
 def test_cli_accepts_candidate_one_device_sweep(tmp_path: Path) -> None:
