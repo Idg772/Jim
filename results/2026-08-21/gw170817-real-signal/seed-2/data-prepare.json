@@ -1,0 +1,73 @@
+{
+  "benchmark": "gw170817-full-swig-4gpu",
+  "data": {
+    "bytes": 100676576,
+    "manifest": {
+      "analysis_end_gps": 1187008946.4299316,
+      "analysis_start_gps": 1187008818.4299316,
+      "analysis_strain_dataset": "GW170817-v2",
+      "analysis_strain_documentation_url": "https://gwosc.org/eventapi/html/O1_O2-Preliminary/GW170817/v2/",
+      "analysis_strain_glitch_mitigation": "L1 glitch removed by the GWOSC release",
+      "analysis_strain_product": "LOSC_CLN_16_V1",
+      "analysis_strain_release": "O1_O2-Preliminary",
+      "analysis_strain_source_urls": {
+        "H1": "https://gwosc.org/eventapi/json/O1_O2-Preliminary/GW170817/v2/H-H1_LOSC_CLN_16_V1-1187007040-2048.hdf5",
+        "L1": "https://gwosc.org/eventapi/json/O1_O2-Preliminary/GW170817/v2/L-L1_LOSC_CLN_16_V1-1187007040-2048.hdf5",
+        "V1": "https://gwosc.org/eventapi/json/O1_O2-Preliminary/GW170817/v2/V-V1_LOSC_CLN_16_V1-1187007040-2048.hdf5"
+      },
+      "detectors": [
+        "H1",
+        "L1",
+        "V1"
+      ],
+      "duration_seconds": 128.0,
+      "event": "GW170817",
+      "f_min_hz": 20.0,
+      "format_version": 6,
+      "gps": 1187008882.43,
+      "gwosc_format": "hdf5",
+      "gwosc_sample_rate_hz": 16384,
+      "gwpy_version": "4.0.1",
+      "known_l1_glitch_gps": 1187008881.389,
+      "known_l1_glitch_max_whitened_amplitude": 8.0,
+      "known_l1_glitch_window_half_width_seconds": 0.2,
+      "likelihood_f_max_hz": 2047.9921875,
+      "nominal_f_max_hz": 2048.0,
+      "numpy_version": "2.5.1",
+      "psd_average": "median",
+      "psd_duration_seconds": 1778.429931640625,
+      "psd_end_gps": 1187008818.4299316,
+      "psd_estimator": "scipy.signal.welch",
+      "psd_line_protection_ratio": 2.0,
+      "psd_median_bias_correction": "scipy.signal.welch built-in",
+      "psd_nperseg": "analysis_n_time",
+      "psd_postprocessing": "running-log-median-with-line-protection",
+      "psd_smoothing_width_hz": 1.0,
+      "psd_start_gps": 1187007040.0,
+      "psd_strain_dataset": "GW170817-v2",
+      "psd_strain_product": "LOSC_CLN_16_V1",
+      "psd_strain_source_urls": {
+        "H1": "https://gwosc.org/eventapi/json/O1_O2-Preliminary/GW170817/v2/H-H1_LOSC_CLN_16_V1-1187007040-2048.hdf5",
+        "L1": "https://gwosc.org/eventapi/json/O1_O2-Preliminary/GW170817/v2/L-L1_LOSC_CLN_16_V1-1187007040-2048.hdf5",
+        "V1": "https://gwosc.org/eventapi/json/O1_O2-Preliminary/GW170817/v2/V-V1_LOSC_CLN_16_V1-1187007040-2048.hdf5"
+      },
+      "scipy_version": "1.18.0",
+      "source": "GWOSC public strain with an explicitly pinned clean event product",
+      "time_marginalization_fft_sample_rate_hz": 4096,
+      "workload": "paper-15d"
+    },
+    "path": "/workspace/jim-gw170817-results/dnmozva873z0rk-candidate-fast-ridge-adaptive-shrink-only-m2-covariance-g4-seed2/data/gw170817.npz",
+    "reused_existing": true,
+    "sample_counts": {
+      "H1": 2097152,
+      "L1": 2097152,
+      "V1": 2097152
+    },
+    "sha256": "a502f1d077618b94c8bf8d9820d10f850c8764e18a0f0e7e18663e14ac75104f"
+  },
+  "operation": "prepare-data",
+  "schema_version": 2,
+  "timing_seconds": {
+    "total": 1.204010123386979
+  }
+}

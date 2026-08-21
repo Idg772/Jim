@@ -1,0 +1,14 @@
+{
+  "artifact_sha256": {
+    "nested_artifact": "702b1acde75827997e17c772eb415d63d07d7abd74e2d1f1a41b3c7b7346cc40",
+    "posterior_artifact": "11fdaf90ff40f7056341ffbfe1d1582ba1e914301ed3fc0a8e49ac2685cc262e"
+  },
+  "candidate_revision": "7ab36c349f60458910aa6e81ad4cd511bc24599a",
+  "data_sha256": "a502f1d077618b94c8bf8d9820d10f850c8764e18a0f0e7e18663e14ac75104f",
+  "num_gibbs_sweeps": 2,
+  "per_slice_sha256": "7158068bf49cd58a5c6921f5aa53891a3d788e4fe79cc5c2c522ba15b5accc62",
+  "run_stem": "candidate-paper-15d-fast-ridge-adaptive-shrink-only-m2-covariance-g4-seed0",
+  "schema_version": 1,
+  "seed": 0,
+  "verified": true
+}
