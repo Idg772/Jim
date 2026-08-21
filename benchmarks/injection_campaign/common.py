@@ -349,6 +349,44 @@ def result_dir(campaign_dir: Path, injection_id: int) -> Path:
     return campaign_dir / "results" / f"injection-{injection_id:03d}"
 
 
+def _validate_completed_folded_diagnostics(
+    directory: Path,
+    summary: Mapping[str, Any],
+) -> None:
+    """Validate an explicitly declared folded-target diagnostic companion."""
+
+    if "folded_nested_diagnostics" not in summary:
+        return
+    metadata = summary["folded_nested_diagnostics"]
+    if not isinstance(metadata, Mapping):
+        raise TypeError(
+            f"completed result folded diagnostic metadata is invalid: {directory}"
+        )
+    if metadata.get("path") != "folded_nested_diagnostics.npz":
+        raise ValueError(
+            f"completed result has a different folded diagnostic path: {directory}"
+        )
+    artifact = directory / "folded_nested_diagnostics.npz"
+    if not artifact.is_file():
+        raise ValueError(
+            f"completed result folded diagnostic artifact is missing: {directory}"
+        )
+    expected_sha256 = metadata.get("sha256")
+    if not isinstance(expected_sha256, str) or file_sha256(artifact) != expected_sha256:
+        raise ValueError(
+            f"completed result folded diagnostic hash mismatch: {directory}"
+        )
+    expected_bytes = metadata.get("bytes")
+    if (
+        type(expected_bytes) is not int
+        or expected_bytes < 0
+        or artifact.stat().st_size != expected_bytes
+    ):
+        raise ValueError(
+            f"completed result folded diagnostic byte count mismatch: {directory}"
+        )
+
+
 def validate_completed_result(
     directory: Path,
     config_sha256: str,
@@ -402,6 +440,8 @@ def validate_completed_result(
         or expected_bytes != posterior_path.stat().st_size
     ):
         raise ValueError(f"completed result posterior byte count mismatch: {directory}")
+
+    _validate_completed_folded_diagnostics(directory, summary)
 
     if injection_id is None:
         return summary
