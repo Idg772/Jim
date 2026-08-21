@@ -20,10 +20,14 @@ def _fake_likelihood(
     waveform_parameter_names: tuple[str, ...],
     fixed_parameters: dict | None = None,
     waveform_caches_distance: bool = False,
+    cacheable_parameter_names: frozenset[str] = frozenset(),
 ) -> SimpleNamespace:
     """Minimal duck-typed stand-in exposing only what the module reads."""
     return SimpleNamespace(
-        waveform=SimpleNamespace(parameter_names=waveform_parameter_names),
+        waveform=SimpleNamespace(
+            parameter_names=waveform_parameter_names,
+            cacheable_parameter_names=cacheable_parameter_names,
+        ),
         fixed_parameters=fixed_parameters or {},
         waveform_caches_distance=waveform_caches_distance,
     )
@@ -126,6 +130,20 @@ class TestInferWaveformSamplingDependencies:
             likelihood_transforms=[],
         )
         assert deps == {"d_L", "a"}
+
+    def test_waveform_declared_cacheable_parameters_are_not_dependencies(self):
+        likelihood = _fake_likelihood(
+            waveform_parameter_names=("iota", "d_L", "a"),
+            waveform_caches_distance=True,
+            cacheable_parameter_names=frozenset({"iota", "d_L"}),
+        )
+        deps = _infer_waveform_sampling_dependencies(
+            likelihood,
+            parameter_names=("iota", "d_L", "a"),
+            sample_transforms=[],
+            likelihood_transforms=[],
+        )
+        assert deps == {"a"}
 
     def test_constant_fixed_parameter_contributes_nothing(self):
         likelihood = _fake_likelihood(

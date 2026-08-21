@@ -248,6 +248,45 @@ class SingleEventLikelihood(LikelihoodBase):
         """
         return isinstance(self.waveform, DistanceScaledWaveform)
 
+    @property
+    def waveform_cacheable_parameter_names(self) -> frozenset[str]:
+        """Waveform inputs that may change without invalidating the cache.
+
+        Distance-scaled waveforms always admit the existing unit-distance
+        cache.  Waveforms with a finer analytic factorization may additionally
+        declare ``cacheable_parameter_names`` and implement
+        ``build_waveform_cache`` / ``waveform_from_cache``.  The latter is
+        useful for orientation parameters whose cheap harmonic projection can
+        be separated from an expensive intrinsic carrier.
+        """
+
+        declared_names = set(getattr(self.waveform, "cacheable_parameter_names", ()))
+        builder = getattr(self.waveform, "build_waveform_cache", None)
+        reconstructor = getattr(self.waveform, "waveform_from_cache", None)
+        has_builder = callable(builder)
+        has_reconstructor = callable(reconstructor)
+        if declared_names and not (has_builder and has_reconstructor):
+            raise TypeError(
+                "A waveform declaring cacheable_parameter_names must implement "
+                "both build_waveform_cache and waveform_from_cache."
+            )
+        if has_builder != has_reconstructor:
+            raise TypeError(
+                "Custom waveform caching requires both build_waveform_cache "
+                "and waveform_from_cache."
+            )
+        unknown_names = declared_names - set(self.waveform.parameter_names)
+        if unknown_names:
+            raise ValueError(
+                "Cacheable parameter names "
+                f"{sorted(unknown_names)} are not waveform parameters."
+            )
+
+        names = declared_names
+        if self.waveform_caches_distance:
+            names.add("d_L")
+        return frozenset(names)
+
     def _waveform_sky_for_cache(
         self,
         frequencies: Float[Array, " n_freq"],
@@ -259,6 +298,10 @@ class SingleEventLikelihood(LikelihoodBase):
         ``d_L`` is not a cache dependency; otherwise ``d_L`` is a dependency
         like any other waveform parameter.
         """
+        custom_builder = getattr(self.waveform, "build_waveform_cache", None)
+        if callable(custom_builder):
+            return custom_builder(frequencies, params)
+
         # Not using `waveform_caches_distance` for passing type checks
         if isinstance(self.waveform, DistanceScaledWaveform):
             return self.waveform.at_unit_distance(frequencies, params)
@@ -266,7 +309,8 @@ class SingleEventLikelihood(LikelihoodBase):
 
     def _waveform_sky_from_cache(
         self,
-        cached_polarizations: dict[str, Complex[Array, " n_freq"]],
+        frequencies: Float[Array, " n_freq"],
+        cached_polarizations: Any,
         params: dict[str, Float],
     ) -> dict[str, Complex[Array, " n_freq"]]:
         """Recover physical-distance polarizations from a cache entry.
@@ -275,6 +319,10 @@ class SingleEventLikelihood(LikelihoodBase):
         otherwise returns the cache unchanged, since ``d_L`` was already
         baked in by ``_waveform_sky_for_cache``.
         """
+        custom_reconstructor = getattr(self.waveform, "waveform_from_cache", None)
+        if callable(custom_reconstructor):
+            return custom_reconstructor(frequencies, params, cached_polarizations)
+
         if not self.waveform_caches_distance:
             return cached_polarizations
         distance_scale = 1.0 / params["d_L"]
@@ -492,7 +540,9 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         waveform_cache: dict[str, Complex[Array, " n_freq"]],
     ) -> FloatScalar:
         """Core likelihood evaluation from a pre-generated waveform cache."""
-        waveform_sky = self._waveform_sky_from_cache(waveform_cache, params)
+        waveform_sky = self._waveform_sky_from_cache(
+            self.frequencies, waveform_cache, params
+        )
         return self._likelihood(params, waveform_sky)
 
     # --- shared likelihood core ---
@@ -1071,9 +1121,11 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         waveform_cache: dict[str, dict[str, Complex[Array, " n_bins"]]],
     ) -> FloatScalar:
         """Core likelihood evaluation from a pre-generated waveform cache."""
-        waveform_sky_low = self._waveform_sky_from_cache(waveform_cache["low"], params)
+        waveform_sky_low = self._waveform_sky_from_cache(
+            self.freq_grid_low, waveform_cache["low"], params
+        )
         waveform_sky_high = self._waveform_sky_from_cache(
-            waveform_cache["high"], params
+            self.freq_grid_high, waveform_cache["high"], params
         )
         return self._likelihood(params, waveform_sky_low, waveform_sky_high)
 
@@ -1561,7 +1613,9 @@ class MultibandedTransientLikelihoodFD(SingleEventLikelihood):
         waveform_cache: dict[str, Complex[Array, " n_freq"]],
     ) -> FloatScalar:
         """Core likelihood evaluation from a pre-generated waveform cache."""
-        waveform_sky = self._waveform_sky_from_cache(waveform_cache, params)
+        waveform_sky = self._waveform_sky_from_cache(
+            self.unique_frequencies, waveform_cache, params
+        )
         return self._likelihood(params, waveform_sky)
 
     # --- shared likelihood core ---

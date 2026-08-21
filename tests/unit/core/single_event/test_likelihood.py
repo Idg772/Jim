@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -33,6 +34,31 @@ from jimgw.samplers.config import BlackJAXSwiGConfig
 from tests.utils import assert_all_finite, common_keys_allclose
 
 FIXTURES_DIR = Path(__file__).parent.parent.parent.parent / "fixtures"
+
+
+def test_custom_waveform_cache_requires_both_protocol_hooks() -> None:
+    likelihood = object.__new__(TransientLikelihoodFD)
+    likelihood.waveform = SimpleNamespace(
+        parameter_names=("iota",),
+        cacheable_parameter_names=frozenset({"iota"}),
+        build_waveform_cache=lambda frequencies, params: None,
+    )
+
+    with pytest.raises(TypeError, match="build_waveform_cache.*waveform_from_cache"):
+        _ = likelihood.waveform_cacheable_parameter_names
+
+
+def test_custom_waveform_cache_rejects_unknown_parameter_names() -> None:
+    likelihood = object.__new__(TransientLikelihoodFD)
+    likelihood.waveform = SimpleNamespace(
+        parameter_names=("iota",),
+        cacheable_parameter_names=frozenset({"not_a_parameter"}),
+        build_waveform_cache=lambda frequencies, params: None,
+        waveform_from_cache=lambda frequencies, params, cache: None,
+    )
+
+    with pytest.raises(ValueError, match="not waveform parameters"):
+        _ = likelihood.waveform_cacheable_parameter_names
 
 
 def test_upsampled_fine_window_handles_signed_wrap_and_strict_bounds():
@@ -498,7 +524,15 @@ class TestTransientLikelihoodFD:
         jim = Jim(
             likelihood,
             prior,
-            BlackJAXSwiGConfig(blocks=blocks, n_live=8, n_delete_frac=0.25),
+            BlackJAXSwiGConfig(
+                blocks=blocks,
+                de_jump_blocks=[
+                    {"parameters": ["iota", "d_L"], "attempts": 1},
+                    {"parameters": ["d_L"], "attempts": 1},
+                ],
+                n_live=8,
+                n_delete_frac=0.25,
+            ),
             likelihood_transforms=[MassRatioToSymmetricMassRatioTransform],
         )
         assert jim.sampler._rebuild_required_by_block == {
@@ -509,6 +543,10 @@ class TestTransientLikelihoodFD:
             (5, 6): False,
             (7,): False,
         }
+        assert jim.sampler._resolved_de_jump_blocks == (
+            ((4, 8), True, 1),
+            ((8,), False, 1),
+        )
 
     def test_waveform_cache_rejects_non_sampling_parameter_in_blocks(
         self, detectors_and_waveform

@@ -52,6 +52,8 @@ if __package__:
         amplitude_of_basis,
         phase_of_basis,
         phase_with_qm_correction_basis,
+        phenomp_core_twist_up_basis,
+        phenomp_twist_up_geometry_basis,
     )
 else:  # pragma: no cover - exercised by the frozen benchmark harness
     from paper_model_basis import (
@@ -61,6 +63,8 @@ else:  # pragma: no cover - exercised by the frozen benchmark harness
         amplitude_of_basis,
         phase_of_basis,
         phase_with_qm_correction_basis,
+        phenomp_core_twist_up_basis,
+        phenomp_twist_up_geometry_basis,
     )
 
 _PHENOMD_POLARIZATION_NORM = 2.0 * jnp.sqrt(5.0 / (64.0 * jnp.pi))
@@ -123,6 +127,7 @@ def _carrier_and_geometry(
     FloatLike,
     dict[str, FloatLike],
     list[Complex],
+    FloatLike,
     FloatLike,
     FloatLike,
     FloatLike,
@@ -291,7 +296,8 @@ def _carrier_and_geometry(
         chi_p,
         angle_coefficients,
         harmonics,
-        alpha_offset - alpha_0,
+        alpha_offset,
+        alpha_0,
         epsilon_offset,
         polarization_rotation,
     )
@@ -317,6 +323,7 @@ def gen_imrphenompv2_nrtidalv2_hphc(
         angle_coefficients,
         harmonics,
         alpha_offset,
+        alpha_0,
         epsilon_offset,
         polarization_rotation,
     ) = _carrier_and_geometry(
@@ -330,19 +337,41 @@ def gen_imrphenompv2_nrtidalv2_hphc(
 
     primary_mass, secondary_mass = Mc_eta_to_ms(theta[:2])
     total_mass = primary_mass + secondary_mass
-    hp, hc = PhenomPCoreTwistUp(
-        frequency,
-        carrier,
-        eta,
-        chi_light_l,
-        chi_heavy_l,
-        chi_p,
-        total_mass,
-        angle_coefficients,
-        harmonics,
-        alpha_offset,
-        epsilon_offset,
-    )
+    if basis is None:
+        # Scalar jax.grad merger-alignment path (see _phenomd_peak_time_shift
+        # and the "nrtidal-merger" branch of _carrier_and_geometry): keep the
+        # stock ripple TwistUp verbatim rather than standing up a basis for a
+        # single frequency value.
+        hp, hc = PhenomPCoreTwistUp(
+            frequency,
+            carrier,
+            eta,
+            chi_light_l,
+            chi_heavy_l,
+            chi_p,
+            total_mass,
+            angle_coefficients,
+            harmonics,
+            alpha_offset - alpha_0,
+            epsilon_offset,
+        )
+    else:
+        geometry = phenomp_twist_up_geometry_basis(
+            basis,
+            total_mass,
+            eta,
+            chi_light_l,
+            chi_heavy_l,
+            chi_p,
+            angle_coefficients,
+        )
+        hp, hc = phenomp_core_twist_up_basis(
+            carrier,
+            *geometry,
+            harmonics,
+            alpha_offset - alpha_0,
+            epsilon_offset,
+        )
 
     cosine = jnp.cos(2.0 * polarization_rotation)
     sine = jnp.sin(2.0 * polarization_rotation)
@@ -420,6 +449,157 @@ class RippleIMRPhenomPv2NRTidalv2(
             "phase_c",
             "iota",
         )
+
+    @property
+    def cacheable_parameter_names(self) -> frozenset[str]:
+        """Parameters reconstructed from the cached carrier and harmonics."""
+
+        return frozenset(("d_L", "iota"))
+
+    def build_waveform_cache(
+        self,
+        frequency: Float[Array, " n_freq"],
+        params: Mapping[str, FloatLike],
+    ) -> dict[str, object]:
+        """Cache the expensive carrier and twist-up geometry at unit distance.
+
+        Inclination affects only the cheap line-of-sight geometry and twist-up
+        once the intrinsic precessing carrier has been constructed.  Keeping
+        the raw alpha offset (rather than the inclination-specific difference)
+        lets :meth:`waveform_from_cache` synthesize a new orientation exactly.
+
+        In addition to the carrier, this also caches the four frequency
+        arrays consumed by :func:`phenomp_core_twist_up_basis` --
+        ``cexp_i_alpha_series``, ``cexp_m2i_epsilon_series``, ``cBetah``, and
+        ``sBetah`` -- so that :meth:`waveform_from_cache` performs zero
+        frequency-dependent transcendentals on a cache hit.  These arrays
+        depend only on intrinsics (mass ratio, aligned/precessing spins,
+        total mass), never on ``iota`` or ``d_L``.  At 259,584 bins they add
+        ~12.5 MB per cached waveform (two complex128 arrays plus two
+        float64 arrays); at 16 lanes per device that is ~200 MB, well inside
+        the ~6 GB memory envelope.
+        """
+
+        theta = jnp.array([params[name] for name in self.parameter_names])
+        theta = theta.at[10].set(1.0)
+        basis = self._basis_for(frequency)
+        (
+            carrier,
+            eta,
+            chi_light_l,
+            chi_heavy_l,
+            chi_p,
+            angle_coefficients,
+            _harmonics,
+            alpha_offset,
+            _alpha_0,
+            epsilon_offset,
+            _polarization_rotation,
+        ) = _carrier_and_geometry(
+            frequency,
+            theta,
+            self.f_ref,
+            no_taper=self.no_taper,
+            time_anchor=self.time_anchor,
+            basis=basis,
+        )
+        primary_mass, secondary_mass = Mc_eta_to_ms(theta[:2])
+        total_mass = primary_mass + secondary_mass
+        geometry_basis = basis
+        if geometry_basis is None:
+            # Traced frequency: _basis_for declines to memoize it, but the
+            # vectorized geometry math is still correct and preferable to a
+            # third, scalar-transcendental reimplementation. This mirrors
+            # _carrier_and_geometry's own `basis is None` fallback (its one
+            # local, unmemoized `FrequencyPowerBasis.build` call above).
+            geometry_basis = FrequencyPowerBasis.build(
+                frequency, REQUIRED_SIXTH_EXPONENTS
+            )
+        (
+            cexp_i_alpha_series,
+            cexp_m2i_epsilon_series,
+            cBetah,
+            sBetah,
+        ) = phenomp_twist_up_geometry_basis(
+            geometry_basis,
+            total_mass,
+            eta,
+            chi_light_l,
+            chi_heavy_l,
+            chi_p,
+            angle_coefficients,
+        )
+        return {
+            "carrier_at_unit_distance": carrier,
+            "eta": eta,
+            "chi_light_l": chi_light_l,
+            "chi_heavy_l": chi_heavy_l,
+            "chi_p": chi_p,
+            "angle_coefficients": angle_coefficients,
+            "alpha_offset": alpha_offset,
+            "epsilon_offset": epsilon_offset,
+            "cexp_i_alpha_series": cexp_i_alpha_series,
+            "cexp_m2i_epsilon_series": cexp_m2i_epsilon_series,
+            "cBetah": cBetah,
+            "sBetah": sBetah,
+        }
+
+    def waveform_from_cache(
+        self,
+        frequency: Float[Array, " n_freq"],
+        params: Mapping[str, FloatLike],
+        cache: Mapping[str, object],
+    ) -> dict[str, Complex[Array, " n_freq"]]:
+        """Reconstruct plus/cross polarizations for new ``iota`` and ``d_L``.
+
+        Every frequency-dependent quantity needed by the twist-up --
+        ``cexp_i_alpha_series``, ``cexp_m2i_epsilon_series``, ``cBetah``, and
+        ``sBetah`` -- was already computed once in
+        :meth:`build_waveform_cache`.  Only the scalar
+        ``convert_spins``/``SpinWeightedY``/polarization-rotation work (which
+        depends on the new ``iota``) and the ``1/d_L`` carrier rescale happen
+        here, so a cache hit performs no frequency-dependent transcendentals.
+        """
+
+        primary_mass, secondary_mass = Mc_eta_to_ms(
+            jnp.array([params["M_c"], params["eta"]])
+        )
+        converted = convert_spins(
+            secondary_mass,
+            primary_mass,
+            self.f_ref,
+            params["phase_c"],
+            params["iota"],
+            params["s2_x"],
+            params["s2_y"],
+            params["s2_z"],
+            params["s1_x"],
+            params["s1_y"],
+            params["s1_z"],
+        )
+        theta_jn, alpha_0, polarization_rotation = (
+            converted[3],
+            converted[4],
+            converted[6],
+        )
+        harmonics = [SpinWeightedY(theta_jn, 0.0, -2, 2, mode) for mode in range(-2, 3)]
+        carrier = cache["carrier_at_unit_distance"] * (1.0 / params["d_L"])
+        hp, hc = phenomp_core_twist_up_basis(
+            carrier,
+            cache["cexp_i_alpha_series"],
+            cache["cexp_m2i_epsilon_series"],
+            cache["cBetah"],
+            cache["sBetah"],
+            harmonics,
+            cache["alpha_offset"] - alpha_0,
+            cache["epsilon_offset"],
+        )
+        cosine = jnp.cos(2.0 * polarization_rotation)
+        sine = jnp.sin(2.0 * polarization_rotation)
+        return {
+            "p": cosine * hp + sine * hc,
+            "c": cosine * hc - sine * hp,
+        }
 
     def __call__(
         self,

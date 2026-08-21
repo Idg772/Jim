@@ -18,7 +18,7 @@ from fractions import Fraction
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float
+from jaxtyping import Array, Complex, Float
 from ripplegw.constants import EULERGAMMA, MPC, MRSUN, MTSUN, PI, C
 from ripplegw.typing import FloatLike
 from ripplegw.utils.tidal import get_kappa, get_quadparam_octparam
@@ -34,6 +34,7 @@ from ripplegw.waveforms.cbc.IMRPhenomD.IMRPhenomD_utils import (
     get_delta3,
     get_delta4,
 )
+from ripplegw.waveforms.cbc.IMRPhenomD.IMRPhenomPv2_utils import WignerdCoefficients
 from ripplegw.waveforms.cbc.Taylor.TaylorF2 import (
     get_4PNQM2SCoeff,
     get_4PNQM2SOCoeff,
@@ -1007,6 +1008,154 @@ def phase_of_basis(
     return -(bbh_psi + tidal_phase + spin_phase)
 
 
+# Vendored from ripplegw 0.3.0
+# waveforms/cbc/IMRPhenomD/IMRPhenomPv2.py::PhenomPCoreTwistUp (ripplegw
+# 0.3.0), split into an intrinsics-only geometry half and a core application
+# half so that Tasks 7-8 can cache the geometry across extrinsic-only
+# re-evaluations. Three mechanical rewrites relative to the stock body:
+# (1) the omega/omega_cbrt frequency powers are read off the basis instead of
+# recomputed (``pi_m_s = jnp.pi * MTSUN * total_mass`` is the per-lane scalar;
+# ``1/omega = pi_m_s**-1 * basis.sixth_power(-6)``,
+# ``1/omega_cbrt2 = pi_m_s**(-2/3) * basis.sixth_power(-4)``,
+# ``1/omega_cbrt = pi_m_s**(-1/3) * basis.sixth_power(-2)``,
+# ``omega_cbrt = pi_m_s**(1/3) * basis.sixth_power(2)``,
+# ``logomega = jnp.log(pi_m_s) + basis.log_f``); (2) every unit phasor uses
+# ``jax.lax.complex(jnp.cos(x), jnp.sin(x))`` instead of ``jnp.exp(1j * x)``;
+# (3) the scalar alphaoffset/epsilonoffset are factored out of the frequency
+# series via ``exp(i(A - a0)) = exp(iA) * exp(-i*a0)`` and
+# ``exp(-2i(E - e0)) = exp(-2iE) * exp(2i*e0)``, so the geometry function
+# returns the un-offset series phasors and the core function multiplies in
+# the scalar offset phasors. Everything else (q/m1/m2/Sperp/SL, the five
+# Wigner products, T2m/Tm2m, eps_phase_hP, hp/hc assembly) is copied verbatim,
+# with ``* 0.5`` written for the trailing ``/ 2.0``.
+def phenomp_twist_up_geometry_basis(
+    basis: FrequencyPowerBasis,
+    total_mass: FloatLike,
+    eta: FloatLike,
+    chi1_l: FloatLike,
+    chi2_l: FloatLike,
+    chip: FloatLike,
+    angcoeffs: dict[str, FloatLike],
+) -> tuple[Array, Array, Array, Array]:
+    """Intrinsics-only frequency arrays feeding ``PhenomPCoreTwistUp``.
+
+    Returns ``(cexp_i_alpha_series, cexp_m2i_epsilon_series, cBetah,
+    sBetah)`` -- the un-offset alpha/epsilon phasor series and the Wigner-d
+    half-angle coefficients. None of these depend on alphaoffset,
+    epsilonoffset, or Y2m.
+    """
+
+    q = (1.0 + jnp.sqrt(jnp.maximum(1.0 - 4.0 * eta, 0.0)) - 2.0 * eta) / (2.0 * eta)
+    m1 = 1.0 / (1.0 + q)  # Mass of the smaller BH for unit total mass M=1.
+    m2 = q / (1.0 + q)  # Mass of the larger BH for unit total mass M=1.
+    Sperp = chip * (
+        m2 * m2
+    )  # Dimensionfull spin component in the orbital plane. S_perp = S_2_perp
+
+    SL = chi1_l * m1 * m1 + chi2_l * m2 * m2  # Dimensionfull aligned spin.
+
+    pi_m_s = jnp.pi * MTSUN * total_mass
+    inv_omega = (pi_m_s**-1) * basis.sixth_power(-6)
+    inv_omega_cbrt2 = (pi_m_s ** (-2.0 / 3.0)) * basis.sixth_power(-4)
+    inv_omega_cbrt = (pi_m_s ** (-1.0 / 3.0)) * basis.sixth_power(-2)
+    omega_cbrt = (pi_m_s ** (1.0 / 3.0)) * basis.sixth_power(2)
+    logomega = jnp.log(pi_m_s) + basis.log_f
+
+    alpha = (
+        angcoeffs["alphacoeff1"] * inv_omega
+        + angcoeffs["alphacoeff2"] * inv_omega_cbrt2
+        + angcoeffs["alphacoeff3"] * inv_omega_cbrt
+        + angcoeffs["alphacoeff4"] * logomega
+        + angcoeffs["alphacoeff5"] * omega_cbrt
+    )
+
+    epsilon = (
+        angcoeffs["epsiloncoeff1"] * inv_omega
+        + angcoeffs["epsiloncoeff2"] * inv_omega_cbrt2
+        + angcoeffs["epsiloncoeff3"] * inv_omega_cbrt
+        + angcoeffs["epsiloncoeff4"] * logomega
+        + angcoeffs["epsiloncoeff5"] * omega_cbrt
+    )
+
+    cexp_i_alpha_series = jax.lax.complex(jnp.cos(alpha), jnp.sin(alpha))
+    cexp_m2i_epsilon_series = jax.lax.complex(
+        jnp.cos(2.0 * epsilon), -jnp.sin(2.0 * epsilon)
+    )
+
+    cBetah, sBetah = WignerdCoefficients(omega_cbrt, SL, eta, Sperp)
+
+    return cexp_i_alpha_series, cexp_m2i_epsilon_series, cBetah, sBetah
+
+
+# Vendored from ripplegw 0.3.0
+# waveforms/cbc/IMRPhenomD/IMRPhenomPv2.py::PhenomPCoreTwistUp; see the
+# provenance note on ``phenomp_twist_up_geometry_basis`` above for the full
+# rewrite rationale -- this half applies the scalar alphaoffset/epsilonoffset
+# and Y2m to the geometry series and assembles hp/hc.
+def phenomp_core_twist_up_basis(
+    hPhenom: Complex[Array, " n_freq"],
+    cexp_i_alpha_series: Array,
+    cexp_m2i_epsilon_series: Array,
+    cBetah: FloatLike,
+    sBetah: FloatLike,
+    Y2m: list,
+    alphaoffset: FloatLike,
+    epsilonoffset: FloatLike,
+) -> tuple[Complex[Array, " n_freq"], Complex[Array, " n_freq"]]:
+    """Apply the scalar extrinsic offsets and assemble hp/hc.
+
+    Numerically equivalent to
+    ``ripplegw...IMRPhenomPv2.PhenomPCoreTwistUp`` given the geometry
+    produced by ``phenomp_twist_up_geometry_basis`` for the same intrinsics.
+    """
+
+    cBetah2 = cBetah * cBetah
+    cBetah3 = cBetah2 * cBetah
+    cBetah4 = cBetah3 * cBetah
+    sBetah2 = sBetah * sBetah
+    sBetah3 = sBetah2 * sBetah
+    sBetah4 = sBetah3 * sBetah
+
+    Y2mA = jnp.array(Y2m)  # need to pass Y2m in a 5-component list
+    hp_sum = 0
+    hc_sum = 0
+
+    # exp(i(A - a0)) = exp(iA) * exp(-i*a0)
+    alpha_offset_phasor = jax.lax.complex(jnp.cos(alphaoffset), -jnp.sin(alphaoffset))
+    # exp(-2i(E - e0)) = exp(-2iE) * exp(2i*e0)
+    epsilon_offset_phasor = jax.lax.complex(
+        jnp.cos(2.0 * epsilonoffset), jnp.sin(2.0 * epsilonoffset)
+    )
+
+    cexp_i_alpha = cexp_i_alpha_series * alpha_offset_phasor
+    cexp_2i_alpha = cexp_i_alpha * cexp_i_alpha
+    cexp_mi_alpha = jnp.conj(cexp_i_alpha)  # exp(-i*alpha) = conj(exp(i*alpha))
+    cexp_m2i_alpha = cexp_mi_alpha * cexp_mi_alpha
+    T2m = (
+        cexp_2i_alpha * cBetah4 * Y2mA[0]
+        - cexp_i_alpha * 2 * cBetah3 * sBetah * Y2mA[1]
+        + 1 * jnp.sqrt(6) * sBetah2 * cBetah2 * Y2mA[2]
+        - cexp_mi_alpha * 2 * cBetah * sBetah3 * Y2mA[3]
+        + cexp_m2i_alpha * sBetah4 * Y2mA[4]
+    )
+    Tm2m = (
+        cexp_m2i_alpha * sBetah4 * jnp.conjugate(Y2mA[0])
+        + cexp_mi_alpha * 2 * cBetah * sBetah3 * jnp.conjugate(Y2mA[1])
+        + 1 * jnp.sqrt(6) * sBetah2 * cBetah2 * jnp.conjugate(Y2mA[2])
+        + cexp_i_alpha * 2 * cBetah3 * sBetah * jnp.conjugate(Y2mA[3])
+        + cexp_2i_alpha * cBetah4 * jnp.conjugate(Y2mA[4])
+    )
+    hp_sum = T2m + Tm2m
+    hc_sum = 1j * (T2m - Tm2m)
+    cexp_m2i_epsilon = cexp_m2i_epsilon_series * epsilon_offset_phasor
+    eps_phase_hP = cexp_m2i_epsilon * hPhenom * 0.5
+
+    hp = eps_phase_hP * hp_sum
+    hc = eps_phase_hP * hc_sum
+
+    return hp, hc
+
+
 __all__ = [
     "REQUIRED_RATIONAL_EXPONENTS",
     "REQUIRED_SIXTH_EXPONENTS",
@@ -1016,4 +1165,6 @@ __all__ = [
     "phase_basis",
     "phase_of_basis",
     "phase_with_qm_correction_basis",
+    "phenomp_core_twist_up_basis",
+    "phenomp_twist_up_geometry_basis",
 ]

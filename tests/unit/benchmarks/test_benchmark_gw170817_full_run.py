@@ -741,7 +741,7 @@ def test_paper_blocks_rebuild_only_for_waveform_shape_parameters() -> None:
         likelihood_transforms=components["likelihood_transforms"],
     )
 
-    assert list(rebuild.values()) == [True, True, True, True, False, False, False]
+    assert list(rebuild.values()) == [True, True, True, False, False, False, False]
 
 
 def test_all_slow_blocks_rebuild_only_the_combined_first_block() -> None:
@@ -1133,6 +1133,64 @@ def test_fast_ridge_intrinsic_basis_direction_is_fingerprinted() -> None:
     assert basis["sha256"] != covariance["sha256"]
 
 
+def test_fast_ridge_intrinsic_scheme_preserves_fixed_cache_work_budget() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.blocked_likelihood import (
+        _build_rebuild_required_by_block,
+    )
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+
+    components = benchmark._analysis_components(
+        benchmark.PAPER_WORKLOAD,
+        jnp,
+        [get_H1(), get_L1(), get_V1()],
+        blocking_scheme=benchmark.FAST_RIDGE_INTRINSIC_BLOCKING_SCHEME,
+    )
+    parameter_names = tuple(
+        name for block in benchmark.PAPER_FAST_RIDGE_INTRINSIC_BLOCKS for name in block
+    )
+    likelihood = SimpleNamespace(
+        waveform=components["waveform"],
+        fixed_parameters={"phase_c": 0.0},
+        waveform_caches_distance=True,
+    )
+
+    rebuild = _build_rebuild_required_by_block(
+        likelihood,
+        benchmark.PAPER_FAST_RIDGE_INTRINSIC_BLOCKS,
+        parameter_names=parameter_names,
+        sample_transforms=components["sample_transforms"],
+        likelihood_transforms=components["likelihood_transforms"],
+    )
+
+    assert list(rebuild.values()) == [True, True, True, False, False, False]
+    assert (
+        sum(
+            len(block)
+            for block, requires_rebuild in zip(
+                benchmark.PAPER_FAST_RIDGE_INTRINSIC_BLOCKS,
+                rebuild.values(),
+                strict=True,
+            )
+            if requires_rebuild
+        )
+        == 10
+    )
+    assert (
+        sum(
+            len(block)
+            for block, requires_rebuild in zip(
+                benchmark.PAPER_FAST_RIDGE_INTRINSIC_BLOCKS,
+                rebuild.values(),
+                strict=True,
+            )
+            if not requires_rebuild
+        )
+        == 5
+    )
+
+
 def test_fast_ridge_components_apply_distance_then_inclination_coordinates() -> None:
     import jax.numpy as jnp
 
@@ -1199,6 +1257,58 @@ def test_named_de_jump_block_keeps_the_paper_slice_partition() -> None:
     assert ["iota", "d_L"] not in config["blocks"]
     assert config["num_de_jumps"] == 2
     assert config["de_jump_blocks"] == args.de_jump_block
+
+
+def test_iota_dl_joint_block_is_cache_hit_priced() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.blocked_likelihood import (
+        _build_rebuild_required_by_block,
+    )
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+
+    components = benchmark._analysis_components(
+        benchmark.PAPER_WORKLOAD,
+        jnp,
+        [get_H1(), get_L1(), get_V1()],
+        blocking_scheme=benchmark.IOTA_DL_BLOCKING_SCHEME,
+    )
+    parameter_names = (
+        "M_c",
+        "q",
+        "s1_mag",
+        "s1_theta",
+        "s1_phi",
+        "s2_mag",
+        "s2_theta",
+        "s2_phi",
+        "iota",
+        "lambda_1",
+        "lambda_2",
+        "d_L",
+        "zenith",
+        "azimuth",
+        "psi",
+    )
+    likelihood = SimpleNamespace(
+        waveform=components["waveform"],
+        fixed_parameters={"phase_c": 0.0},
+        waveform_caches_distance=True,
+    )
+
+    rebuild = _build_rebuild_required_by_block(
+        likelihood,
+        benchmark.PAPER_IOTA_DL_BLOCKS,
+        parameter_names=parameter_names,
+        sample_transforms=components["sample_transforms"],
+        likelihood_transforms=components["likelihood_transforms"],
+    )
+
+    assert components["spec"]["blocks"] == benchmark.PAPER_IOTA_DL_BLOCKS
+    # The paper waveform reconstructs both iota and d_L from its reusable
+    # carrier cache, so their joint ridge block remains cache-resident along
+    # with sky and psi.
+    assert list(rebuild.values()) == [True, True, True, False, False, False]
 
 
 def test_cli_accepts_candidate_one_device_sweep(tmp_path: Path) -> None:

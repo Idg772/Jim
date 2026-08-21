@@ -7,6 +7,7 @@ from benchmarks.device_parallel_nss.paper_model import (
     RippleIMRPhenomPv2NRTidalv2,
     _apply_time_shift,
     _phenomd_peak_time_shift,
+    gen_imrphenompv2_nrtidalv2_hphc,
 )
 
 EXPECTED_PARAMETER_NAMES = (
@@ -97,9 +98,7 @@ def test_parameter_schema_matches_the_paper_model() -> None:
 
 def test_default_time_anchor_is_the_original_nrtidal_merger_alignment() -> None:
     frequencies = jnp.linspace(20.0, 1024.0, 257)
-    implicit = RippleIMRPhenomPv2NRTidalv2(f_ref=20.0)(
-        frequencies, PAPER_PARAMETERS
-    )
+    implicit = RippleIMRPhenomPv2NRTidalv2(f_ref=20.0)(frequencies, PAPER_PARAMETERS)
     explicit = RippleIMRPhenomPv2NRTidalv2(
         f_ref=20.0,
         time_anchor="nrtidal-merger",
@@ -138,9 +137,7 @@ def test_imrphenomd_time_anchor_changes_only_the_common_affine_phase() -> None:
             np.angle(author_values[populated] / local_values[populated])
         )
         phase_line = np.polyfit(frequencies[populated], phase_difference, deg=1)
-        residual = phase_difference - np.polyval(
-            phase_line, frequencies[populated]
-        )
+        residual = phase_difference - np.polyval(phase_line, frequencies[populated])
         assert np.max(np.abs(residual)) < 2e-9
         fitted_slopes.append(float(phase_line[0]))
 
@@ -230,6 +227,66 @@ def test_waveform_scales_inversely_with_luminosity_distance() -> None:
             rtol=1e-12,
             atol=0.0,
         )
+
+
+@pytest.mark.parametrize(
+    ("iota", "d_L"),
+    [(0.15, 24.0), (1.2, 43.0), (2.75, 180.0)],
+)
+def test_fast_parameter_cache_exactly_reconstructs_iota_and_distance_changes(
+    iota: float,
+    d_L: float,
+) -> None:
+    waveform = RippleIMRPhenomPv2NRTidalv2(f_ref=20.0)
+    frequencies = jnp.linspace(20.0, 1024.0, 257)
+    cache = waveform.build_waveform_cache(frequencies, PAPER_PARAMETERS)
+    changed = {**PAPER_PARAMETERS, "iota": iota, "d_L": d_L}
+
+    cached = waveform.waveform_from_cache(frequencies, changed, cache)
+    direct = waveform(frequencies, changed)
+
+    assert waveform.cacheable_parameter_names == frozenset({"iota", "d_L"})
+    for polarization in ("p", "c"):
+        np.testing.assert_allclose(
+            cached[polarization],
+            direct[polarization],
+            rtol=3e-12,
+            atol=1e-30,
+        )
+
+
+def test_waveform_from_cache_matches_direct_call_for_new_iota_and_distance() -> None:
+    """A cache-hit reconstruction must match a direct ``__call__`` exactly.
+
+    ``build_waveform_cache`` must also expose the four intrinsics-only
+    twist-up geometry arrays consumed by ``phenomp_core_twist_up_basis`` so
+    that ``waveform_from_cache`` performs zero frequency-dependent
+    transcendentals on a cache hit.
+    """
+
+    waveform = RippleIMRPhenomPv2NRTidalv2(f_ref=20.0)
+    frequencies = jnp.linspace(20.0, 1024.0, 257)
+    cache = waveform.build_waveform_cache(frequencies, PAPER_PARAMETERS)
+
+    changed = {
+        **PAPER_PARAMETERS,
+        "iota": PAPER_PARAMETERS["iota"] + 0.4,
+        "d_L": PAPER_PARAMETERS["d_L"] * 1.7,
+    }
+
+    cached = waveform.waveform_from_cache(frequencies, changed, cache)
+    direct = waveform(frequencies, changed)
+
+    for key in ("cexp_i_alpha_series", "cexp_m2i_epsilon_series", "cBetah", "sBetah"):
+        assert key in cache
+        assert jnp.asarray(cache[key]).shape == frequencies.shape
+
+    for polarization in ("p", "c"):
+        scale = float(jnp.max(jnp.abs(direct[polarization])))
+        max_delta = float(
+            jnp.max(jnp.abs(cached[polarization] - direct[polarization]))
+        )
+        assert max_delta < 1e-12 * scale
 
 
 @pytest.mark.parametrize("parameter_name", ["lambda_1", "lambda_2"])
@@ -361,3 +418,76 @@ def test_waveform_matches_lalsimulation_imrphenompv2_nrtidalv2(
             rtol=1e-9,
             atol=0.0,
         )
+
+
+def test_twist_up_basis_matches_ripple_original():
+    import jax.numpy as jnp
+    from ripplegw.waveforms.cbc.IMRPhenomD.IMRPhenomPv2 import PhenomPCoreTwistUp
+    from ripplegw.waveforms.cbc.IMRPhenomD.IMRPhenomPv2_utils import (
+        ComputeNNLOanglecoeffs,
+        SpinWeightedY,
+    )
+
+    # test_paper_model.py imports benchmark modules package-style (see its line 6)
+    from benchmarks.device_parallel_nss.paper_model_basis import (
+        REQUIRED_SIXTH_EXPONENTS,
+        FrequencyPowerBasis,
+        phenomp_core_twist_up_basis,
+        phenomp_twist_up_geometry_basis,
+    )
+
+    f_hz = jnp.linspace(20.0, 2047.0, 4096)
+    basis = FrequencyPowerBasis.build(f_hz, REQUIRED_SIXTH_EXPONENTS)
+    eta, chi1_l, chi2_l, chip, total_mass = 0.2447, 0.02, 0.01, 0.03, 2.73
+    q = (1.0 + jnp.sqrt(jnp.maximum(1.0 - 4.0 * eta, 0.0)) - 2.0 * eta) / (2.0 * eta)
+    m2 = q / (1.0 + q)
+    angcoeffs = ComputeNNLOanglecoeffs(q, chi2_l * m2 * m2, chip * m2 * m2)
+    Y2m = [SpinWeightedY(2.0924, 0.0, -2, 2, mode) for mode in range(-2, 3)]
+    h_phenom = jnp.exp(1j * jnp.linspace(0.0, 50.0, f_hz.size)) * 1e-21
+    alphaoffset, epsilonoffset = 1.234, -0.567
+
+    expected_hp, expected_hc = PhenomPCoreTwistUp(
+        f_hz, h_phenom, eta, chi1_l, chi2_l, chip, total_mass,
+        angcoeffs, Y2m, alphaoffset, epsilonoffset,
+    )
+    geometry = phenomp_twist_up_geometry_basis(
+        basis, total_mass, eta, chi1_l, chi2_l, chip, angcoeffs
+    )
+    hp, hc = phenomp_core_twist_up_basis(
+        h_phenom, *geometry, Y2m, alphaoffset, epsilonoffset
+    )
+    scale = float(jnp.max(jnp.abs(expected_hp)))
+    assert float(jnp.max(jnp.abs(hp - expected_hp))) < 1e-12 * scale
+    assert float(jnp.max(jnp.abs(hc - expected_hc))) < 1e-12 * scale
+
+
+def test_gen_hphc_basis_path_matches_stock_twist_up() -> None:
+    """``gen_imrphenompv2_nrtidalv2_hphc`` must give the same physical answer
+
+    whether it is driven by the scalar ``basis=None`` stock ``TwistUp`` path
+    (used only by the ``jax.grad`` merger-alignment derivative) or the
+    vectorized basis-based twist-up path (used by every ordinary caller with
+    a concrete frequency grid).
+    """
+
+    from benchmarks.device_parallel_nss.paper_model_basis import (
+        REQUIRED_SIXTH_EXPONENTS,
+        FrequencyPowerBasis,
+    )
+
+    frequency = jnp.linspace(20.0, 1024.0, 2049)
+    theta = jnp.array([PAPER_PARAMETERS[name] for name in EXPECTED_PARAMETER_NAMES])
+    f_ref = 20.0
+
+    stock_hp, stock_hc = gen_imrphenompv2_nrtidalv2_hphc(
+        frequency, theta, f_ref, basis=None
+    )
+
+    basis = FrequencyPowerBasis.build(frequency, REQUIRED_SIXTH_EXPONENTS)
+    basis_hp, basis_hc = gen_imrphenompv2_nrtidalv2_hphc(
+        frequency, theta, f_ref, basis=basis
+    )
+
+    scale = float(jnp.max(jnp.abs(stock_hp)))
+    assert float(jnp.max(jnp.abs(basis_hp - stock_hp))) < 1e-12 * scale
+    assert float(jnp.max(jnp.abs(basis_hc - stock_hc))) < 1e-12 * scale

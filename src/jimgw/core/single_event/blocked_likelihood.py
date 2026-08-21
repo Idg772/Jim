@@ -126,10 +126,26 @@ def _infer_waveform_sampling_dependencies(
             for name in produced_names:
                 dependencies[name] = input_dependencies.copy()
 
+    declared_cacheable_names = getattr(
+        likelihood, "waveform_cacheable_parameter_names", None
+    )
+    if declared_cacheable_names is None:
+        # Lightweight test doubles and third-party likelihoods may expose the
+        # pre-validation duck-typed surface only. Real SingleEventLikelihood
+        # instances use the validated property above.
+        cacheable_parameter_names = set(
+            getattr(likelihood.waveform, "cacheable_parameter_names", ())
+        )
+        if likelihood.waveform_caches_distance:
+            cacheable_parameter_names.add("d_L")
+    else:
+        cacheable_parameter_names = set(declared_cacheable_names)
+
     waveform_sampling_dependencies: set[str] = set()
     for parameter_name in likelihood.waveform.parameter_names:
-        if parameter_name == "d_L" and likelihood.waveform_caches_distance:
-            # Cached polarizations factor out inverse-distance amplitude.
+        if parameter_name in cacheable_parameter_names:
+            # The waveform reconstructs this parameter from its reusable
+            # carrier/polarization cache.
             continue
         if parameter_name in likelihood.fixed_parameters:
             if callable(likelihood.fixed_parameters[parameter_name]):
