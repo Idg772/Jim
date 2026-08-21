@@ -16,6 +16,35 @@ from benchmarks.injection_campaign import (
 REVISION = "a" * 40
 TREE_SHA256 = "b" * 64
 
+FAST_RIDGE_BLOCKS = [
+    ["M_c", "q", "lambda_1", "lambda_2"],
+    ["s1_mag", "s1_theta", "s1_phi"],
+    ["s2_mag", "s2_theta", "s2_phi"],
+    ["zenith", "azimuth"],
+    ["psi"],
+    ["cos_iota", "d_hat"],
+]
+
+
+def _fast_ridge_config_overrides() -> dict[str, Any]:
+    return {
+        "adaptive_slice_widths": True,
+        "blocking_scheme": "fast-ridge",
+        "blocks": copy.deepcopy(FAST_RIDGE_BLOCKS),
+        "bracket_mode": "shrink-only",
+        "direction_mode": "covariance",
+        "distance_marginalization": False,
+        "num_de_jumps": 0,
+        "num_gibbs_sweeps": 2,
+        "time_marginalization": {
+            "tc_range_seconds": [-0.03, 0.03],
+            "upsample_factor": 1,
+        },
+        "width_adaptation_rate": 0.25,
+        "width_target_expansions": 1.0,
+        "width_target_shrinks": 3.0,
+    }
+
 
 def _write_valid_result(
     campaign: Path,
@@ -26,8 +55,13 @@ def _write_valid_result(
     directory = common.result_dir(campaign, injection_id)
     directory.mkdir(parents=True)
     offsets = np.asarray([-3.0, -1.0, 1.0, 3.0]) * 1.0e-6
+    sampled_parameters = (
+        tuple(name for name in common.PARAMETERS if name != "t_c") + ("d_L",)
+        if isinstance(manifest["config"].get("time_marginalization"), dict)
+        else common.PARAMETERS
+    )
     samples = {
-        name: np.asarray(float(row[name]) + offsets) for name in common.PARAMETERS
+        name: np.asarray(float(row[name]) + offsets) for name in sampled_parameters
     }
     log_weights = np.log(np.full(4, 0.25))
     arrays = {
@@ -56,7 +90,7 @@ def _write_valid_result(
                 name: common.posterior_rank(
                     samples[name], float(row[name]), log_weights
                 )
-                for name in common.PARAMETERS
+                for name in sampled_parameters
             },
             "rank_method": {
                 "comparison": "sample < truth",
@@ -99,7 +133,11 @@ def _write_valid_result(
     )
 
 
-def _source_campaign(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+def _source_campaign(
+    tmp_path: Path,
+    *,
+    config_overrides: dict[str, Any] | None = None,
+) -> tuple[Path, dict[str, Any]]:
     campaign = tmp_path / "source"
     campaign.mkdir()
     rows = common.generate_catalogue(2, 4815)
@@ -110,6 +148,7 @@ def _source_campaign(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
     psd_path.write_bytes(b"fixed test PSD\n")
     config = copy.deepcopy(common.DEFAULT_CONFIG)
     config["campaign"] = "paper-fig2a-source"
+    config.update(copy.deepcopy(config_overrides or {}))
     manifest: dict[str, Any] = {
         "schema_version": common.SCHEMA_VERSION,
         "created_at_utc": "2026-08-11T00:00:00+00:00",
@@ -141,12 +180,179 @@ def _source_campaign(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
         },
         "storage_policy": {"fixture": True},
     }
+    if config.get("blocking_scheme") == "fast-ridge":
+        manifest["sampling_parameterization"] = {
+            "distance_transform": ("d_hat=d_L/(M_c^(5/6)*R_net(ra,dec,psi,iota))"),
+            "joint_block": ["cos_iota", "d_hat"],
+            "match": "GW170817 real-event fast-ridge parameterization",
+            "physical_output_parameters": ["iota", "d_L"],
+            "sampling_space_parameters": ["cos_iota", "d_hat"],
+        }
     manifest["config_sha256"] = common.canonical_sha256(manifest)
     common.atomic_write_json(campaign / "manifest.json", manifest)
     for row in rows:
         _write_valid_result(campaign, manifest, row)
     common.refresh_status(campaign, len(rows))
     return campaign, manifest
+
+
+def test_preparer_builds_netsky_arm_from_fast_ridge_m2_source(
+    tmp_path: Path,
+) -> None:
+    assert common.NETSKY_SCHEME in remediation.SCHEMES
+    source, source_manifest = _source_campaign(
+        tmp_path,
+        config_overrides=_fast_ridge_config_overrides(),
+    )
+
+    manifest = remediation.prepare_remediation_campaign(
+        source,
+        tmp_path / "netsky",
+        scheme="netsky",
+        implementation_revision=REVISION,
+        implementation_tree_sha256=TREE_SHA256,
+    )
+
+    config = manifest["config"]
+    assert config["blocking_scheme"] == "netsky"
+    assert config["blocks"] == common.NETSKY_BLOCKS
+    assert config["bridge_blocks"] == common.NETSKY_BRIDGE_BLOCKS
+    assert config["periodic_wrapped_covariance"] is True
+    assert config["num_gibbs_sweeps"] == 2
+    assert config["adaptive_slice_widths"] is False
+    assert config["bracket_mode"] == "stepping-out"
+    assert config["fold_symmetry"] == {}
+    changed_config_fields = {
+        key
+        for key in source_manifest["config"].keys() | config.keys()
+        if source_manifest["config"].get(key) != config.get(key)
+    }
+    assert changed_config_fields == {
+        "blocking_scheme",
+        "blocks",
+        "adaptive_slice_widths",
+        "bracket_mode",
+        "bridge_blocks",
+        "campaign",
+        "fold_symmetry",
+        "paper_configuration",
+        "periodic_wrapped_covariance",
+    }
+    changed_variables = manifest["implementation_diagnostic"]["changed_variables"]
+    assert changed_variables["adaptive_slice_widths"] == {
+        "source": True,
+        "remediation": False,
+    }
+    assert changed_variables["bracket_mode"] == {
+        "source": "shrink-only",
+        "remediation": "stepping-out",
+    }
+    assert (
+        "fixed-width stepping-out"
+        in manifest["implementation_diagnostic"]["configuration_semantics"]
+    )
+    sampling = manifest["sampling_parameterization"]
+    assert sampling["distance_transform"] == (
+        "log_d_hat=log(d_L/(M_c^(5/6)*R_net(ra,dec,psi,iota)))"
+    )
+    assert sampling["joint_block"] == [
+        "azimuth",
+        "cos_iota",
+        "psi",
+        "log_d_hat",
+    ]
+    assert sampling["physical_output_parameters"] == [
+        "ra",
+        "dec",
+        "iota",
+        "psi",
+        "d_L",
+    ]
+    assert sampling["sampling_space_parameters"] == [
+        "cos_zenith",
+        "azimuth",
+        "cos_iota",
+        "psi",
+        "log_d_hat",
+    ]
+    assert "d_hat" not in sampling["sampling_space_parameters"]
+    assert "aligned/weak-precession proxy" in sampling["fold_model_limitation"]
+    assert manifest["n_injections"] == 2
+    assert manifest["catalogue_size"] == 2
+    assert manifest["selection"] == {
+        "rule": "first catalogue entries",
+        "start_inclusive": 0,
+        "stop_exclusive": 2,
+    }
+    assert (tmp_path / "netsky/catalogue.csv").read_bytes() == (
+        source / "catalogue.csv"
+    ).read_bytes()
+    assert [row["status"] for row in common.status_rows(tmp_path / "netsky", 2)] == [
+        "pending",
+        "pending",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("blocking_scheme", "paper"),
+        ("blocks", common.DEFAULT_CONFIG["blocks"]),
+        ("direction_mode", "differential_evolution"),
+        ("adaptive_slice_widths", False),
+        ("bracket_mode", "expand-both"),
+        ("num_de_jumps", 1),
+        ("phase_marginalization", False),
+        ("time_marginalization", False),
+        ("distance_marginalization", common.DEFAULT_CONFIG["distance_marginalization"]),
+        ("n_devices", 1),
+        ("num_gibbs_sweeps", 1),
+        ("sampler_scheduler", "legacy"),
+        ("width_adaptation_rate", 0.5),
+        ("width_target_expansions", 2.0),
+        ("width_target_shrinks", 2.0),
+    ],
+)
+def test_netsky_preparer_rejects_incompatible_fast_ridge_source(
+    tmp_path: Path,
+    field: str,
+    invalid_value: Any,
+) -> None:
+    overrides = _fast_ridge_config_overrides()
+    overrides[field] = copy.deepcopy(invalid_value)
+    source, _ = _source_campaign(tmp_path, config_overrides=overrides)
+
+    with pytest.raises(
+        ValueError,
+        match="fast-ridge, time-marginalized, sampled-d_L FSM D=4, M=2",
+    ):
+        remediation.prepare_remediation_campaign(
+            source,
+            tmp_path / "netsky",
+            scheme="netsky",
+            implementation_revision=REVISION,
+            implementation_tree_sha256=TREE_SHA256,
+        )
+
+
+def test_legacy_m1_scheme_rejects_fast_ridge_m2_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(remediation, "PAPER_PP_RECOVERIES", 2)
+    source, _ = _source_campaign(
+        tmp_path,
+        config_overrides=_fast_ridge_config_overrides(),
+    )
+
+    with pytest.raises(ValueError, match="expected FSM D=4, M=1 campaign"):
+        remediation.prepare_remediation_campaign(
+            source,
+            tmp_path / "legacy-remediation",
+            scheme="all-slow-time",
+            implementation_revision=REVISION,
+            implementation_tree_sha256=TREE_SHA256,
+        )
 
 
 def test_preparer_freezes_a_paired_all_slow_time_m1_campaign(

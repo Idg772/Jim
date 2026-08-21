@@ -21,6 +21,8 @@ from typing import Any
 
 from benchmarks.injection_campaign.common import (
     CATALOGUE_FIELDS,
+    NETSKY_BLOCKS,
+    NETSKY_SCHEME,
     SCHEMA_VERSION,
     atomic_write_csv,
     atomic_write_json,
@@ -151,13 +153,17 @@ def _normalise_blocks(value: object) -> list[list[str]]:
 
 
 def blocks_for_scheme(source_blocks: object, scheme: str) -> list[list[str]]:
-    """Return the requested scheme while preserving every unmerged block."""
+    """Return the requested primary blocks for a diagnostic or remediation arm."""
 
-    if scheme not in SCHEMES:
+    accepted_schemes = (*SCHEMES, NETSKY_SCHEME)
+    if scheme not in accepted_schemes:
         raise ValueError(
-            f"unknown blocking scheme {scheme!r}; expected {list(SCHEMES)}"
+            f"unknown blocking scheme {scheme!r}; expected {list(accepted_schemes)}"
         )
     blocks = _normalise_blocks(source_blocks)
+    if scheme == NETSKY_SCHEME:
+        return copy.deepcopy(NETSKY_BLOCKS)
+
     tuples = [tuple(block) for block in blocks]
     for required in (_SKY_BLOCK, _PSI_BLOCK, _TIME_BLOCK):
         if tuples.count(required) != 1:

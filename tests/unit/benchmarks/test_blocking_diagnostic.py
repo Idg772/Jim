@@ -18,6 +18,7 @@ from benchmarks.injection_campaign.prepare_blocking_diagnostic import (
     DEFAULT_SOURCE_IDS,
     SCHEMES,
     SOURCE_CARRIER_TIME_ANCHOR,
+    blocks_for_scheme,
     prepare_blocking_diagnostic,
     sampler_seed_for_replicate,
 )
@@ -224,6 +225,21 @@ def _rewrite_manifest(campaign: Path, mutation: Any) -> None:
     manifest.pop("config_sha256")
     manifest["config_sha256"] = common.canonical_sha256(manifest)
     common.atomic_write_json(path, manifest)
+
+
+def test_netsky_scheme_has_canonical_primary_and_bridge_blocks() -> None:
+    assert common.NETSKY_SCHEME not in SCHEMES
+    assert common.NETSKY_BLOCKS == [
+        ["M_c", "q", "lambda_1", "lambda_2"],
+        ["s1_mag", "s1_theta", "s1_phi"],
+        ["s2_mag", "s2_theta", "s2_phi"],
+        ["cos_zenith"],
+        ["azimuth", "cos_iota", "psi", "log_d_hat"],
+    ]
+    assert common.NETSKY_BRIDGE_BLOCKS == [["cos_zenith", "azimuth"]]
+    assert blocks_for_scheme(common.DEFAULT_CONFIG["blocks"], "netsky") == (
+        common.NETSKY_BLOCKS
+    )
 
 
 def test_preparer_builds_m1_schemes_with_identical_replicate_seeds(
