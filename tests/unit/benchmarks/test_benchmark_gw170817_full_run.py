@@ -9,6 +9,8 @@ from benchmarks.device_parallel_nss import benchmark_gw170817_full_run as benchm
 from benchmarks.device_parallel_nss import (
     benchmark_gw170817_likelihood_lanes as lane_benchmark,
 )
+from benchmarks.injection_campaign import common as campaign_common
+from benchmarks.injection_campaign.run_injection import _detector_plane_azimuth
 
 
 def _bundle_arrays(
@@ -621,6 +623,49 @@ def test_cli_accepts_posterior_sample_output(tmp_path: Path) -> None:
     assert args.samples_output == samples_file
 
 
+def test_cli_assigns_a_separate_folded_diagnostic_output_for_netsky(
+    tmp_path: Path,
+) -> None:
+    nested_file = tmp_path / "nested-samples.npz"
+
+    args = benchmark._parse_args(
+        [
+            "--data-file",
+            str(tmp_path / "data.npz"),
+            "--workload",
+            benchmark.PAPER_WORKLOAD,
+            "--blocking-scheme",
+            campaign_common.NETSKY_SCHEME,
+            "--nested-output",
+            str(nested_file),
+            "--fold-unfold-batch-size",
+            "3",
+        ]
+    )
+
+    assert args.folded_nested_output == (
+        tmp_path / "nested-samples-folded-nested-diagnostics.npz"
+    )
+    assert args.fold_unfold_batch_size == 3
+    assert args.num_gibbs_sweeps == benchmark.NETSKY_NUM_GIBBS_SWEEPS
+
+
+def test_cli_rejects_a_noncanonical_netsky_sweep_count(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        benchmark._parse_args(
+            [
+                "--data-file",
+                str(tmp_path / "data.npz"),
+                "--workload",
+                benchmark.PAPER_WORKLOAD,
+                "--blocking-scheme",
+                campaign_common.NETSKY_SCHEME,
+                "--num-gibbs-sweeps",
+                "1",
+            ]
+        )
+
+
 def test_write_posterior_samples_round_trip(tmp_path: Path) -> None:
     samples_file = tmp_path / "posterior-samples.npz"
     samples = {
@@ -669,6 +714,188 @@ def test_write_nested_samples_round_trip(tmp_path: Path) -> None:
         for name, values in samples.items():
             np.testing.assert_array_equal(saved[name], values)
         assert np.exp(saved["log_weights"]).sum() == pytest.approx(1.0)
+
+
+def test_netsky_extraction_separates_true_posterior_from_folded_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, int, int | None]] = []
+    jim = object()
+    unfolded = SimpleNamespace(
+        samples={"M_c": np.asarray([1.19, 1.20])},
+        true_log_likelihood=np.asarray([101.0, 102.0]),
+        log_weights=np.log(np.asarray([0.4, 0.6])),
+        folded_log_likelihood=np.asarray([11.0, 12.0]),
+        folded_log_likelihood_birth=np.asarray([-np.inf, 10.0]),
+        insertion_diagnostic={"p_value": 0.75},
+        telemetry={"expected_nonidentity_mass": 0.6},
+    )
+
+    def fake_extract(
+        actual_jim: object,
+        *,
+        n_live: int,
+        batch_size: int | None,
+    ) -> SimpleNamespace:
+        calls.append((actual_jim, n_live, batch_size))
+        return unfolded
+
+    monkeypatch.setattr(
+        benchmark,
+        "extract_unfolded_weighted_posterior",
+        fake_extract,
+    )
+
+    extracted = benchmark._extract_netsky_outputs(jim, batch_size=3)
+
+    assert calls == [(jim, benchmark.N_LIVE, 3)]
+    assert list(extracted["posterior"]) == [
+        "M_c",
+        "log_likelihood",
+        "log_weights",
+    ]
+    assert "log_likelihood_birth" not in extracted["posterior"]
+    np.testing.assert_array_equal(
+        extracted["posterior"]["log_likelihood"],
+        unfolded.true_log_likelihood,
+    )
+    assert extracted["folded_nested_diagnostics"].keys() == {
+        "log_likelihood",
+        "log_likelihood_birth",
+    }
+    assert extracted["insertion_diagnostic"] == {"p_value": 0.75}
+    assert extracted["telemetry"] == {"expected_nonidentity_mass": 0.6}
+    assert extracted["posterior_weight_effective_size"] == pytest.approx(
+        1.0 / (0.4**2 + 0.6**2)
+    )
+    assert extracted["posterior_weighting"] == (
+        campaign_common.UNFOLDED_POSTERIOR_WEIGHTING
+    )
+    assert extracted["posterior_weight_effective_size_semantics"] == (
+        campaign_common.POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS
+    )
+    assert extracted["folded_target_semantics"] == (
+        campaign_common.FOLDED_TARGET_SEMANTICS
+    )
+    assert extracted["fold_model_limitation"] == benchmark.NETSKY_FOLD_MODEL_LIMITATION
+
+    diagnostics_path = tmp_path / "folded_nested_diagnostics.npz"
+    artifact = benchmark._write_folded_nested_diagnostics(
+        diagnostics_path,
+        extracted["folded_nested_diagnostics"],
+    )
+    assert artifact["semantics"] == campaign_common.FOLDED_TARGET_SEMANTICS
+    assert artifact["fields"] == ["log_likelihood", "log_likelihood_birth"]
+    with np.load(diagnostics_path) as arrays:
+        assert set(arrays.files) == {"log_likelihood", "log_likelihood_birth"}
+        np.testing.assert_array_equal(
+            arrays["log_likelihood"], unfolded.folded_log_likelihood
+        )
+        np.testing.assert_array_equal(
+            arrays["log_likelihood_birth"], unfolded.folded_log_likelihood_birth
+        )
+
+
+def test_netsky_report_fields_label_weight_concentration_and_projections() -> None:
+    outputs = {
+        "insertion_diagnostic": {"p_value": 0.75},
+        "telemetry": {
+            "group_order": 8,
+            "folded_points": 5,
+            "expected_nonidentity_mass": 0.6,
+        },
+        "posterior_weight_effective_size": 1.8,
+        "posterior_weight_effective_size_semantics": (
+            campaign_common.POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS
+        ),
+        "fold_model_limitation": benchmark.NETSKY_FOLD_MODEL_LIMITATION,
+    }
+    sampler_config = SimpleNamespace(
+        fold_symmetry=SimpleNamespace(
+            model_dump=lambda: {
+                "cos_iota": "cos_iota",
+                "azimuth": "azimuth",
+                "psi": "psi",
+                "azimuth_reflection_center": 1.25,
+            }
+        )
+    )
+    folded_artifact = {
+        "path": "/tmp/folded.npz",
+        "semantics": campaign_common.FOLDED_TARGET_SEMANTICS,
+    }
+
+    fields = benchmark._netsky_result_fields(
+        outputs,
+        sampler_config=sampler_config,
+        folded_nested_diagnostics=folded_artifact,
+        fold_unfold_batch_size=3,
+        sampler_folded_target_callbacks=17,
+    )
+
+    assert fields["folded_nested_diagnostics"] is folded_artifact
+    assert fields["insertion_index_diagnostic"] == {"p_value": 0.75}
+    assert fields["posterior_weight_effective_size"] == pytest.approx(1.8)
+    assert fields["posterior_weight_effective_size_semantics"] == (
+        campaign_common.POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS
+    )
+    quotient_fold = fields["quotient_fold"]
+    assert (
+        quotient_fold["completed_config"] == sampler_config.fold_symmetry.model_dump()
+    )
+    assert quotient_fold["model_limitation"] == benchmark.NETSKY_FOLD_MODEL_LIMITATION
+    assert quotient_fold["batch_size"] == 3
+    assert quotient_fold["group_order"] == 8
+    assert quotient_fold["expected_nonidentity_mass"] == pytest.approx(0.6)
+    assert quotient_fold["projection_accounting"] == {
+        "images_per_folded_target_callback": 8,
+        "sampler_folded_target_callbacks": 17,
+        "sampler_true_image_projections": 136,
+        "retained_folded_points_unfolded": 5,
+        "unfold_true_image_projections": 40,
+        "total_true_image_projections": 176,
+        "sampler_callback_counter": "results.n_likelihood_evaluations_physical",
+    }
+
+
+def test_netsky_artifacts_keep_true_and_folded_likelihood_schemas_separate(
+    tmp_path: Path,
+) -> None:
+    outputs = {
+        "posterior": {
+            "M_c": np.asarray([1.19, 1.20]),
+            "log_likelihood": np.asarray([101.0, 102.0]),
+            "log_weights": np.log(np.asarray([0.4, 0.6])),
+        },
+        "folded_nested_diagnostics": {
+            "log_likelihood": np.asarray([11.0, 12.0]),
+            "log_likelihood_birth": np.asarray([-np.inf, 10.0]),
+        },
+    }
+    posterior_path = tmp_path / "posterior.npz"
+    folded_path = tmp_path / "posterior-folded-nested-diagnostics.npz"
+
+    posterior, folded = benchmark._write_netsky_artifacts(
+        outputs,
+        posterior_output=posterior_path,
+        folded_nested_output=folded_path,
+    )
+
+    assert posterior is not None
+    assert posterior["fields"] == ["M_c", "log_likelihood", "log_weights"]
+    assert posterior["weighting"] == campaign_common.UNFOLDED_POSTERIOR_WEIGHTING
+    assert posterior["schema_version"] == 2
+    assert posterior["weight_effective_size_semantics"] == (
+        campaign_common.POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS
+    )
+    assert folded is not None
+    assert folded["fields"] == ["log_likelihood", "log_likelihood_birth"]
+    assert folded["semantics"] == campaign_common.FOLDED_TARGET_SEMANTICS
+    with np.load(posterior_path) as arrays:
+        assert "log_likelihood_birth" not in arrays.files
+    with np.load(folded_path) as arrays:
+        assert arrays.files == ["log_likelihood", "log_likelihood_birth"]
 
 
 def test_write_posterior_samples_rejects_inconsistent_lengths(tmp_path: Path) -> None:
@@ -1229,6 +1456,152 @@ def test_fast_ridge_intrinsic_components_use_the_same_exact_coordinates() -> Non
     ]
 
 
+def test_netsky_components_pin_coordinates_fold_and_fixed_work() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+
+    ifos = [get_H1(), get_L1(), get_V1()]
+    components = benchmark._analysis_components(
+        benchmark.PAPER_WORKLOAD,
+        jnp,
+        ifos,
+        blocking_scheme=campaign_common.NETSKY_SCHEME,
+    )
+
+    assert components["spec"]["blocks"] == campaign_common.NETSKY_BLOCKS
+    assert components["bridge_blocks"] == campaign_common.NETSKY_BRIDGE_BLOCKS
+    assert components["periodic_wrapped_covariance"] is True
+    assert components["num_gibbs_sweeps"] == 2
+    assert [
+        transform.name_mapping for transform in components["sample_transforms"]
+    ] == [
+        (["d_L"], ["d_hat"]),
+        (["iota"], ["cos_iota"]),
+        (["ra", "dec"], ["zenith", "azimuth"]),
+        (["zenith"], ["cos_zenith"]),
+        (["d_hat"], ["log_d_hat"]),
+    ]
+    assert components["fold_symmetry"] == {
+        "cos_iota": "cos_iota",
+        "azimuth": "azimuth",
+        "psi": "psi",
+        "azimuth_reflection_center": pytest.approx(_detector_plane_azimuth(ifos)),
+    }
+
+    config = benchmark._config_report(
+        seed=0,
+        n_devices=1,
+        workload=benchmark.PAPER_WORKLOAD,
+        blocking_scheme=campaign_common.NETSKY_SCHEME,
+        fold_symmetry=components["fold_symmetry"],
+    )
+    assert config["blocks"] == campaign_common.NETSKY_BLOCKS
+    assert config["bridge_blocks"] == campaign_common.NETSKY_BRIDGE_BLOCKS
+    assert config["fold_symmetry"] == components["fold_symmetry"]
+    assert config["periodic_wrapped_covariance"] is True
+    assert config["num_gibbs_sweeps"] == 2
+    assert config["paper_notation"]["M_gibbs_sweeps"] == 2
+    assert config["fixed_work"]["total_updates"] == 32
+    assert config["fixed_work"]["waveform_rebuild_slice_updates"] == 20
+    assert config["fixed_work"]["cache_hit_slice_updates"] == 12
+
+
+def test_netsky_sampler_options_complete_the_runtime_config() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+    from jimgw.samplers.config import FoldSymmetryConfig
+
+    components = benchmark._analysis_components(
+        benchmark.PAPER_WORKLOAD,
+        jnp,
+        [get_H1(), get_L1(), get_V1()],
+        blocking_scheme=campaign_common.NETSKY_SCHEME,
+    )
+
+    options = benchmark._sampler_scheme_options(
+        campaign_common.NETSKY_SCHEME,
+        components,
+        fold_config_type=FoldSymmetryConfig,
+    )
+
+    assert options["num_gibbs_sweeps"] == 2
+    assert options["bridge_blocks"] == campaign_common.NETSKY_BRIDGE_BLOCKS
+    assert options["periodic_wrapped_covariance"] is True
+    assert isinstance(options["fold_symmetry"], FoldSymmetryConfig)
+    assert options["fold_symmetry"].model_dump() == components["fold_symmetry"]
+
+
+def test_netsky_blocks_pin_the_twenty_rebuild_and_twelve_cache_hit_updates() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.blocked_likelihood import (
+        _build_rebuild_required_by_block,
+        _resolve_rebuild_required_by_parameter_groups,
+    )
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+
+    components = benchmark._analysis_components(
+        benchmark.PAPER_WORKLOAD,
+        jnp,
+        [get_H1(), get_L1(), get_V1()],
+        blocking_scheme=campaign_common.NETSKY_SCHEME,
+    )
+    parameter_names = (
+        "M_c",
+        "q",
+        "s1_mag",
+        "s1_theta",
+        "s1_phi",
+        "s2_mag",
+        "s2_theta",
+        "s2_phi",
+        "lambda_1",
+        "lambda_2",
+        "cos_iota",
+        "cos_zenith",
+        "azimuth",
+        "psi",
+        "log_d_hat",
+    )
+    likelihood = SimpleNamespace(
+        waveform=components["waveform"],
+        fixed_parameters={"phase_c": 0.0},
+        waveform_caches_distance=True,
+    )
+
+    rebuild = _build_rebuild_required_by_block(
+        likelihood,
+        campaign_common.NETSKY_BLOCKS,
+        parameter_names=parameter_names,
+        sample_transforms=components["sample_transforms"],
+        likelihood_transforms=components["likelihood_transforms"],
+    )
+    bridges = _resolve_rebuild_required_by_parameter_groups(
+        likelihood,
+        campaign_common.NETSKY_BRIDGE_BLOCKS,
+        parameter_names=parameter_names,
+        sample_transforms=components["sample_transforms"],
+        likelihood_transforms=components["likelihood_transforms"],
+    )
+
+    assert list(rebuild.values()) == [True, True, True, False, False]
+    assert [requires_rebuild for _, requires_rebuild in bridges] == [False]
+    rebuild_per_sweep = sum(
+        len(indices)
+        for indices, requires_rebuild in rebuild.items()
+        if requires_rebuild
+    )
+    cache_hits_per_sweep = sum(
+        len(indices)
+        for indices, requires_rebuild in rebuild.items()
+        if not requires_rebuild
+    ) + len(bridges)
+    assert benchmark.NETSKY_NUM_GIBBS_SWEEPS * rebuild_per_sweep == 20
+    assert benchmark.NETSKY_NUM_GIBBS_SWEEPS * cache_hits_per_sweep == 12
+
+
 def test_named_de_jump_block_keeps_the_paper_slice_partition() -> None:
     args = benchmark._parse_args(
         [
@@ -1433,6 +1806,71 @@ def test_write_slice_data_omits_periodic_independence_operations(
             *(["parameter_10,parameter_11"] * 2),
             *(["parameter_13,parameter_14"] * 2),
         ]
+
+
+def test_write_slice_data_appends_one_fixed_width_bridge_per_netsky_sweep(
+    tmp_path: Path,
+) -> None:
+    block_indices = (
+        (0, 1, 2, 3),
+        (4, 5, 6),
+        (7, 8, 9),
+        (10,),
+        (11, 12, 13, 14),
+    )
+    rebuild_by_block = {
+        indices: block_index < 3 for block_index, indices in enumerate(block_indices)
+    }
+    bridge = ((10, 11), False)
+    n_slices = 32
+    expansions = np.arange(benchmark.N_DELETE * n_slices).reshape(
+        benchmark.N_DELETE,
+        n_slices,
+    )
+    sampler = SimpleNamespace(
+        _final_state=SimpleNamespace(
+            update_info=SimpleNamespace(
+                num_expansions=expansions,
+                num_shrink=expansions + 1,
+            )
+        ),
+        _rebuild_required_by_block=rebuild_by_block,
+        _block_kernel_modes=("slice",) * len(block_indices),
+        _resolved_bridge_blocks=(bridge,),
+        _swig_config=SimpleNamespace(
+            num_gibbs_sweeps=2,
+            num_inner_steps_per_dim=1,
+            num_slice_steps_by_block=None,
+            adaptive_slice_widths=False,
+        ),
+    )
+    parameter_names = tuple(f"parameter_{index}" for index in range(15))
+    output = tmp_path / "netsky-slices.npz"
+
+    report = benchmark._write_slice_data(
+        output,
+        SimpleNamespace(sampler=sampler, sampling_parameter_names=parameter_names),
+        n_devices=1,
+    )
+
+    assert report["n_slices"] == 32
+    assert report["n_bridge_slices"] == 2
+    with np.load(output) as arrays:
+        bridge_rows = np.flatnonzero(arrays["slice_is_bridge"])
+        np.testing.assert_array_equal(bridge_rows, np.asarray([15, 31]))
+        np.testing.assert_array_equal(
+            arrays["slice_gibbs_sweep"][bridge_rows],
+            np.asarray([0, 1]),
+        )
+        np.testing.assert_array_equal(
+            arrays["slice_block_parameter_names"][bridge_rows],
+            np.asarray(["parameter_10,parameter_11"] * 2),
+        )
+        np.testing.assert_array_equal(
+            arrays["slice_requires_rebuild"][bridge_rows],
+            np.asarray([False, False]),
+        )
+        np.testing.assert_allclose(arrays["slice_width"][bridge_rows], 1.0)
 
 
 def test_install_per_slice_diagnostics_forces_production_builder_flag(

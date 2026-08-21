@@ -40,6 +40,23 @@ if __package__ in (None, ""):
 from benchmarks.device_parallel_nss.sampler_ablation import (
     VARIANT_NAMES as SAMPLER_ABLATION_VARIANTS,
 )
+from benchmarks.injection_campaign.common import (
+    FOLDED_TARGET_SEMANTICS,
+    NETSKY_BLOCKS,
+    NETSKY_BRIDGE_BLOCKS,
+    NETSKY_SCHEME,
+    POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS,
+    UNFOLDED_POSTERIOR_WEIGHTING,
+)
+from benchmarks.injection_campaign.folded_results import (
+    extract_unfolded_weighted_posterior,
+)
+from benchmarks.injection_campaign.run_injection import (
+    _FOLD_MODEL_LIMITATION as NETSKY_FOLD_MODEL_LIMITATION,
+)
+from benchmarks.injection_campaign.run_injection import (
+    _detector_plane_azimuth,
+)
 
 SCHEMA_VERSION = 2
 BENCHMARK_NAME = "gw170817-full-swig-4gpu"
@@ -120,6 +137,15 @@ FAST_RIDGE_BLOCKING_SCHEME = "fast-ridge"
 FAST_RIDGE_INTRINSIC_BLOCKING_SCHEME = "fast-ridge-intrinsic"
 FAST_RIDGE_INTRINSIC_5STEP_BLOCKING_SCHEME = "fast-ridge-intrinsic-5step"
 FAST_RIDGE_INTRINSIC_5STEP_SCHEDULE = (5, 1, 1, 2, 1, 2)
+NETSKY_NUM_GIBBS_SWEEPS = 2
+NETSKY_FIXED_WORK = {
+    "total_updates": 32,
+    "total_slice_updates": 32,
+    "waveform_rebuild_slice_updates": 20,
+    "cache_hit_slice_updates": 12,
+    "primary_slice_updates": 30,
+    "bridge_slice_updates": 2,
+}
 FAST_RIDGE_INTRINSIC_PERIODIC_MH_BLOCKING_SCHEME = "fast-ridge-intrinsic-periodic-mh"
 FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_BLOCKING_SCHEME = (
     "fast-ridge-intrinsic-periodic-mh-cde4"
@@ -213,6 +239,7 @@ BLOCKING_SCHEME_CHOICES = (
     FAST_RIDGE_INTRINSIC_PERIODIC_MH_BLOCKING_SCHEME,
     FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_BLOCKING_SCHEME,
     FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_BLOCKING_SCHEME,
+    NETSKY_SCHEME,
 )
 
 ALIGNED_BLOCKS = (
@@ -425,6 +452,16 @@ PAPER_FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_LIMITATIONS = (
     *PAPER_LIMITATIONS[1:],
 )
 
+NETSKY_LIMITATIONS = (
+    (
+        "This preserves the paper's full-resolution 15-parameter GW170817 "
+        "model and samples the network-sky quotient in cos_zenith, azimuth, "
+        "cos_iota, psi, and log_d_hat coordinates with a cache-hit sky bridge."
+    ),
+    NETSKY_FOLD_MODEL_LIMITATION,
+    *PAPER_LIMITATIONS[1:],
+)
+
 LIMITATIONS = ALIGNED_LIMITATIONS
 
 
@@ -588,8 +625,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--num-gibbs-sweeps",
         type=_positive_int,
-        default=NUM_GIBBS_SWEEPS,
-        help="Paper-notation M: complete Gibbs sweeps per replacement.",
+        default=None,
+        help=(
+            "Paper-notation M: complete Gibbs sweeps per replacement. "
+            "Defaults to 1, or the fixed value 2 for NETSKY."
+        ),
     )
     parser.add_argument(
         "--sampler-seed",
@@ -672,7 +712,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Write all equally weighted posterior samples in prior space, "
-            "including log_likelihood, to an NPZ artifact."
+            "including log_likelihood, to an NPZ artifact. For NETSKY this "
+            "instead writes the deterministically unfolded physical posterior "
+            "with normalized log weights."
         ),
     )
     parser.add_argument(
@@ -682,8 +724,26 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Write the full weighted nested-point collection in prior space, "
             "including birth/death log-likelihoods and normalized log weights, "
-            "to an NPZ artifact."
+            "to an NPZ artifact. For NETSKY this is the unfolded-posterior "
+            "output path when --samples-output is omitted."
         ),
+    )
+    parser.add_argument(
+        "--folded-nested-output",
+        type=Path,
+        default=None,
+        help=(
+            "For NETSKY, write the paired folded-target death and birth "
+            "likelihoods to a separate NPZ diagnostic artifact. When omitted "
+            "with a posterior output, a collision-safe sibling named from "
+            "the posterior stem is written beside it."
+        ),
+    )
+    parser.add_argument(
+        "--fold-unfold-batch-size",
+        type=_positive_int,
+        default=1,
+        help="Host-side batch size for deterministic NETSKY weighted unfolding.",
     )
     parser.add_argument(
         "--retain-per-slice-info",
@@ -741,6 +801,35 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
+    if args.blocking_scheme == NETSKY_SCHEME:
+        if (
+            args.num_gibbs_sweeps is not None
+            and args.num_gibbs_sweeps != NETSKY_NUM_GIBBS_SWEEPS
+        ):
+            parser.error(
+                "--blocking-scheme netsky fixes --num-gibbs-sweeps at "
+                f"{NETSKY_NUM_GIBBS_SWEEPS}"
+            )
+        args.num_gibbs_sweeps = NETSKY_NUM_GIBBS_SWEEPS
+        if args.direction_mode != "covariance":
+            parser.error(
+                "--blocking-scheme netsky requires --direction-mode covariance"
+            )
+        if args.adaptive_slice_widths or args.bracket_mode != "stepping-out":
+            parser.error(
+                "--blocking-scheme netsky requires fixed stepping-out slice widths"
+            )
+        if args.num_de_jumps != 0 or args.de_jump_block:
+            parser.error("--blocking-scheme netsky fixes its 32-update work schedule")
+        artifact_anchor = args.samples_output or args.nested_output
+        if artifact_anchor is not None and args.folded_nested_output is None:
+            args.folded_nested_output = artifact_anchor.with_name(
+                f"{artifact_anchor.stem}-folded-nested-diagnostics.npz"
+            )
+    elif args.folded_nested_output is not None:
+        parser.error("--folded-nested-output requires --blocking-scheme netsky")
+    elif args.num_gibbs_sweeps is None:
+        args.num_gibbs_sweeps = NUM_GIBBS_SWEEPS
     if (
         args.blocking_scheme != PAPER_BLOCKING_SCHEME
         and args.workload != PAPER_WORKLOAD
@@ -801,6 +890,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "--slice-data-output": args.slice_data_output is not None,
             "--samples-output": args.samples_output is not None,
             "--nested-output": args.nested_output is not None,
+            "--folded-nested-output": args.folded_nested_output is not None,
             "--retain-per-slice-info": args.retain_per_slice_info,
             "--jax-compilation-cache-dir": args.jax_compilation_cache_dir is not None,
             "--telemetry-output": args.telemetry_output is not None,
@@ -1466,6 +1556,9 @@ def _workload_spec(
         elif blocking_scheme == (FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_BLOCKING_SCHEME):
             blocks = PAPER_FAST_RIDGE_INTRINSIC_BLOCKS
             limitations = PAPER_FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_LIMITATIONS
+        elif blocking_scheme == NETSKY_SCHEME:
+            blocks = NETSKY_BLOCKS
+            limitations = NETSKY_LIMITATIONS
         else:
             blocks = PAPER_BLOCKS
             limitations = PAPER_LIMITATIONS
@@ -1500,8 +1593,14 @@ def _config_report(
     width_target_expansions: float = 1.0,
     width_target_shrinks: float = 3.0,
     sampler_seed: int | None = None,
+    fold_symmetry: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     spec = _workload_spec(workload, blocking_scheme)
+    num_gibbs_sweeps = (
+        NETSKY_NUM_GIBBS_SWEEPS
+        if blocking_scheme == NETSKY_SCHEME
+        else NUM_GIBBS_SWEEPS
+    )
     canonical_de_jump_blocks = [
         {
             "parameters": list(block["parameters"]),
@@ -1551,7 +1650,7 @@ def _config_report(
         "n_delete": N_DELETE,
         "n_delete_frac": N_DELETE_FRAC,
         "num_inner_steps_per_dim": NUM_INNER_STEPS_PER_DIM,
-        "num_gibbs_sweeps": NUM_GIBBS_SWEEPS,
+        "num_gibbs_sweeps": num_gibbs_sweeps,
         "termination_dlogz": TERMINATION_DLOGZ,
         "blocks": [list(block) for block in spec["blocks"]],
         "dtype": "float64",
@@ -1559,7 +1658,7 @@ def _config_report(
             "D_devices": n_devices,
             "m_live_points": N_LIVE,
             "k_deleted_points": N_DELETE,
-            "M_gibbs_sweeps": NUM_GIBBS_SWEEPS,
+            "M_gibbs_sweeps": num_gibbs_sweeps,
         },
     }
     if sampler_seed is not None:
@@ -1598,6 +1697,13 @@ def _config_report(
         config["fixed_work"] = dict(
             COMPLEMENTARY_DE_FIXED_WORK_BY_SCHEME[blocking_scheme]
         )
+    if blocking_scheme == NETSKY_SCHEME:
+        if fold_symmetry is None:
+            raise ValueError("netsky config reporting requires a completed fold")
+        config["bridge_blocks"] = [list(block) for block in NETSKY_BRIDGE_BLOCKS]
+        config["fold_symmetry"] = dict(fold_symmetry)
+        config["periodic_wrapped_covariance"] = True
+        config["fixed_work"] = dict(NETSKY_FIXED_WORK)
     encoded = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
     config["sha256"] = hashlib.sha256(encoded).hexdigest()
     return config
@@ -1702,7 +1808,7 @@ def _analysis_components(
         SphereSpinToCartesianSpinTransform,
     )
     from jimgw.core.single_event.waveform import RippleIMRPhenomD_NRTidalv2
-    from jimgw.core.transforms import CosineTransform
+    from jimgw.core.transforms import CosineTransform, SingleSidedUnboundTransform
 
     spec = _workload_spec(workload, blocking_scheme)
     if workload == PAPER_WORKLOAD:
@@ -1763,6 +1869,7 @@ def _analysis_components(
         FAST_RIDGE_INTRINSIC_BLOCKING_SCHEME,
         FAST_RIDGE_INTRINSIC_5STEP_BLOCKING_SCHEME,
         *PERIODIC_MH_BLOCKING_SCHEMES,
+        NETSKY_SCHEME,
     }:
         # Build d_hat while the physical sky position and inclination are
         # still present. Reverse application restores sky, then iota, then
@@ -1782,6 +1889,27 @@ def _analysis_components(
             ifos=ifos,
         )
     )
+    if blocking_scheme == NETSKY_SCHEME:
+        sample_transforms.extend(
+            [
+                CosineTransform((["zenith"], ["cos_zenith"])),
+                SingleSidedUnboundTransform(
+                    (["d_hat"], ["log_d_hat"]),
+                    original_lower_bound=0.0,
+                ),
+            ]
+        )
+
+    fold_symmetry = (
+        {
+            "cos_iota": "cos_iota",
+            "azimuth": "azimuth",
+            "psi": "psi",
+            "azimuth_reflection_center": _detector_plane_azimuth(ifos),
+        }
+        if blocking_scheme == NETSKY_SCHEME
+        else None
+    )
 
     return {
         "spec": spec,
@@ -1793,7 +1921,47 @@ def _analysis_components(
             *spin_transforms,
         ],
         "periodic": periodic,
+        "bridge_blocks": (
+            [list(block) for block in NETSKY_BRIDGE_BLOCKS]
+            if blocking_scheme == NETSKY_SCHEME
+            else []
+        ),
+        "fold_symmetry": fold_symmetry,
+        "periodic_wrapped_covariance": blocking_scheme == NETSKY_SCHEME,
+        "num_gibbs_sweeps": (
+            NETSKY_NUM_GIBBS_SWEEPS
+            if blocking_scheme == NETSKY_SCHEME
+            else NUM_GIBBS_SWEEPS
+        ),
     }
+
+
+def _sampler_scheme_options(
+    blocking_scheme: str,
+    components: Mapping[str, Any],
+    *,
+    fold_config_type: type[Any],
+) -> dict[str, Any]:
+    """Return scheme-specific SwiG options used by the production run."""
+
+    options: dict[str, Any] = {
+        "num_gibbs_sweeps": int(components["num_gibbs_sweeps"]),
+    }
+    if blocking_scheme != NETSKY_SCHEME:
+        return options
+    fold_symmetry = components.get("fold_symmetry")
+    if not isinstance(fold_symmetry, Mapping):
+        raise TypeError("NETSKY requires a completed fold configuration")
+    options.update(
+        {
+            "bridge_blocks": [list(block) for block in components["bridge_blocks"]],
+            "fold_symmetry": fold_config_type(**dict(fold_symmetry)),
+            "periodic_wrapped_covariance": bool(
+                components["periodic_wrapped_covariance"]
+            ),
+        }
+    )
+    return options
 
 
 def _safe_float(value: Any) -> float | None:
@@ -2132,6 +2300,35 @@ def _normalise_per_slice_array(value: Any, n_slices: int) -> np.ndarray:
 def _write_slice_data(path: Path, jim: Any, n_devices: int) -> dict[str, Any]:
     update_info = jim.sampler._final_state.update_info
     rebuild_by_block = jim.sampler._rebuild_required_by_block
+    resolved_bridge_blocks = tuple(getattr(jim.sampler, "_resolved_bridge_blocks", ()))
+    if any(requires_rebuild for _, requires_rebuild in resolved_bridge_blocks):
+        raise RuntimeError("per-slice bridge records must be cache-resident")
+    swig_config = getattr(jim.sampler, "_swig_config", None)
+    num_gibbs_sweeps = int(getattr(swig_config, "num_gibbs_sweeps", NUM_GIBBS_SWEEPS))
+    num_inner_steps_per_dim = int(
+        getattr(
+            swig_config,
+            "num_inner_steps_per_dim",
+            NUM_INNER_STEPS_PER_DIM,
+        )
+    )
+    configured_step_counts = getattr(
+        swig_config,
+        "num_slice_steps_by_block",
+        None,
+    )
+    if configured_step_counts is None:
+        primary_step_counts = tuple(
+            num_inner_steps_per_dim * len(indices) for indices in rebuild_by_block
+        )
+    else:
+        primary_step_counts = tuple(int(count) for count in configured_step_counts)
+        if len(primary_step_counts) != len(rebuild_by_block):
+            raise RuntimeError("per-slice step counts do not align with cache blocks")
+    if resolved_bridge_blocks and bool(
+        getattr(swig_config, "adaptive_slice_widths", False)
+    ):
+        raise RuntimeError("bridge slice records require fixed primary widths")
     block_kernel_modes = tuple(
         getattr(
             jim.sampler,
@@ -2156,14 +2353,24 @@ def _write_slice_data(path: Path, jim: Any, n_devices: int) -> dict[str, Any]:
     slice_slot_in_block: list[int] = []
     slice_gibbs_sweep: list[int] = []
     slice_block_parameter_names: list[str] = []
-    block_parameter_indices = list(rebuild_by_block)
+    slice_is_bridge: list[bool] = []
+    slice_width: list[float] = []
+    block_parameter_indices = [
+        *rebuild_by_block,
+        *(indices for indices, _ in resolved_bridge_blocks),
+    ]
     max_block_dimensions = max(map(len, block_parameter_indices))
     padded_parameter_indices: list[list[int]] = []
-    for gibbs_sweep in range(NUM_GIBBS_SWEEPS):
-        for block_index, ((indices, requires_rebuild), kernel_mode) in enumerate(
+    for gibbs_sweep in range(num_gibbs_sweeps):
+        for block_index, (
+            (indices, requires_rebuild),
+            kernel_mode,
+            n_block_slots,
+        ) in enumerate(
             zip(
                 rebuild_by_block.items(),
                 block_kernel_modes,
+                primary_step_counts,
                 strict=True,
             )
         ):
@@ -2172,7 +2379,6 @@ def _write_slice_data(path: Path, jim: Any, n_devices: int) -> dict[str, Any]:
             parameter_names = ",".join(
                 jim.sampling_parameter_names[index] for index in indices
             )
-            n_block_slots = NUM_INNER_STEPS_PER_DIM * len(indices)
             for slot_in_block in range(n_block_slots):
                 slice_block_indices.append(block_index)
                 slice_requires_rebuild.append(requires_rebuild)
@@ -2182,6 +2388,24 @@ def _write_slice_data(path: Path, jim: Any, n_devices: int) -> dict[str, Any]:
                 padded_parameter_indices.append(
                     [*indices, *([-1] * (max_block_dimensions - len(indices)))]
                 )
+                slice_is_bridge.append(False)
+                slice_width.append(1.0)
+        for bridge_index, (indices, requires_rebuild) in enumerate(
+            resolved_bridge_blocks
+        ):
+            parameter_names = ",".join(
+                jim.sampling_parameter_names[index] for index in indices
+            )
+            slice_block_indices.append(len(rebuild_by_block) + bridge_index)
+            slice_requires_rebuild.append(requires_rebuild)
+            slice_slot_in_block.append(0)
+            slice_gibbs_sweep.append(gibbs_sweep)
+            slice_block_parameter_names.append(parameter_names)
+            padded_parameter_indices.append(
+                [*indices, *([-1] * (max_block_dimensions - len(indices)))]
+            )
+            slice_is_bridge.append(True)
+            slice_width.append(1.0)
 
     n_slices = len(slice_block_indices)
     num_expansions = _normalise_per_slice_array(update_info.num_expansions, n_slices)
@@ -2206,9 +2430,12 @@ def _write_slice_data(path: Path, jim: Any, n_devices: int) -> dict[str, Any]:
         "n_devices": np.asarray(n_devices),
         "lanes_per_device": np.asarray(N_DELETE // n_devices),
     }
+    if resolved_bridge_blocks:
+        arrays["slice_is_bridge"] = np.asarray(slice_is_bridge)
+        arrays["slice_width"] = np.asarray(slice_width)
     _atomic_save_npz(path, arrays)
     resolved = path.expanduser().resolve()
-    return {
+    report = {
         "path": str(resolved),
         "sha256": _sha256(resolved),
         "bytes": resolved.stat().st_size,
@@ -2221,6 +2448,9 @@ def _write_slice_data(path: Path, jim: Any, n_devices: int) -> dict[str, Any]:
             "num_shrink": int(num_shrink.sum()),
         },
     }
+    if resolved_bridge_blocks:
+        report["n_bridge_slices"] = int(sum(slice_is_bridge))
+    return report
 
 
 def _write_posterior_samples(
@@ -2268,6 +2498,159 @@ def _write_posterior_samples(
     }
 
 
+def _extract_netsky_outputs(
+    jim: Any,
+    *,
+    batch_size: int | None = 1,
+) -> dict[str, Any]:
+    """Return separated physical and folded-target products for NETSKY."""
+
+    unfolded = extract_unfolded_weighted_posterior(
+        jim,
+        n_live=N_LIVE,
+        batch_size=batch_size,
+    )
+    log_weights = np.asarray(unfolded.log_weights, dtype=np.float64)
+    weights = np.exp(log_weights)
+    posterior = {
+        **{name: np.asarray(values) for name, values in unfolded.samples.items()},
+        "log_likelihood": np.asarray(unfolded.true_log_likelihood),
+        "log_weights": log_weights,
+    }
+    folded_nested_diagnostics = {
+        "log_likelihood": np.asarray(unfolded.folded_log_likelihood),
+        "log_likelihood_birth": np.asarray(unfolded.folded_log_likelihood_birth),
+    }
+    return {
+        "posterior": posterior,
+        "folded_nested_diagnostics": folded_nested_diagnostics,
+        "insertion_diagnostic": dict(unfolded.insertion_diagnostic),
+        "telemetry": dict(unfolded.telemetry),
+        "posterior_weight_effective_size": float(1.0 / np.sum(weights**2)),
+        "posterior_weighting": UNFOLDED_POSTERIOR_WEIGHTING,
+        "posterior_weight_effective_size_semantics": (
+            POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS
+        ),
+        "folded_target_semantics": FOLDED_TARGET_SEMANTICS,
+        "fold_model_limitation": NETSKY_FOLD_MODEL_LIMITATION,
+    }
+
+
+def _write_folded_nested_diagnostics(
+    path: Path,
+    diagnostics: Mapping[str, np.ndarray],
+) -> dict[str, Any]:
+    """Persist paired folded-target death and birth likelihoods."""
+
+    required_fields = ("log_likelihood", "log_likelihood_birth")
+    if set(diagnostics) != set(required_fields):
+        raise RuntimeError(
+            "folded nested diagnostics require exactly death and birth likelihoods"
+        )
+    artifact = _write_posterior_samples(
+        path,
+        {name: np.asarray(diagnostics[name]) for name in required_fields},
+        weighting="not applicable: folded nested-sampling contours",
+    )
+    artifact["space"] = "folded sampling-space target"
+    artifact["semantics"] = FOLDED_TARGET_SEMANTICS
+    return artifact
+
+
+def _write_netsky_artifacts(
+    outputs: Mapping[str, Any],
+    *,
+    posterior_output: Path | None,
+    folded_nested_output: Path | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Persist the physical weighted posterior and folded contour diagnostic."""
+
+    posterior_artifact = (
+        _write_posterior_samples(
+            posterior_output,
+            dict(outputs["posterior"]),
+            weighting=UNFOLDED_POSTERIOR_WEIGHTING,
+        )
+        if posterior_output is not None
+        else None
+    )
+    if posterior_artifact is not None:
+        posterior_artifact.update(
+            {
+                "schema_version": 2,
+                "weight_effective_size_semantics": (
+                    POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS
+                ),
+            }
+        )
+    folded_nested_diagnostics = (
+        _write_folded_nested_diagnostics(
+            folded_nested_output,
+            outputs["folded_nested_diagnostics"],
+        )
+        if folded_nested_output is not None
+        else None
+    )
+    return posterior_artifact, folded_nested_diagnostics
+
+
+def _netsky_result_fields(
+    outputs: Mapping[str, Any],
+    *,
+    sampler_config: Any,
+    folded_nested_diagnostics: Mapping[str, Any] | None,
+    fold_unfold_batch_size: int,
+    sampler_folded_target_callbacks: int | None,
+) -> dict[str, Any]:
+    """Build the NETSKY-only result schema and projection accounting."""
+
+    fold_config = getattr(sampler_config, "fold_symmetry", None)
+    if fold_config is None or not hasattr(fold_config, "model_dump"):
+        raise RuntimeError("completed NETSKY fold configuration is unavailable")
+    telemetry = dict(outputs["telemetry"])
+    group_order = int(telemetry["group_order"])
+    if group_order != 8:
+        raise RuntimeError("NETSKY projection accounting requires group order 8")
+    retained_folded_points = int(telemetry["folded_points"])
+    if sampler_folded_target_callbacks is None:
+        raise RuntimeError("NETSKY sampler callback count is unavailable")
+    sampler_folded_target_callbacks = int(sampler_folded_target_callbacks)
+    if retained_folded_points < 0 or sampler_folded_target_callbacks < 0:
+        raise RuntimeError("NETSKY projection counts must be nonnegative")
+    images_per_callback = group_order
+    sampler_projections = images_per_callback * sampler_folded_target_callbacks
+    unfold_projections = images_per_callback * retained_folded_points
+    return {
+        "folded_nested_diagnostics": folded_nested_diagnostics,
+        "insertion_index_diagnostic": dict(outputs["insertion_diagnostic"]),
+        "posterior_weight_effective_size": float(
+            outputs["posterior_weight_effective_size"]
+        ),
+        "posterior_weight_effective_size_semantics": outputs[
+            "posterior_weight_effective_size_semantics"
+        ],
+        "quotient_fold": {
+            "completed_config": fold_config.model_dump(),
+            "model_limitation": outputs["fold_model_limitation"],
+            "batch_size": fold_unfold_batch_size,
+            **telemetry,
+            "projection_accounting": {
+                "images_per_folded_target_callback": images_per_callback,
+                "sampler_folded_target_callbacks": (sampler_folded_target_callbacks),
+                "sampler_true_image_projections": sampler_projections,
+                "retained_folded_points_unfolded": retained_folded_points,
+                "unfold_true_image_projections": unfold_projections,
+                "total_true_image_projections": (
+                    sampler_projections + unfold_projections
+                ),
+                "sampler_callback_counter": (
+                    "results.n_likelihood_evaluations_physical"
+                ),
+            },
+        },
+    }
+
+
 def _run(args: argparse.Namespace) -> dict[str, Any]:
     total_started = time.perf_counter()
 
@@ -2292,7 +2675,11 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     from jimgw.core.single_event.data import Data, PowerSpectrum
     from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
     from jimgw.core.single_event.likelihood import TransientLikelihoodFD
-    from jimgw.samplers.config import BlackJAXSwiGConfig, DEJumpBlockConfig
+    from jimgw.samplers.config import (
+        BlackJAXSwiGConfig,
+        DEJumpBlockConfig,
+        FoldSymmetryConfig,
+    )
 
     ablation: dict[str, str] | None = None
     if args.ablation_variant is not None:
@@ -2360,12 +2747,16 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             parameters=list(complementary_de_block["parameters"]),
             attempts=complementary_de_block["attempts"],
         )
+    sampler_scheme_options = _sampler_scheme_options(
+        args.blocking_scheme,
+        components,
+        fold_config_type=FoldSymmetryConfig,
+    )
     sampler_config = BlackJAXSwiGConfig(
         blocks=[list(block) for block in workload_spec["blocks"]],
         n_live=N_LIVE,
         n_delete_frac=N_DELETE_FRAC,
         num_inner_steps_per_dim=NUM_INNER_STEPS_PER_DIM,
-        num_gibbs_sweeps=NUM_GIBBS_SWEEPS,
         termination_dlogz=TERMINATION_DLOGZ,
         n_devices=args.n_devices,
         scheduler=(
@@ -2392,6 +2783,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         width_adaptation_rate=args.width_adaptation_rate,
         width_target_expansions=args.width_target_expansions,
         width_target_shrinks=args.width_target_shrinks,
+        **sampler_scheme_options,
         **complementary_de_config,
     )
     sampler_seed = args.seed if args.sampler_seed is None else args.sampler_seed
@@ -2442,13 +2834,28 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
 
     extraction_started = time.perf_counter()
     diagnostics = jim.get_diagnostics()
-    samples = {} if args.timing_only else jim.get_samples()
+    netsky_outputs: dict[str, Any] | None = None
+    fold_unfold_postprocessing_seconds: float | None = None
+    if args.timing_only:
+        samples = {}
+    elif args.blocking_scheme == NETSKY_SCHEME:
+        fold_unfold_started = time.perf_counter()
+        netsky_outputs = _extract_netsky_outputs(
+            jim,
+            batch_size=args.fold_unfold_batch_size,
+        )
+        fold_unfold_postprocessing_seconds = time.perf_counter() - fold_unfold_started
+        samples = netsky_outputs["posterior"]
+    else:
+        samples = jim.get_samples()
     posterior_count = int(next(iter(samples.values())).shape[0]) if samples else None
     nested_samples = getattr(jim.sampler, "_nested_samples", None)
     try:
         posterior_ess = (
             _safe_float(nested_samples.neff())
-            if nested_samples is not None and not args.timing_only
+            if nested_samples is not None
+            and not args.timing_only
+            and args.blocking_scheme != NETSKY_SCHEME
             else None
         )
     except (AttributeError, TypeError, ValueError):
@@ -2458,20 +2865,30 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         if args.slice_data_output is not None
         else None
     )
-    posterior_artifact = (
-        _write_posterior_samples(args.samples_output, samples)
-        if args.samples_output is not None
-        else None
-    )
-    nested_artifact = (
-        _write_posterior_samples(
-            args.nested_output,
-            jim.get_weighted_samples(),
-            weighting="normalized nested-sampling log weights",
+    folded_nested_diagnostics: dict[str, Any] | None = None
+    if netsky_outputs is not None:
+        posterior_output = args.samples_output or args.nested_output
+        posterior_artifact, folded_nested_diagnostics = _write_netsky_artifacts(
+            netsky_outputs,
+            posterior_output=posterior_output,
+            folded_nested_output=args.folded_nested_output,
         )
-        if args.nested_output is not None
-        else None
-    )
+        nested_artifact = None
+    else:
+        posterior_artifact = (
+            _write_posterior_samples(args.samples_output, samples)
+            if args.samples_output is not None
+            else None
+        )
+        nested_artifact = (
+            _write_posterior_samples(
+                args.nested_output,
+                jim.get_weighted_samples(),
+                weighting="normalized nested-sampling log weights",
+            )
+            if args.nested_output is not None
+            else None
+        )
     result_extraction_seconds = time.perf_counter() - extraction_started
     nested_state_sha256 = _pytree_sha256(jax, jim.sampler._final_state)
 
@@ -2527,6 +2944,32 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "sampler_reported": _safe_float(diagnostics.get("sampling_time")),
         "outer_step": step_timing,
     }
+    if fold_unfold_postprocessing_seconds is not None:
+        timing["fold_unfold_postprocessing"] = fold_unfold_postprocessing_seconds
+    legacy_result_fields = (
+        {
+            "nested_artifact": nested_artifact,
+            "posterior_effective_sample_size": posterior_ess,
+            "posterior_ess_source": (
+                "anesthetic.NestedSamples.neff" if posterior_ess is not None else None
+            ),
+        }
+        if args.blocking_scheme != NETSKY_SCHEME
+        else {}
+    )
+    netsky_result_fields = (
+        _netsky_result_fields(
+            netsky_outputs,
+            sampler_config=sampler_config,
+            folded_nested_diagnostics=folded_nested_diagnostics,
+            fold_unfold_batch_size=args.fold_unfold_batch_size,
+            sampler_folded_target_callbacks=_safe_int(
+                diagnostics.get("n_likelihood_evaluations_physical")
+            ),
+        )
+        if netsky_outputs is not None
+        else {}
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "benchmark": BENCHMARK_NAME,
@@ -2580,6 +3023,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 width_target_expansions=args.width_target_expansions,
                 width_target_shrinks=args.width_target_shrinks,
                 sampler_seed=args.sampler_seed,
+                fold_symmetry=components["fold_symmetry"],
             ),
             "initial_positions_sha256": initial_positions_sha256,
         },
@@ -2738,11 +3182,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             "log_Z_error": _safe_float(diagnostics.get("log_Z_error")),
             "posterior_samples": posterior_count,
             "posterior_artifact": posterior_artifact,
-            "nested_artifact": nested_artifact,
-            "posterior_effective_sample_size": posterior_ess,
-            "posterior_ess_source": (
-                "anesthetic.NestedSamples.neff" if posterior_ess is not None else None
-            ),
+            **legacy_result_fields,
+            **netsky_result_fields,
             "nested_state_sha256": nested_state_sha256,
             "per_slice_update_info": slice_data,
             "early_stopped_for_cache_probe": args.max_outer_steps is not None,
