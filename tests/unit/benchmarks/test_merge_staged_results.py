@@ -94,6 +94,21 @@ def _mark_blocking_remediation(campaign: Path) -> None:
     common.atomic_write_json(manifest_path, manifest)
 
 
+def _mark_quotient_fold(campaign: Path) -> None:
+    manifest_path = campaign / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["config"]["fold_symmetry"] = {
+        "cos_iota": "cos_iota",
+        "azimuth": "azimuth",
+        "psi": "psi",
+        "azimuth_reflection_center": 0.25,
+    }
+    manifest["blocking_remediation"] = {"scheme": "netsky"}
+    manifest.pop("config_sha256")
+    manifest["config_sha256"] = common.canonical_sha256(manifest)
+    common.atomic_write_json(manifest_path, manifest)
+
+
 def test_candidate_implementation_pin_is_enforced() -> None:
     revision = "a" * 40
     tree_sha256 = "b" * 64
@@ -221,6 +236,61 @@ def _write_valid_result(
             )
         }
     common.atomic_write_json(directory / "summary.json", summary)
+    return directory
+
+
+def _write_valid_folded_result(campaign: Path, injection_id: int) -> Path:
+    directory = _write_valid_result(campaign, injection_id)
+    posterior_path = directory / "posterior.npz"
+    with np.load(posterior_path, allow_pickle=False) as posterior:
+        arrays = {name: np.asarray(posterior[name]) for name in posterior.files}
+    arrays["log_likelihood"] = np.asarray([10.0, 11.0, 12.0, 13.0])
+    common.atomic_savez_compressed(posterior_path, arrays)
+
+    folded_arrays = {
+        "log_likelihood": np.asarray([-4.0, -3.0, -2.0, -1.0]),
+        "log_likelihood_birth": np.asarray([-np.inf, -4.0, -3.0, -2.0]),
+    }
+    folded_path = directory / "folded_nested_diagnostics.npz"
+    common.atomic_savez_compressed(folded_path, folded_arrays)
+
+    summary_path = directory / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["posterior"].update(
+        {
+            "sha256": common.file_sha256(posterior_path),
+            "bytes": posterior_path.stat().st_size,
+            "fields": list(arrays),
+            "weighting": merge_module._UNFOLDED_POSTERIOR_WEIGHTING,
+            "schema_version": 2,
+            "weight_effective_size_semantics": (
+                merge_module._POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS
+            ),
+        }
+    )
+    summary["folded_nested_diagnostics"] = {
+        "path": "folded_nested_diagnostics.npz",
+        "sha256": common.file_sha256(folded_path),
+        "bytes": folded_path.stat().st_size,
+        "fields": list(folded_arrays),
+        "semantics": merge_module._FOLDED_TARGET_SEMANTICS,
+    }
+    summary["rank_method"] = {
+        "comparison": "sample < truth",
+        "resampled": False,
+        "weighting": merge_module._UNFOLDED_RANK_WEIGHTING,
+    }
+    summary["posterior_weight_effective_size"] = summary.pop(
+        "posterior_effective_sample_size"
+    )
+    summary["diagnostics"] = {
+        "insertion_index": insertion_index_diagnostic(
+            folded_arrays["log_likelihood"],
+            folded_arrays["log_likelihood_birth"],
+            n_live=int(common.load_manifest(campaign)["config"]["n_live"]),
+        )
+    }
+    common.atomic_write_json(summary_path, summary)
     return directory
 
 
@@ -406,6 +476,127 @@ def test_merge_accepts_and_preserves_optional_birth_likelihoods(
     assert "log_likelihood_birth" in summary["posterior"]["fields"]
     with np.load(result / "posterior.npz", allow_pickle=False) as posterior:
         np.testing.assert_array_equal(posterior["log_likelihood_birth"], expected_birth)
+
+
+def test_quotient_fold_result_validates_separate_nested_diagnostics(
+    tmp_path: Path,
+) -> None:
+    campaign = _minimal_campaign(tmp_path / "campaign", n_injections=1)
+    _mark_quotient_fold(campaign)
+    result = _write_valid_folded_result(campaign, 0)
+    manifest = common.load_manifest(campaign)
+    catalogue = common.read_catalogue(campaign / "catalogue.csv")
+
+    validated = merge_module._validate_result(result, 0, manifest, catalogue)
+
+    assert validated.posterior_samples == 4
+    with np.load(result / "posterior.npz", allow_pickle=False) as posterior:
+        assert "log_likelihood_birth" not in posterior.files
+        np.testing.assert_array_equal(
+            posterior["log_likelihood"], [10.0, 11.0, 12.0, 13.0]
+        )
+
+
+def test_quotient_fold_insertion_diagnostic_uses_folded_death_likelihoods(
+    tmp_path: Path,
+) -> None:
+    campaign = _minimal_campaign(tmp_path / "campaign", n_injections=1)
+    _mark_quotient_fold(campaign)
+    result = _write_valid_folded_result(campaign, 0)
+    summary_path = result / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["diagnostics"]["insertion_index"] = insertion_index_diagnostic(
+        np.asarray([10.0, 11.0, 12.0, 13.0]),
+        np.asarray([-np.inf, -4.0, -3.0, -2.0]),
+        n_live=int(common.load_manifest(campaign)["config"]["n_live"]),
+    )
+    common.atomic_write_json(summary_path, summary)
+
+    with pytest.raises(ValueError, match="insertion-index diagnostic mismatch"):
+        merge_module._validate_result(
+            result,
+            0,
+            common.load_manifest(campaign),
+            common.read_catalogue(campaign / "catalogue.csv"),
+        )
+
+
+def test_quotient_fold_forbids_birth_contours_in_physical_posterior(
+    tmp_path: Path,
+) -> None:
+    campaign = _minimal_campaign(tmp_path / "campaign", n_injections=1)
+    _mark_quotient_fold(campaign)
+    result = _write_valid_folded_result(campaign, 0)
+    posterior_path = result / "posterior.npz"
+    with np.load(posterior_path, allow_pickle=False) as posterior:
+        arrays = {name: np.asarray(posterior[name]) for name in posterior.files}
+    arrays["log_likelihood_birth"] = np.asarray([-np.inf, -4.0, -3.0, -2.0])
+    common.atomic_savez_compressed(posterior_path, arrays)
+    summary_path = result / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["posterior"].update(
+        {
+            "sha256": common.file_sha256(posterior_path),
+            "bytes": posterior_path.stat().st_size,
+            "fields": list(arrays),
+        }
+    )
+    common.atomic_write_json(summary_path, summary)
+
+    with pytest.raises(ValueError, match="posterior field inventory is invalid"):
+        merge_module._validate_result(
+            result,
+            0,
+            common.load_manifest(campaign),
+            common.read_catalogue(campaign / "catalogue.csv"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ("remove-metadata", "missing folded nested-diagnostic metadata"),
+        ("remove-artifact", "folded nested-diagnostic artifact is missing"),
+        ("tamper-artifact", "folded nested-diagnostic hash mismatch"),
+        ("bad-folded-semantics", "folded nested-diagnostic semantics are invalid"),
+        ("bad-posterior-weighting", "posterior semantics are invalid"),
+        ("old-ess-field", "posterior_weight_effective_size"),
+    ],
+)
+def test_quotient_fold_schema_is_fail_closed(
+    tmp_path: Path,
+    mutation: str,
+    match: str,
+) -> None:
+    campaign = _minimal_campaign(tmp_path / "campaign", n_injections=1)
+    _mark_quotient_fold(campaign)
+    result = _write_valid_folded_result(campaign, 0)
+    summary_path = result / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    if mutation == "remove-metadata":
+        summary.pop("folded_nested_diagnostics")
+    elif mutation == "remove-artifact":
+        (result / "folded_nested_diagnostics.npz").unlink()
+    elif mutation == "tamper-artifact":
+        with (result / "folded_nested_diagnostics.npz").open("ab") as stream:
+            stream.write(b"tampered")
+    elif mutation == "bad-folded-semantics":
+        summary["folded_nested_diagnostics"]["semantics"] = "true image likelihoods"
+    elif mutation == "bad-posterior-weighting":
+        summary["posterior"]["weighting"] = merge_module._POSTERIOR_WEIGHTING
+    else:
+        summary["posterior_effective_sample_size"] = summary.pop(
+            "posterior_weight_effective_size"
+        )
+    common.atomic_write_json(summary_path, summary)
+
+    with pytest.raises((TypeError, ValueError), match=match):
+        merge_module._validate_result(
+            result,
+            0,
+            common.load_manifest(campaign),
+            common.read_catalogue(campaign / "catalogue.csv"),
+        )
 
 
 @pytest.mark.parametrize(

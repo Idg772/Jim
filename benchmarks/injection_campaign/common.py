@@ -17,6 +17,24 @@ SCHEMA_VERSION = 2
 CAMPAIGN_NAME = "paper-sharded-swig-fsm-pp"
 PAPER_CATALOGUE_SIZE = 1000
 PAPER_PP_RECOVERIES = 100
+UNFOLDED_RANK_WEIGHTING = (
+    "deterministically unfolded nested-sampling quadrature weights"
+)
+UNFOLDED_POSTERIOR_WEIGHTING = "normalized unfolded posterior log weights"
+FOLDED_TARGET_SEMANTICS = "folded-target nested-sampling death and birth likelihoods"
+POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS = (
+    "quadrature-weight concentration diagnostic, not independent-draw ESS"
+)
+NETSKY_SCHEME = "netsky"
+
+NETSKY_BLOCKS = [
+    ["M_c", "q", "lambda_1", "lambda_2"],
+    ["s1_mag", "s1_theta", "s1_phi"],
+    ["s2_mag", "s2_theta", "s2_phi"],
+    ["cos_zenith"],
+    ["azimuth", "cos_iota", "psi", "log_d_hat"],
+]
+NETSKY_BRIDGE_BLOCKS = [["cos_zenith", "azimuth"]]
 
 PARAMETERS = (
     "M_c",

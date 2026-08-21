@@ -20,8 +20,12 @@ from typing import Any, BinaryIO
 import numpy as np
 
 from benchmarks.injection_campaign.common import (
+    FOLDED_TARGET_SEMANTICS,
     MARGINALIZED_PARAMETERS,
     PARAMETERS,
+    POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS,
+    UNFOLDED_POSTERIOR_WEIGHTING,
+    UNFOLDED_RANK_WEIGHTING,
     file_sha256,
     load_manifest,
     posterior_rank,
@@ -42,6 +46,15 @@ _RANK_METHOD = {
     "weighting": "original nested-sampling weights",
 }
 _POSTERIOR_WEIGHTING = "normalized nested-sampling log weights"
+_UNFOLDED_RANK_WEIGHTING = UNFOLDED_RANK_WEIGHTING
+_UNFOLDED_RANK_METHOD = {
+    "comparison": "sample < truth",
+    "resampled": False,
+    "weighting": _UNFOLDED_RANK_WEIGHTING,
+}
+_UNFOLDED_POSTERIOR_WEIGHTING = UNFOLDED_POSTERIOR_WEIGHTING
+_FOLDED_TARGET_SEMANTICS = FOLDED_TARGET_SEMANTICS
+_POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS = POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS
 _LOG_WEIGHT_NORMALIZATION_TOLERANCE = 1.0e-10
 _RANK_TOLERANCE = 1.0e-12
 _INSERTION_DIAGNOSTIC_TOLERANCE = 1.0e-12
@@ -421,16 +434,34 @@ def _validate_truth_and_seeds(
         raise ValueError(f"{result_label}: seeds do not match the catalogue")
 
 
+def _quotient_fold_enabled(
+    config: Mapping[str, Any],
+    *,
+    result_label: str,
+) -> bool:
+    fold = config.get("fold_symmetry")
+    if fold is None:
+        return False
+    if not isinstance(fold, Mapping):
+        raise TypeError(f"{result_label}: fold_symmetry config is invalid")
+    return True
+
+
 def _load_posterior_arrays(
     posterior_path: Path,
     posterior_metadata: Mapping[str, Any],
     sampled_parameters: Sequence[str],
     *,
+    quotient_fold: bool,
     result_label: str,
 ) -> dict[str, np.ndarray[Any, Any]]:
     fields = posterior_metadata.get("fields")
     required_fields = set(sampled_parameters) | {"log_likelihood", "log_weights"}
-    allowed_fields = (required_fields, required_fields | {"log_likelihood_birth"})
+    allowed_fields = (
+        (required_fields,)
+        if quotient_fold
+        else (required_fields, required_fields | {"log_likelihood_birth"})
+    )
     if (
         not isinstance(fields, list)
         or len(fields) != len(set(fields))
@@ -450,6 +481,89 @@ def _load_posterior_arrays(
         raise ValueError(
             f"{result_label}: unreadable posterior NPZ: {error}"
         ) from error
+    return arrays
+
+
+def _load_folded_nested_diagnostics(
+    directory: Path,
+    summary: Mapping[str, Any],
+    *,
+    result_label: str,
+) -> dict[str, np.ndarray[Any, Any]]:
+    metadata = summary.get("folded_nested_diagnostics")
+    if not isinstance(metadata, Mapping):
+        raise TypeError(f"{result_label}: missing folded nested-diagnostic metadata")
+    if metadata.get("path") != "folded_nested_diagnostics.npz":
+        raise ValueError(f"{result_label}: folded nested-diagnostic path is invalid")
+    if metadata.get("semantics") != _FOLDED_TARGET_SEMANTICS:
+        raise ValueError(
+            f"{result_label}: folded nested-diagnostic semantics are invalid"
+        )
+    fields = metadata.get("fields")
+    required_fields = {"log_likelihood", "log_likelihood_birth"}
+    if (
+        not isinstance(fields, list)
+        or len(fields) != len(set(fields))
+        or set(fields) != required_fields
+    ):
+        raise ValueError(
+            f"{result_label}: folded nested-diagnostic field inventory is invalid"
+        )
+
+    path = directory / "folded_nested_diagnostics.npz"
+    if not path.is_file():
+        raise ValueError(
+            f"{result_label}: folded nested-diagnostic artifact is missing"
+        )
+    expected_sha256 = metadata.get("sha256")
+    if not isinstance(expected_sha256, str) or file_sha256(path) != expected_sha256:
+        raise ValueError(f"{result_label}: folded nested-diagnostic hash mismatch")
+    expected_bytes = metadata.get("bytes")
+    if type(expected_bytes) is not int or expected_bytes != path.stat().st_size:
+        raise ValueError(
+            f"{result_label}: folded nested-diagnostic byte count mismatch"
+        )
+    try:
+        with np.load(path, allow_pickle=False) as payload:
+            if payload.files != fields:
+                raise ValueError(
+                    f"{result_label}: folded diagnostic NPZ fields do not match "
+                    "summary inventory"
+                )
+            arrays = {name: np.asarray(payload[name]) for name in fields}
+    except (OSError, EOFError, ValueError, zipfile.BadZipFile) as error:
+        if str(error).startswith(f"{result_label}:"):
+            raise
+        raise ValueError(
+            f"{result_label}: unreadable folded diagnostic NPZ: {error}"
+        ) from error
+
+    death = arrays["log_likelihood"]
+    birth = arrays["log_likelihood_birth"]
+    if death.ndim != 1 or birth.shape != death.shape or death.size < 1:
+        raise ValueError(f"{result_label}: folded likelihood arrays are not aligned")
+    for name, values in arrays.items():
+        if not np.issubdtype(values.dtype, np.number) or np.issubdtype(
+            values.dtype, np.complexfloating
+        ):
+            raise ValueError(f"{result_label}: folded {name} is not a real array")
+    if not np.all(np.isfinite(death)):
+        raise ValueError(
+            f"{result_label}: folded log_likelihood contains non-finite values"
+        )
+    if np.any(np.isnan(birth)) or np.any(np.isposinf(birth)):
+        raise ValueError(
+            f"{result_label}: folded log_likelihood_birth contains NaN or +inf"
+        )
+    replacement = np.isfinite(birth)
+    if not np.any(replacement):
+        raise ValueError(
+            f"{result_label}: folded log_likelihood_birth has no replacement points"
+        )
+    if np.any(death[replacement] <= birth[replacement]):
+        raise ValueError(
+            f"{result_label}: folded replacement likelihood does not exceed its birth"
+        )
     return arrays
 
 
@@ -529,11 +643,13 @@ def _validate_insertion_index_diagnostic(
 
 def _validate_arrays_and_ranks(
     arrays: Mapping[str, np.ndarray[Any, Any]],
+    insertion_arrays: Mapping[str, np.ndarray[Any, Any]],
     summary: Mapping[str, Any],
     truth: Mapping[str, Any],
     config: Mapping[str, Any],
     sampled_parameters: Sequence[str],
     *,
+    quotient_fold: bool,
     require_insertion_evidence: bool,
     result_label: str,
 ) -> tuple[int, float]:
@@ -573,7 +689,7 @@ def _validate_arrays_and_ranks(
                 f"{result_label}: replacement likelihood does not exceed its birth"
             )
     _validate_insertion_index_diagnostic(
-        arrays,
+        insertion_arrays,
         summary,
         config,
         require_evidence=require_insertion_evidence,
@@ -602,16 +718,27 @@ def _validate_arrays_and_ranks(
 
     weights = np.exp(log_weights)
     expected_ess = 1.0 / float(np.sum(weights * weights))
+    ess_field = (
+        "posterior_weight_effective_size"
+        if quotient_fold
+        else "posterior_effective_sample_size"
+    )
+    if quotient_fold and "posterior_effective_sample_size" in summary:
+        raise ValueError(
+            f"{result_label}: unfolded posterior must use {ess_field}, not "
+            "posterior_effective_sample_size"
+        )
     stored_ess = _finite_float(
-        summary.get("posterior_effective_sample_size"),
-        field="posterior_effective_sample_size",
+        summary.get(ess_field),
+        field=ess_field,
         result_label=result_label,
         positive=True,
     )
     if not math.isclose(stored_ess, expected_ess, rel_tol=1.0e-12, abs_tol=1.0e-10):
-        raise ValueError(f"{result_label}: posterior effective sample size mismatch")
+        raise ValueError(f"{result_label}: {ess_field} mismatch")
 
-    if summary.get("rank_method") != _RANK_METHOD:
+    expected_rank_method = _UNFOLDED_RANK_METHOD if quotient_fold else _RANK_METHOD
+    if summary.get("rank_method") != expected_rank_method:
         raise ValueError(f"{result_label}: posterior rank method is invalid")
     ranks = summary.get("ranks")
     if not isinstance(ranks, Mapping) or set(ranks) != set(sampled_parameters):
@@ -814,7 +941,12 @@ def _validate_result(
         entry.name
         for entry in entries
         if (
-            entry.name not in {"summary.json", "posterior.npz"}
+            entry.name
+            not in {
+                "summary.json",
+                "posterior.npz",
+                "folded_nested_diagnostics.npz",
+            }
             and _ATTEMPT_LOG_RE.fullmatch(entry.name) is None
         )
     )
@@ -835,6 +967,14 @@ def _validate_result(
         "campaign"
     ):
         raise ValueError(f"{result_label}: result campaign name is invalid")
+    quotient_fold = _quotient_fold_enabled(config, result_label=result_label)
+    has_folded_artifact = (directory / "folded_nested_diagnostics.npz").is_file()
+    if not quotient_fold and (
+        "folded_nested_diagnostics" in summary or has_folded_artifact
+    ):
+        raise ValueError(
+            f"{result_label}: non-folded result declares folded nested diagnostics"
+        )
     if (
         _exact_int(
             summary.get("injection_id"),
@@ -858,9 +998,18 @@ def _validate_result(
         raise TypeError(f"{result_label}: missing posterior metadata")
     if posterior_metadata.get("path") != "posterior.npz":
         raise ValueError(f"{result_label}: posterior path must be posterior.npz")
+    expected_weighting = (
+        _UNFOLDED_POSTERIOR_WEIGHTING if quotient_fold else _POSTERIOR_WEIGHTING
+    )
+    invalid_unfolded_metadata = quotient_fold and (
+        posterior_metadata.get("schema_version") != 2
+        or posterior_metadata.get("weight_effective_size_semantics")
+        != _POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS
+    )
     if (
         posterior_metadata.get("space") != "prior"
-        or posterior_metadata.get("weighting") != _POSTERIOR_WEIGHTING
+        or posterior_metadata.get("weighting") != expected_weighting
+        or invalid_unfolded_metadata
     ):
         raise ValueError(f"{result_label}: posterior semantics are invalid")
     expected_sha256 = posterior_metadata.get("sha256")
@@ -878,18 +1027,33 @@ def _validate_result(
         posterior_path,
         posterior_metadata,
         sampled_parameters,
+        quotient_fold=quotient_fold,
         result_label=result_label,
     )
-    require_insertion_evidence = _requires_insertion_evidence(
-        manifest,
-        result_label=result_label,
+    insertion_arrays = (
+        _load_folded_nested_diagnostics(
+            directory,
+            summary,
+            result_label=result_label,
+        )
+        if quotient_fold
+        else arrays
+    )
+    require_insertion_evidence = (
+        _requires_insertion_evidence(
+            manifest,
+            result_label=result_label,
+        )
+        or quotient_fold
     )
     posterior_samples, _ = _validate_arrays_and_ranks(
         arrays,
+        insertion_arrays,
         summary,
         truth,
         config,
         sampled_parameters,
+        quotient_fold=quotient_fold,
         require_insertion_evidence=require_insertion_evidence,
         result_label=result_label,
     )
