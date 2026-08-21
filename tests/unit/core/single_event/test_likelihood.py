@@ -322,6 +322,70 @@ class TestTransientLikelihoodFD:
             result, float(reference.evaluate(params)), rtol=1e-10
         )
 
+    def test_time_marg_weighted_data_matches_reference_division_path(
+        self, detectors_and_waveform
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            time_marginalization={},
+        )
+        assert likelihood._identical_masks
+
+        # Precomputed per-detector weight lists exist, one entry per detector.
+        assert len(likelihood._weighted_conj_data) == len(likelihood.detectors)
+        assert len(likelihood._inverse_sliced_psd) == len(likelihood.detectors)
+
+        rng = np.random.default_rng(20260819)
+        base_params = example_params()
+        for _ in range(3):
+            params = dict(base_params)
+            params["t_c"] = float(rng.uniform(-0.05, 0.05))
+            params["phase_c"] = float(rng.uniform(0.0, 2.0 * np.pi))
+            params["d_L"] = float(rng.uniform(200.0, 600.0))
+
+            result = float(likelihood.evaluate(params))
+
+            # Reference: the pre-change explicit-division accumulation,
+            # `4 * h * conj(d) / S * df` and `|h|^2 / S`, computed inline
+            # here rather than via the (now precomputed-weight) fast path.
+            # Uses the same prepared params (trigger_time/gmst injected,
+            # t_c zeroed for marginalization) that `evaluate` uses internally.
+            prepared_params = likelihood._prepare_parameters(params)
+            waveform_sky = likelihood.waveform(
+                likelihood.frequencies, prepared_params
+            )
+            n_freq = len(likelihood.frequencies)
+            complex_d_inner_h = jnp.zeros(n_freq, dtype=jnp.complex128)
+            hh_over_psd = jnp.zeros(n_freq)
+            for i, ifo in enumerate(likelihood.detectors):
+                h_dec = ifo.fd_response(
+                    ifo.sliced_frequencies,
+                    likelihood._sliced_waveform_sky(waveform_sky, i),
+                    prepared_params,
+                    optimize=likelihood.likelihood_optimization_axes[
+                        "detector_phasor"
+                    ],
+                )
+                complex_d_inner_h = complex_d_inner_h + (
+                    4 * h_dec * jnp.conj(ifo.sliced_fd_data) / ifo.sliced_psd
+                    * likelihood.df
+                )
+                hh_over_psd = hh_over_psd + (
+                    (h_dec.real**2 + h_dec.imag**2) / ifo.sliced_psd
+                )
+            reference_logl = -(2.0 * likelihood.df) * jnp.sum(hh_over_psd)
+            reference_logl = reference_logl + likelihood._reduce_time(
+                complex_d_inner_h
+            )
+            reference = float(reference_logl)
+
+            assert abs(result - reference) < 1e-9
+
     def test_time_marg_fast_path_emits_optimization_barrier(
         self, detectors_and_waveform
     ):

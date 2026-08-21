@@ -515,6 +515,34 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         if distance_marginalization is not None:
             self._init_distance_marginalization(distance_marginalization)
 
+        self._install_time_marg_data_weights()
+
+    def _install_time_marg_data_weights(self) -> None:
+        """Precompute data weights for the time-marg identical-masks fast path.
+
+        Hoists the per-tick `4 * conj(d) / S * df` and `1 / S` divides
+        (computed once here, after every detector's frequency bounds are
+        set) so the elementwise accumulation in `_likelihood` becomes
+        multiply-only. Only the identical-masks time-marg fast path
+        consumes these.
+
+        Called from `__init__`. Third-party construction routines that
+        bypass `__init__` (e.g. via `__new__`) must call this explicitly
+        once `self.detectors`, `self.df`, `self.time_marginalization`, and
+        `self._identical_masks` are set, or the `_likelihood` fast path
+        falls back to its pre-precompute numerics (see `_likelihood`).
+        """
+        self._weighted_conj_data: list[Complex[Array, " n_freq"]] = []
+        self._inverse_sliced_psd: list[Float[Array, " n_freq"]] = []
+        if self.time_marginalization and self._identical_masks:
+            self._weighted_conj_data = [
+                4.0 * self.df * jnp.conj(ifo.sliced_fd_data) / ifo.sliced_psd
+                for ifo in self.detectors
+            ]
+            self._inverse_sliced_psd = [
+                1.0 / ifo.sliced_psd for ifo in self.detectors
+            ]
+
     # --- direct evaluation ---
 
     def _evaluate(self, params: dict[str, Float]) -> FloatScalar:
@@ -590,6 +618,12 @@ class TransientLikelihoodFD(SingleEventLikelihood):
                 n_freq = len(self.frequencies)
                 complex_d_inner_h = jnp.zeros(n_freq, dtype=jnp.complex128)
                 hh_over_psd = jnp.zeros(n_freq)
+                # Third-party constructors that bypass `__init__` (e.g. via
+                # `__new__`) may not have run `_install_time_marg_data_weights`;
+                # fall back to the original explicit-division numerics rather
+                # than raising on the missing precomputed weights.
+                weighted_conj_data = getattr(self, "_weighted_conj_data", None)
+                use_precomputed_weights = bool(weighted_conj_data)
                 for i, ifo in enumerate(self.detectors):
                     h_dec = ifo.fd_response(
                         ifo.sliced_frequencies,
@@ -597,16 +631,25 @@ class TransientLikelihoodFD(SingleEventLikelihood):
                         params,
                         optimize=self.likelihood_optimization_axes["detector_phasor"],
                     )
-                    complex_d_inner_h = complex_d_inner_h + (
-                        4
-                        * h_dec
-                        * jnp.conj(ifo.sliced_fd_data)
-                        / ifo.sliced_psd
-                        * self.df
-                    )
-                    hh_over_psd = hh_over_psd + (
-                        (h_dec.real**2 + h_dec.imag**2) / ifo.sliced_psd
-                    )
+                    if use_precomputed_weights:
+                        complex_d_inner_h = complex_d_inner_h + (
+                            h_dec * weighted_conj_data[i]
+                        )
+                        hh_over_psd = hh_over_psd + (
+                            (h_dec.real**2 + h_dec.imag**2)
+                            * self._inverse_sliced_psd[i]
+                        )
+                    else:
+                        complex_d_inner_h = complex_d_inner_h + (
+                            4
+                            * h_dec
+                            * jnp.conj(ifo.sliced_fd_data)
+                            / ifo.sliced_psd
+                            * self.df
+                        )
+                        hh_over_psd = hh_over_psd + (
+                            (h_dec.real**2 + h_dec.imag**2) / ifo.sliced_psd
+                        )
                 complex_d_inner_h, hh_over_psd = jax.lax.optimization_barrier(
                     (complex_d_inner_h, hh_over_psd)
                 )
