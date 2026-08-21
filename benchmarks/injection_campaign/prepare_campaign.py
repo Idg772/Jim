@@ -49,6 +49,23 @@ _PAPER_FIELD_BOUNDS = {
     "d_L": (30.0, 150.0),
 }
 
+# These fields are intentionally absent from ``DEFAULT_CONFIG`` so historical
+# campaign manifests retain their byte-for-byte scientific configuration.  New
+# sampler-calibration campaigns may opt into them explicitly via
+# ``config_overrides``.
+_OPTIONAL_SAMPLER_CONFIG_FIELDS = frozenset(
+    {
+        "adaptive_slice_widths",
+        "blocking_scheme",
+        "bracket_mode",
+        "direction_mode",
+        "num_de_jumps",
+        "width_adaptation_rate",
+        "width_target_expansions",
+        "width_target_shrinks",
+    }
+)
+
 
 def _exact_nonnegative_int(value: Any, *, field: str) -> int:
     if isinstance(value, (bool, np.bool_)):
@@ -237,7 +254,11 @@ def prepare_campaign(
     )
     config = copy.deepcopy(DEFAULT_CONFIG)
     if config_overrides is not None:
-        unknown = sorted(set(config_overrides) - set(config))
+        unknown = sorted(
+            set(config_overrides)
+            - set(config)
+            - _OPTIONAL_SAMPLER_CONFIG_FIELDS
+        )
         if unknown:
             raise ValueError(
                 "config overrides contain unknown fields: " + ", ".join(unknown)
@@ -366,6 +387,7 @@ def prepare_campaign(
                 "inputs/psd/*.npz",
                 "results/*/summary.json",
                 "results/*/posterior.npz",
+                "results/*/folded_nested_diagnostics.npz",
                 "failed attempt logs",
                 "pp/*.csv",
                 "pp/*.json",

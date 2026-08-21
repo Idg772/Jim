@@ -986,6 +986,77 @@ def test_sampler_config_supports_current_and_pinned_baseline_scheduler_apis() ->
         assert built.values["n_live"] == common.DEFAULT_CONFIG["n_live"]
 
 
+def test_sampler_config_forwards_opt_in_adaptive_no_de_fields() -> None:
+    optional_fields = {
+        "adaptive_slice_widths": object(),
+        "bracket_mode": object(),
+        "direction_mode": object(),
+        "num_de_jumps": object(),
+        "scheduler": object(),
+        "width_adaptation_rate": object(),
+        "width_target_expansions": object(),
+        "width_target_shrinks": object(),
+    }
+
+    class CurrentConfig:
+        model_fields: ClassVar[dict[str, object]] = optional_fields
+
+        def __init__(self, **values: object) -> None:
+            self.values = values
+
+    config = {
+        **common.DEFAULT_CONFIG,
+        "adaptive_slice_widths": True,
+        "bracket_mode": "shrink-only",
+        "direction_mode": "covariance",
+        "num_de_jumps": 0,
+        "num_gibbs_sweeps": 3,
+        "width_adaptation_rate": 0.25,
+        "width_target_expansions": 1.0,
+        "width_target_shrinks": 3.0,
+    }
+
+    built = _build_sampler_config(config, CurrentConfig)
+
+    assert built.values["num_gibbs_sweeps"] == 3
+    for field in optional_fields:
+        if field != "scheduler":
+            assert built.values[field] == config[field]
+
+
+def test_prepare_campaign_accepts_opt_in_sampler_config_fields(
+    tmp_path: Path,
+) -> None:
+    curves = tmp_path / "curves"
+    _write_noise_curves(curves)
+    manifest = prepare_campaign(
+        tmp_path / "adaptive-no-de",
+        n_injections=10,
+        catalogue_size=10,
+        seed=123,
+        noise_curves_dir=curves,
+        config_overrides={
+            "adaptive_slice_widths": True,
+            "blocking_scheme": "fast-ridge",
+            "bracket_mode": "shrink-only",
+            "direction_mode": "covariance",
+            "num_de_jumps": 0,
+            "num_gibbs_sweeps": 3,
+            "width_adaptation_rate": 0.25,
+            "width_target_expansions": 1.0,
+            "width_target_shrinks": 3.0,
+        },
+    )
+
+    config = manifest["config"]
+    assert config["blocking_scheme"] == "fast-ridge"
+    assert config["num_gibbs_sweeps"] == 3
+    assert config["adaptive_slice_widths"] is True
+    assert config["bracket_mode"] == "shrink-only"
+    assert config["direction_mode"] == "covariance"
+    assert config["num_de_jumps"] == 0
+
+
 def test_candidate_implementation_pin_is_checked_before_sampling(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
