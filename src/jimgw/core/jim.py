@@ -13,7 +13,9 @@ from jimgw.core.base import LikelihoodBase
 from jimgw.core.prior import Prior
 from jimgw.core.single_event.blocked_likelihood import (
     _build_rebuild_required_by_block,
+    _resolve_rebuild_required_by_parameter_groups,
     _validate_parameter_blocks,
+    _validate_parameter_groups,
 )
 from jimgw.core.single_event.likelihood import SingleEventLikelihood
 from jimgw.core.transforms import BijectiveTransform, NtoMTransform
@@ -241,6 +243,15 @@ class Jim:
                     sampler_config.blocks,
                     parameter_names=self.sampling_parameter_names,
                 )
+                _validate_parameter_groups(
+                    [block.parameters for block in sampler_config.de_jump_blocks],
+                    parameter_names=self.sampling_parameter_names,
+                )
+                if sampler_config.complementary_de_jump_block is not None:
+                    _validate_parameter_groups(
+                        [sampler_config.complementary_de_jump_block.parameters],
+                        parameter_names=self.sampling_parameter_names,
+                    )
 
             current_likelihood_names = self.prior_parameter_names
             for transform in likelihood_transforms:
@@ -407,6 +418,27 @@ class Jim:
                 sample_transforms=sample_transforms,
                 likelihood_transforms=likelihood_transforms,
             )
+            resolved_de_jump_blocks = _resolve_rebuild_required_by_parameter_groups(
+                likelihood,
+                [block.parameters for block in sampler_config.de_jump_blocks],
+                parameter_names=self.sampling_parameter_names,
+                sample_transforms=sample_transforms,
+                likelihood_transforms=likelihood_transforms,
+            )
+            complementary_de_blocks = (
+                [sampler_config.complementary_de_jump_block.parameters]
+                if sampler_config.complementary_de_jump_block is not None
+                else []
+            )
+            resolved_complementary_de_blocks = (
+                _resolve_rebuild_required_by_parameter_groups(
+                    likelihood,
+                    complementary_de_blocks,
+                    parameter_names=self.sampling_parameter_names,
+                    sample_transforms=sample_transforms,
+                    likelihood_transforms=likelihood_transforms,
+                )
+            )
 
             def build_cache(position):
                 return likelihood.generate_waveform(
@@ -423,6 +455,23 @@ class Jim:
                 "build_cache": build_cache,
                 "log_likelihood_from_cache_fn": log_likelihood_from_cache_fn,
             }
+            if resolved_de_jump_blocks:
+                self._sampler_backend_kwargs["resolved_de_jump_blocks"] = tuple(
+                    (indices, requires_rebuild, block.attempts)
+                    for (indices, requires_rebuild), block in zip(
+                        resolved_de_jump_blocks,
+                        sampler_config.de_jump_blocks,
+                        strict=True,
+                    )
+                )
+            if resolved_complementary_de_blocks:
+                assert sampler_config.complementary_de_jump_block is not None
+                indices, requires_rebuild = resolved_complementary_de_blocks[0]
+                self._sampler_backend_kwargs["resolved_complementary_de_jump_block"] = (
+                    indices,
+                    requires_rebuild,
+                    sampler_config.complementary_de_jump_block.attempts,
+                )
 
     def _verify_posterior(self) -> None:
         """Draw test points from the prior and verify the posterior is not mostly NaN.
@@ -652,9 +701,7 @@ class Jim:
         out = {k: np.array(named[k]) for k in self.prior_parameter_names}
         out["log_likelihood"] = np.asarray(result["log_likelihood"])
         if "log_likelihood_birth" in result:
-            out["log_likelihood_birth"] = np.asarray(
-                result["log_likelihood_birth"]
-            )
+            out["log_likelihood_birth"] = np.asarray(result["log_likelihood_birth"])
         out["log_weights"] = np.asarray(result["log_weights"])
         return out
 

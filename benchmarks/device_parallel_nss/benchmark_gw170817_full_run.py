@@ -32,6 +32,15 @@ from typing import Any
 import numpy as np
 from scipy.ndimage import median_filter
 
+# The Runpod harness executes this file directly. Make the repository's
+# namespace package importable in that mode as well as under pytest/module use.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from benchmarks.device_parallel_nss.sampler_ablation import (
+    VARIANT_NAMES as SAMPLER_ABLATION_VARIANTS,
+)
+
 SCHEMA_VERSION = 2
 BENCHMARK_NAME = "gw170817-full-swig-4gpu"
 DATA_FORMAT_VERSION = 6
@@ -106,7 +115,105 @@ PAPER_WORKLOAD = "paper-15d"
 WORKLOAD_CHOICES = (ALIGNED_WORKLOAD, PAPER_WORKLOAD)
 PAPER_BLOCKING_SCHEME = "paper"
 ALL_SLOW_BLOCKING_SCHEME = "all-slow"
-BLOCKING_SCHEME_CHOICES = (PAPER_BLOCKING_SCHEME, ALL_SLOW_BLOCKING_SCHEME)
+IOTA_DL_BLOCKING_SCHEME = "iota-dl"
+FAST_RIDGE_BLOCKING_SCHEME = "fast-ridge"
+FAST_RIDGE_INTRINSIC_BLOCKING_SCHEME = "fast-ridge-intrinsic"
+FAST_RIDGE_INTRINSIC_5STEP_BLOCKING_SCHEME = "fast-ridge-intrinsic-5step"
+FAST_RIDGE_INTRINSIC_5STEP_SCHEDULE = (5, 1, 1, 2, 1, 2)
+FAST_RIDGE_INTRINSIC_PERIODIC_MH_BLOCKING_SCHEME = "fast-ridge-intrinsic-periodic-mh"
+FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_BLOCKING_SCHEME = (
+    "fast-ridge-intrinsic-periodic-mh-cde4"
+)
+FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_BLOCKING_SCHEME = (
+    "fast-ridge-intrinsic-periodic-mh-cde8"
+)
+FAST_RIDGE_INTRINSIC_PERIODIC_MH_KERNEL_MODES = (
+    "slice",
+    "periodic-uniform-independence",
+    "periodic-uniform-independence",
+    "slice",
+    "periodic-uniform-independence",
+    "slice",
+)
+FAST_RIDGE_INTRINSIC_PERIODIC_MH_FIXED_WORK = {
+    "total_updates": 15,
+    "total_slice_updates": 12,
+    "waveform_rebuild_slice_updates": 8,
+    "cache_hit_slice_updates": 4,
+    "periodic_independence_attempts": 3,
+    "waveform_rebuild_periodic_independence_attempts": 2,
+    "cache_hit_periodic_independence_attempts": 1,
+    "cache_segments": 2,
+}
+FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_BLOCK = {
+    "parameters": (
+        "M_c",
+        "q",
+        "lambda_1",
+        "lambda_2",
+        "s1_mag",
+        "s1_theta",
+        "s2_mag",
+        "s2_theta",
+    ),
+    "attempts": 4,
+}
+FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_FIXED_WORK = {
+    **FAST_RIDGE_INTRINSIC_PERIODIC_MH_FIXED_WORK,
+    "total_updates": 19,
+    "complementary_de_attempts": 4,
+    "waveform_rebuild_complementary_de_attempts": 4,
+    "cache_hit_complementary_de_attempts": 0,
+    "complementary_de_gamma": 1.0,
+    "complementary_de_insert_after_block": 0,
+}
+FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_BLOCK = {
+    **FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_BLOCK,
+    "attempts": 8,
+}
+FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_FIXED_WORK = {
+    **FAST_RIDGE_INTRINSIC_PERIODIC_MH_FIXED_WORK,
+    "total_updates": 23,
+    "complementary_de_attempts": 8,
+    "waveform_rebuild_complementary_de_attempts": 8,
+    "cache_hit_complementary_de_attempts": 0,
+    "complementary_de_gamma": 1.0,
+    "complementary_de_insert_after_block": 0,
+}
+COMPLEMENTARY_DE_BLOCK_BY_SCHEME = {
+    FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_BLOCKING_SCHEME: (
+        FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_BLOCK
+    ),
+    FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_BLOCKING_SCHEME: (
+        FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_BLOCK
+    ),
+}
+COMPLEMENTARY_DE_FIXED_WORK_BY_SCHEME = {
+    FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_BLOCKING_SCHEME: (
+        FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_FIXED_WORK
+    ),
+    FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_BLOCKING_SCHEME: (
+        FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_FIXED_WORK
+    ),
+}
+COMPLEMENTARY_DE_BLOCKING_SCHEMES = frozenset(COMPLEMENTARY_DE_BLOCK_BY_SCHEME)
+PERIODIC_MH_BLOCKING_SCHEMES = frozenset(
+    {
+        FAST_RIDGE_INTRINSIC_PERIODIC_MH_BLOCKING_SCHEME,
+        *COMPLEMENTARY_DE_BLOCKING_SCHEMES,
+    }
+)
+BLOCKING_SCHEME_CHOICES = (
+    PAPER_BLOCKING_SCHEME,
+    ALL_SLOW_BLOCKING_SCHEME,
+    IOTA_DL_BLOCKING_SCHEME,
+    FAST_RIDGE_BLOCKING_SCHEME,
+    FAST_RIDGE_INTRINSIC_BLOCKING_SCHEME,
+    FAST_RIDGE_INTRINSIC_5STEP_BLOCKING_SCHEME,
+    FAST_RIDGE_INTRINSIC_PERIODIC_MH_BLOCKING_SCHEME,
+    FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_BLOCKING_SCHEME,
+    FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_BLOCKING_SCHEME,
+)
 
 ALIGNED_BLOCKS = (
     ("M_c", "q", "lambda_1", "lambda_2"),
@@ -144,6 +251,47 @@ PAPER_ALL_SLOW_BLOCKS = (
     ("zenith", "azimuth"),
     ("psi",),
     ("d_L",),
+)
+
+PAPER_IOTA_DL_BLOCKS = (
+    ("M_c", "q", "lambda_1", "lambda_2"),
+    ("s1_mag", "s1_theta", "s1_phi"),
+    ("s2_mag", "s2_theta", "s2_phi"),
+    ("iota", "d_L"),
+    ("zenith", "azimuth"),
+    ("psi",),
+)
+
+PAPER_FAST_RIDGE_BLOCKS = (
+    ("M_c", "q", "lambda_1", "lambda_2"),
+    ("s1_mag", "s1_theta", "s1_phi"),
+    ("s2_mag", "s2_theta", "s2_phi"),
+    ("zenith", "azimuth"),
+    ("psi",),
+    ("cos_iota", "d_hat"),
+)
+
+# Couple the non-periodic intrinsic coordinates that control the observed
+# q--chi_eff manifold while leaving the two spin azimuths as periodic
+# singletons.  The first three blocks are all waveform-rebuild priced and are
+# contiguous, so this preserves the fast-ridge kernel's ten slow plus five fast
+# slice updates and the same two FSM cache segments.
+PAPER_FAST_RIDGE_INTRINSIC_BLOCKS = (
+    (
+        "M_c",
+        "q",
+        "lambda_1",
+        "lambda_2",
+        "s1_mag",
+        "s1_theta",
+        "s2_mag",
+        "s2_theta",
+    ),
+    ("s1_phi",),
+    ("s2_phi",),
+    ("zenith", "azimuth"),
+    ("psi",),
+    ("cos_iota", "d_hat"),
 )
 
 # Backwards-compatible aliases used by the likelihood-lane microbenchmark.
@@ -208,6 +356,75 @@ PAPER_ALL_SLOW_LIMITATIONS = (
     *PAPER_LIMITATIONS[1:],
 )
 
+PAPER_IOTA_DL_LIMITATIONS = (
+    (
+        "This preserves the paper's full-resolution 15-parameter GW170817 "
+        "model, priors, and marginalizations, but merges its iota and d_L "
+        "singleton blocks into one joint block so slice directions can track "
+        "the distance-inclination amplitude ridge."
+    ),
+    *PAPER_LIMITATIONS[1:],
+)
+
+PAPER_FAST_RIDGE_LIMITATIONS = (
+    (
+        "This preserves the paper's full-resolution 15-parameter GW170817 "
+        "model, priors, and marginalizations, but samples inclination and "
+        "distance through a joint fast (cos_iota, d_hat) ridge block. d_hat "
+        "is the network-SNR-weighted distance of arXiv:2207.03508."
+    ),
+    *PAPER_LIMITATIONS[1:],
+)
+
+PAPER_FAST_RIDGE_INTRINSIC_LIMITATIONS = (
+    (
+        "This preserves the exact fast (cos_iota, d_hat) ridge block and "
+        "jointly slices the eight non-periodic mass, tide, spin-magnitude, "
+        "and spin-polar coordinates. The two periodic spin azimuths remain "
+        "singletons. The schedule still contains ten waveform-rebuild and "
+        "five cache-hit slice updates."
+    ),
+    *PAPER_LIMITATIONS[1:],
+)
+
+PAPER_FAST_RIDGE_INTRINSIC_5STEP_LIMITATIONS = (
+    (
+        "This preserves the fast-ridge-intrinsic blocks but uses five random "
+        "covariance directions in the eight-dimensional intrinsic block. "
+        "The remaining blocks retain one update per dimension, giving seven "
+        "waveform-rebuild and five cache-hit slice updates per replacement."
+    ),
+    *PAPER_LIMITATIONS[1:],
+)
+
+PAPER_FAST_RIDGE_INTRINSIC_PERIODIC_MH_LIMITATIONS = (
+    (
+        "This preserves the fast-ridge-intrinsic blocks and their default "
+        "dimension-based work budget, but replaces the s1_phi, s2_phi, and "
+        "psi singleton slices with one-call prior-corrected uniform "
+        "independence updates on their periodic supports. The fixed work is "
+        "twelve slices plus three independence attempts in two cache segments."
+    ),
+    *PAPER_LIMITATIONS[1:],
+)
+
+PAPER_FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_LIMITATIONS = (
+    (
+        "This preserves the fast-ridge-intrinsic periodic-MH schedule and "
+        "adds four gamma-one complementary live-point differential-evolution "
+        "Metropolis attempts on the eight-dimensional intrinsic block."
+    ),
+    *PAPER_LIMITATIONS[1:],
+)
+PAPER_FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_LIMITATIONS = (
+    (
+        "This preserves the fast-ridge-intrinsic periodic-MH schedule and "
+        "adds eight gamma-one complementary live-point differential-evolution "
+        "Metropolis attempts on the eight-dimensional intrinsic block."
+    ),
+    *PAPER_LIMITATIONS[1:],
+)
+
 LIMITATIONS = ALIGNED_LIMITATIONS
 
 
@@ -223,6 +440,20 @@ def _nonnegative_int(value: str) -> int:
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be non-negative")
     return parsed
+
+
+def _de_jump_block(value: str) -> dict[str, Any]:
+    """Parse ``name[,name...]:attempts`` into a sampler config value."""
+    names_text, separator, attempts_text = value.rpartition(":")
+    names = names_text.split(",") if separator else []
+    if not names or any(not name.isidentifier() for name in names):
+        raise argparse.ArgumentTypeError(
+            "must use name[,name...]:attempts with valid parameter names"
+        )
+    if len(set(names)) != len(names):
+        raise argparse.ArgumentTypeError("parameter names must be unique")
+    attempts = _positive_int(attempts_text)
+    return {"parameters": names, "attempts": attempts}
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -251,7 +482,59 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=PAPER_BLOCKING_SCHEME,
         help=(
             "Sampler partition. all-slow groups masses, tides, both spin "
-            "spheres, and iota into one 11D paper-workload block."
+            "spheres, and iota into one 11D paper-workload block; iota-dl "
+            "keeps the paper partition but merges the iota and d_L "
+            "singletons into one joint block; fast-ridge uses the joint "
+            "cacheable (cos_iota, d_hat) coordinates; fast-ridge-intrinsic "
+            "also couples the eight non-periodic intrinsic coordinates while "
+            "keeping both spin azimuths as periodic singletons; "
+            "fast-ridge-intrinsic-5step uses the same blocks with five random "
+            "covariance directions in the eight-dimensional block; "
+            "fast-ridge-intrinsic-periodic-mh instead keeps the default "
+            "dimension budget and replaces the three periodic singleton "
+            "slices with one-call uniform independence updates; the cde4 and "
+            "cde8 variants additionally insert four or eight gamma-one "
+            "complementary-live DE-MH attempts after the eight-dimensional "
+            "intrinsic block."
+        ),
+    )
+    parser.add_argument(
+        "--direction-mode",
+        choices=("covariance", "de-mix", "covariance-basis-8d"),
+        default="covariance",
+        help=(
+            "Slice-direction proposal. de-mix replaces a de_fraction of the "
+            "block covariance chords with differences of random live-point "
+            "pairs so cross-basin moves stay reachable; covariance-basis-8d "
+            "uses each signed, randomly permuted Cholesky column exactly once "
+            "in the unique eight-dimensional block."
+        ),
+    )
+    parser.add_argument(
+        "--de-fraction",
+        type=float,
+        default=0.5,
+        help="Fraction of de-mix slice directions drawn from live-point pairs.",
+    )
+    parser.add_argument(
+        "--num-de-jumps",
+        type=_nonnegative_int,
+        default=0,
+        help=(
+            "Metropolis differential-evolution jumps per replacement (full "
+            "live-pair displacements; one likelihood evaluation each) so "
+            "cross-basin transitions bypass slice shrinkage."
+        ),
+    )
+    parser.add_argument(
+        "--de-jump-block",
+        action="append",
+        type=_de_jump_block,
+        default=[],
+        metavar="PARAM[,PARAM...]:ATTEMPTS",
+        help=(
+            "Repeatable named-coordinate DE move group. Unlike --blocking-scheme, "
+            "this does not alter the slice partition."
         ),
     )
     parser.add_argument(
@@ -264,6 +547,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--num-gibbs-sweeps",
+        type=_positive_int,
+        default=NUM_GIBBS_SWEEPS,
+        help="Paper-notation M: complete Gibbs sweeps per replacement.",
+    )
+    parser.add_argument(
+        "--sampler-seed",
+        type=_nonnegative_int,
+        default=None,
+        help=(
+            "Optional independent sampler-trajectory seed. --seed continues "
+            "to determine the initial live points; omitting this option "
+            "preserves the historical shared-seed path exactly."
+        ),
+    )
     parser.add_argument(
         "--n-devices",
         type=int,
@@ -381,6 +680,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--timing-only",
+        action="store_true",
+        help=(
+            "Measure the unobstructed AOT-compiled sampling loop only. This "
+            "disables the outer-step observer and skips posterior extraction."
+        ),
+    )
+    parser.add_argument(
+        "--ablation-variant",
+        choices=SAMPLER_ABLATION_VARIANTS,
+        default=None,
+        help="Process-local sampler implementation cell used by --timing-only.",
+    )
+    parser.add_argument(
         "--simulate-cpu",
         action="store_true",
         help=(
@@ -395,8 +708,70 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         and args.workload != PAPER_WORKLOAD
     ):
         parser.error("non-paper --blocking-scheme requires --workload paper-15d")
+    if (
+        args.direction_mode == "covariance-basis-8d"
+        and args.blocking_scheme != FAST_RIDGE_INTRINSIC_BLOCKING_SCHEME
+    ):
+        parser.error(
+            "--direction-mode covariance-basis-8d requires "
+            "--blocking-scheme fast-ridge-intrinsic"
+        )
+    if (
+        args.blocking_scheme == FAST_RIDGE_INTRINSIC_5STEP_BLOCKING_SCHEME
+        and args.direction_mode != "covariance"
+    ):
+        parser.error(
+            "--blocking-scheme fast-ridge-intrinsic-5step requires "
+            "--direction-mode covariance"
+        )
+    if (
+        args.blocking_scheme == FAST_RIDGE_INTRINSIC_PERIODIC_MH_BLOCKING_SCHEME
+        and args.direction_mode != "covariance"
+    ):
+        parser.error(
+            "--blocking-scheme fast-ridge-intrinsic-periodic-mh requires "
+            "--direction-mode covariance"
+        )
+    if (
+        args.blocking_scheme in COMPLEMENTARY_DE_BLOCKING_SCHEMES
+        and args.direction_mode != "covariance"
+    ):
+        parser.error(
+            f"--blocking-scheme {args.blocking_scheme} requires --direction-mode "
+            "covariance"
+        )
+    if (
+        args.blocking_scheme in COMPLEMENTARY_DE_BLOCKING_SCHEMES
+        and args.n_devices != 1
+    ):
+        parser.error(f"--blocking-scheme {args.blocking_scheme} requires --n-devices 1")
+    if args.blocking_scheme in COMPLEMENTARY_DE_BLOCKING_SCHEMES and (
+        args.num_de_jumps != 0 or args.de_jump_block
+    ):
+        parser.error(
+            f"--blocking-scheme {args.blocking_scheme} fixes the complementary-DE "
+            "schedule and forbids legacy DE moves"
+        )
     if args.telemetry_output is not None and args.profile_dir is None:
         parser.error("--telemetry-output requires --profile-dir")
+    if args.timing_only != (args.ablation_variant is not None):
+        parser.error("--timing-only and --ablation-variant must be used together")
+    if args.timing_only:
+        incompatible = {
+            "--prepare-data": args.prepare_data,
+            "--profile-dir": args.profile_dir is not None,
+            "--slice-data-output": args.slice_data_output is not None,
+            "--samples-output": args.samples_output is not None,
+            "--nested-output": args.nested_output is not None,
+            "--retain-per-slice-info": args.retain_per_slice_info,
+            "--jax-compilation-cache-dir": args.jax_compilation_cache_dir is not None,
+            "--telemetry-output": args.telemetry_output is not None,
+            "--max-outer-steps": args.max_outer_steps is not None,
+            "--verbose": args.verbose,
+        }
+        selected = [flag for flag, enabled in incompatible.items() if enabled]
+        if selected:
+            parser.error("--timing-only is incompatible with " + ", ".join(selected))
     return args
 
 
@@ -1029,16 +1404,33 @@ def _workload_spec(
             "limitations": ALIGNED_LIMITATIONS,
         }
     if workload == PAPER_WORKLOAD:
-        blocks = (
-            PAPER_ALL_SLOW_BLOCKS
-            if blocking_scheme == ALL_SLOW_BLOCKING_SCHEME
-            else PAPER_BLOCKS
-        )
-        limitations = (
-            PAPER_ALL_SLOW_LIMITATIONS
-            if blocking_scheme == ALL_SLOW_BLOCKING_SCHEME
-            else PAPER_LIMITATIONS
-        )
+        if blocking_scheme == ALL_SLOW_BLOCKING_SCHEME:
+            blocks = PAPER_ALL_SLOW_BLOCKS
+            limitations = PAPER_ALL_SLOW_LIMITATIONS
+        elif blocking_scheme == IOTA_DL_BLOCKING_SCHEME:
+            blocks = PAPER_IOTA_DL_BLOCKS
+            limitations = PAPER_IOTA_DL_LIMITATIONS
+        elif blocking_scheme == FAST_RIDGE_BLOCKING_SCHEME:
+            blocks = PAPER_FAST_RIDGE_BLOCKS
+            limitations = PAPER_FAST_RIDGE_LIMITATIONS
+        elif blocking_scheme == FAST_RIDGE_INTRINSIC_BLOCKING_SCHEME:
+            blocks = PAPER_FAST_RIDGE_INTRINSIC_BLOCKS
+            limitations = PAPER_FAST_RIDGE_INTRINSIC_LIMITATIONS
+        elif blocking_scheme == FAST_RIDGE_INTRINSIC_5STEP_BLOCKING_SCHEME:
+            blocks = PAPER_FAST_RIDGE_INTRINSIC_BLOCKS
+            limitations = PAPER_FAST_RIDGE_INTRINSIC_5STEP_LIMITATIONS
+        elif blocking_scheme == FAST_RIDGE_INTRINSIC_PERIODIC_MH_BLOCKING_SCHEME:
+            blocks = PAPER_FAST_RIDGE_INTRINSIC_BLOCKS
+            limitations = PAPER_FAST_RIDGE_INTRINSIC_PERIODIC_MH_LIMITATIONS
+        elif blocking_scheme == (FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_BLOCKING_SCHEME):
+            blocks = PAPER_FAST_RIDGE_INTRINSIC_BLOCKS
+            limitations = PAPER_FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_LIMITATIONS
+        elif blocking_scheme == (FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_BLOCKING_SCHEME):
+            blocks = PAPER_FAST_RIDGE_INTRINSIC_BLOCKS
+            limitations = PAPER_FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_LIMITATIONS
+        else:
+            blocks = PAPER_BLOCKS
+            limitations = PAPER_LIMITATIONS
         return {
             "waveform": "IMRPhenomPv2_NRTidalv2",
             "sampled_dimensions": 15,
@@ -1060,8 +1452,20 @@ def _config_report(
     n_devices: int,
     workload: str = ALIGNED_WORKLOAD,
     blocking_scheme: str = PAPER_BLOCKING_SCHEME,
+    direction_mode: str = "covariance",
+    de_fraction: float = 0.5,
+    num_de_jumps: int = 0,
+    de_jump_blocks: list[dict[str, Any]] | None = None,
+    sampler_seed: int | None = None,
 ) -> dict[str, Any]:
     spec = _workload_spec(workload, blocking_scheme)
+    canonical_de_jump_blocks = [
+        {
+            "parameters": list(block["parameters"]),
+            "attempts": int(block["attempts"]),
+        }
+        for block in (de_jump_blocks or [])
+    ]
     config: dict[str, Any] = {
         "seed": seed,
         "workload": workload,
@@ -1115,6 +1519,34 @@ def _config_report(
             "M_gibbs_sweeps": NUM_GIBBS_SWEEPS,
         },
     }
+    if sampler_seed is not None:
+        config["sampler_seed"] = sampler_seed
+    if direction_mode != "covariance" or num_de_jumps > 0 or canonical_de_jump_blocks:
+        # Only non-default proposal settings enter the config (and its hash)
+        # so historical covariance-mode reports stay byte-identical.
+        config["direction_mode"] = direction_mode
+        config["de_fraction"] = de_fraction
+        config["num_de_jumps"] = num_de_jumps
+        config["de_jump_blocks"] = canonical_de_jump_blocks
+    if blocking_scheme == FAST_RIDGE_INTRINSIC_5STEP_BLOCKING_SCHEME:
+        config["num_slice_steps_by_block"] = list(FAST_RIDGE_INTRINSIC_5STEP_SCHEDULE)
+    if blocking_scheme == FAST_RIDGE_INTRINSIC_PERIODIC_MH_BLOCKING_SCHEME:
+        config["block_kernel_modes"] = list(
+            FAST_RIDGE_INTRINSIC_PERIODIC_MH_KERNEL_MODES
+        )
+        config["fixed_work"] = dict(FAST_RIDGE_INTRINSIC_PERIODIC_MH_FIXED_WORK)
+    if blocking_scheme in COMPLEMENTARY_DE_BLOCKING_SCHEMES:
+        complementary_de_block = COMPLEMENTARY_DE_BLOCK_BY_SCHEME[blocking_scheme]
+        config["block_kernel_modes"] = list(
+            FAST_RIDGE_INTRINSIC_PERIODIC_MH_KERNEL_MODES
+        )
+        config["complementary_de_jump_block"] = {
+            "parameters": list(complementary_de_block["parameters"]),
+            "attempts": complementary_de_block["attempts"],
+        }
+        config["fixed_work"] = dict(
+            COMPLEMENTARY_DE_FIXED_WORK_BY_SCHEME[blocking_scheme]
+        )
     encoded = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
     config["sha256"] = hashlib.sha256(encoded).hexdigest()
     return config
@@ -1213,11 +1645,13 @@ def _analysis_components(
         UniformSpherePrior,
     )
     from jimgw.core.single_event.transforms import (
+        DistanceToSNRWeightedDistanceTransform,
         MassRatioToSymmetricMassRatioTransform,
         SkyFrameToDetectorFrameSkyPositionTransform,
         SphereSpinToCartesianSpinTransform,
     )
     from jimgw.core.single_event.waveform import RippleIMRPhenomD_NRTidalv2
+    from jimgw.core.transforms import CosineTransform
 
     spec = _workload_spec(workload, blocking_scheme)
     if workload == PAPER_WORKLOAD:
@@ -1272,16 +1706,37 @@ def _analysis_components(
                 "s2_phi": (0.0, 2 * float(jnp.pi)),
             }
         )
+    sample_transforms = []
+    if blocking_scheme in {
+        FAST_RIDGE_BLOCKING_SCHEME,
+        FAST_RIDGE_INTRINSIC_BLOCKING_SCHEME,
+        FAST_RIDGE_INTRINSIC_5STEP_BLOCKING_SCHEME,
+        *PERIODIC_MH_BLOCKING_SCHEMES,
+    }:
+        # Build d_hat while the physical sky position and inclination are
+        # still present. Reverse application restores sky, then iota, then
+        # d_L, so the conditional inverse sees every quantity it needs.
+        sample_transforms.extend(
+            [
+                DistanceToSNRWeightedDistanceTransform(
+                    trigger_time=GPS,
+                    ifos=ifos,
+                ),
+                CosineTransform((["iota"], ["cos_iota"])),
+            ]
+        )
+    sample_transforms.append(
+        SkyFrameToDetectorFrameSkyPositionTransform(
+            trigger_time=GPS,
+            ifos=ifos,
+        )
+    )
+
     return {
         "spec": spec,
         "waveform": waveform,
         "prior": prior,
-        "sample_transforms": [
-            SkyFrameToDetectorFrameSkyPositionTransform(
-                trigger_time=GPS,
-                ifos=ifos,
-            )
-        ],
+        "sample_transforms": sample_transforms,
         "likelihood_transforms": [
             MassRatioToSymmetricMassRatioTransform,
             *spin_transforms,
@@ -1307,6 +1762,36 @@ def _safe_int(value: Any) -> int | None:
     return int(scalar) if scalar is not None else None
 
 
+def _json_safe(value: Any) -> Any:
+    """Convert diagnostic arrays/scalars into JSON-safe builtins."""
+
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    array = np.asarray(value)
+    if array.ndim == 0:
+        return array.item()
+    return array.tolist()
+
+
+def _pytree_sha256(jax: Any, value: Any) -> str:
+    """Hash the logical host value of a pytree, independent of sharding."""
+
+    leaves, tree = jax.tree_util.tree_flatten(jax.device_get(value))
+    digest = hashlib.sha256(str(tree).encode())
+    for leaf in leaves:
+        array = np.asarray(leaf)
+        digest.update(str(array.dtype).encode())
+        digest.update(b"\0")
+        digest.update(json.dumps(array.shape).encode())
+        digest.update(b"\0")
+        digest.update(np.ascontiguousarray(array).tobytes(order="C"))
+    return digest.hexdigest()
+
+
 def _derive_paper_convention(
     sample_call_seconds: float,
     jit_estimate: float | None,
@@ -1322,24 +1807,34 @@ def _derive_paper_convention(
     """
 
     likelihood_jit: float | None = None
+    sampler_jit: float | None = None
+    sampler_jit_source: str | None = None
     if sample_phases is not None:
         raw = sample_phases.get("likelihood_jit")
         if raw is not None:
             likelihood_jit = float(raw)
+        raw = sample_phases.get("sampler_kernel_jit")
+        if raw is not None:
+            sampler_jit = float(raw)
+            sampler_jit_source = "direct_aot_phase"
+    if sampler_jit is None and jit_estimate is not None:
+        sampler_jit = jit_estimate
+        sampler_jit_source = "first_step_minus_steady_median"
     post_jit = sample_call_seconds
-    if jit_estimate is not None:
-        post_jit -= jit_estimate
+    if sampler_jit is not None:
+        post_jit -= sampler_jit
     if likelihood_jit is not None:
         post_jit -= likelihood_jit
     return {
         "likelihood_jit_seconds": likelihood_jit,
-        "sampler_jit_seconds": jit_estimate,
+        "sampler_jit_seconds": sampler_jit,
+        "sampler_jit_source": sampler_jit_source,
         "post_jit_sampling_seconds": post_jit,
         "note": (
             "Sampling time excluding both one-off JIT costs (likelihood + "
             "sampler kernel), matching arXiv:2607.28265 Table 3. "
-            "sampler_jit_seconds is the first-step-minus-steady-median "
-            "estimate (same value as jit_compile_estimate); "
+            "sampler_jit_seconds prefers the directly measured AOT sampler "
+            "compile and otherwise falls back to first-step-minus-steady-median; "
             "likelihood_jit_seconds is the AOT-measured compile of the "
             "initial batched likelihood evaluation, or None when the "
             "sampler revision does not report it."
@@ -1586,6 +2081,25 @@ def _normalise_per_slice_array(value: Any, n_slices: int) -> np.ndarray:
 def _write_slice_data(path: Path, jim: Any, n_devices: int) -> dict[str, Any]:
     update_info = jim.sampler._final_state.update_info
     rebuild_by_block = jim.sampler._rebuild_required_by_block
+    block_kernel_modes = tuple(
+        getattr(
+            jim.sampler,
+            "_block_kernel_modes",
+            ("slice",) * len(rebuild_by_block),
+        )
+    )
+    if len(block_kernel_modes) != len(rebuild_by_block):
+        raise RuntimeError(
+            "per-slice block kernel modes do not align with cache blocks"
+        )
+    unsupported_modes = sorted(
+        set(block_kernel_modes) - {"slice", "periodic-uniform-independence"}
+    )
+    if unsupported_modes:
+        raise RuntimeError(
+            "unsupported block kernel modes in per-slice diagnostics: "
+            f"{unsupported_modes}"
+        )
     slice_block_indices: list[int] = []
     slice_requires_rebuild: list[bool] = []
     slice_slot_in_block: list[int] = []
@@ -1595,9 +2109,15 @@ def _write_slice_data(path: Path, jim: Any, n_devices: int) -> dict[str, Any]:
     max_block_dimensions = max(map(len, block_parameter_indices))
     padded_parameter_indices: list[list[int]] = []
     for gibbs_sweep in range(NUM_GIBBS_SWEEPS):
-        for block_index, (indices, requires_rebuild) in enumerate(
-            rebuild_by_block.items()
+        for block_index, ((indices, requires_rebuild), kernel_mode) in enumerate(
+            zip(
+                rebuild_by_block.items(),
+                block_kernel_modes,
+                strict=True,
+            )
         ):
+            if kernel_mode != "slice":
+                continue
             parameter_names = ",".join(
                 jim.sampling_parameter_names[index] for index in indices
             )
@@ -1721,7 +2241,15 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     from jimgw.core.single_event.data import Data, PowerSpectrum
     from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
     from jimgw.core.single_event.likelihood import TransientLikelihoodFD
-    from jimgw.samplers.config import BlackJAXSwiGConfig
+    from jimgw.samplers.config import BlackJAXSwiGConfig, DEJumpBlockConfig
+
+    ablation: dict[str, str] | None = None
+    if args.ablation_variant is not None:
+        from benchmarks.device_parallel_nss.sampler_ablation import (
+            install_sampler_ablation,
+        )
+
+        ablation = install_sampler_ablation(args.ablation_variant)
 
     if (
         args.slice_data_output is not None or args.retain_per_slice_info
@@ -1774,6 +2302,13 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         phase_marginalization=True,
         time_marginalization={"tc_range": (-0.03, 0.03)},
     )
+    complementary_de_config: dict[str, Any] = {}
+    if args.blocking_scheme in COMPLEMENTARY_DE_BLOCKING_SCHEMES:
+        complementary_de_block = COMPLEMENTARY_DE_BLOCK_BY_SCHEME[args.blocking_scheme]
+        complementary_de_config["complementary_de_jump_block"] = DEJumpBlockConfig(
+            parameters=list(complementary_de_block["parameters"]),
+            attempts=complementary_de_block["attempts"],
+        )
     sampler_config = BlackJAXSwiGConfig(
         blocks=[list(block) for block in workload_spec["blocks"]],
         n_live=N_LIVE,
@@ -1782,7 +2317,28 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         num_gibbs_sweeps=NUM_GIBBS_SWEEPS,
         termination_dlogz=TERMINATION_DLOGZ,
         n_devices=args.n_devices,
+        scheduler=(
+            "pre-fsm-lockstep"
+            if ablation is not None and ablation["scheduler"] == "lockstep"
+            else "fsm"
+        ),
+        direction_mode=args.direction_mode,
+        num_slice_steps_by_block=(
+            list(FAST_RIDGE_INTRINSIC_5STEP_SCHEDULE)
+            if args.blocking_scheme == FAST_RIDGE_INTRINSIC_5STEP_BLOCKING_SCHEME
+            else None
+        ),
+        block_kernel_modes=(
+            list(FAST_RIDGE_INTRINSIC_PERIODIC_MH_KERNEL_MODES)
+            if args.blocking_scheme in PERIODIC_MH_BLOCKING_SCHEMES
+            else None
+        ),
+        de_fraction=args.de_fraction,
+        num_de_jumps=args.num_de_jumps,
+        de_jump_blocks=args.de_jump_block,
+        **complementary_de_config,
     )
+    sampler_seed = args.seed if args.sampler_seed is None else args.sampler_seed
     jim = Jim(
         likelihood,
         components["prior"],
@@ -1790,7 +2346,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         likelihood_transforms=components["likelihood_transforms"],
         periodic=components["periodic"],
         sampler_config=sampler_config,
-        seed=args.seed,
+        seed=sampler_seed,
         verbose=args.verbose,
     )
     problem_setup_seconds = time.perf_counter() - setup_started
@@ -1805,20 +2361,24 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     ).hexdigest()
     initial_positions_seconds = time.perf_counter() - positions_started
 
-    observer = _OuterStepObserver(
-        jax=jax,
-        jnp=jnp,
-        profile_dir=args.profile_dir,
-        profile_warmup_steps=args.profile_warmup_steps,
-        profile_steps=args.profile_steps,
-        telemetry_output=args.telemetry_output,
-        max_outer_steps=args.max_outer_steps,
-    )
     sample_started = time.perf_counter()
-    with _observe_outer_step_jit(jax, observer):
+    observer: _OuterStepObserver | None = None
+    if args.timing_only:
         jim.sample(initial_positions)
+    else:
+        observer = _OuterStepObserver(
+            jax=jax,
+            jnp=jnp,
+            profile_dir=args.profile_dir,
+            profile_warmup_steps=args.profile_warmup_steps,
+            profile_steps=args.profile_steps,
+            telemetry_output=args.telemetry_output,
+            max_outer_steps=args.max_outer_steps,
+        )
+        with _observe_outer_step_jit(jax, observer):
+            jim.sample(initial_positions)
     sample_call_seconds = time.perf_counter() - sample_started
-    if observer.compiled_kernel_count != 1:
+    if observer is not None and observer.compiled_kernel_count != 1:
         raise RuntimeError(
             "expected to observe exactly one JIT-compiled outer kernel, got "
             f"{observer.compiled_kernel_count}"
@@ -1826,12 +2386,14 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
 
     extraction_started = time.perf_counter()
     diagnostics = jim.get_diagnostics()
-    samples = jim.get_samples()
+    samples = {} if args.timing_only else jim.get_samples()
     posterior_count = int(next(iter(samples.values())).shape[0]) if samples else None
     nested_samples = getattr(jim.sampler, "_nested_samples", None)
     try:
         posterior_ess = (
-            _safe_float(nested_samples.neff()) if nested_samples is not None else None
+            _safe_float(nested_samples.neff())
+            if nested_samples is not None and not args.timing_only
+            else None
         )
     except (AttributeError, TypeError, ValueError):
         posterior_ess = None
@@ -1855,16 +2417,37 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         else None
     )
     result_extraction_seconds = time.perf_counter() - extraction_started
+    nested_state_sha256 = _pytree_sha256(jax, jim.sampler._final_state)
 
-    step_timing = observer.report()
-    first_step = step_timing["first_step_seconds_including_jit"]
-    steady_median = step_timing["steady_state_seconds"]["median"]
+    step_timing = observer.report() if observer is not None else None
+    first_step = (
+        step_timing["first_step_seconds_including_jit"]
+        if step_timing is not None
+        else None
+    )
+    steady_median = (
+        step_timing["steady_state_seconds"]["median"]
+        if step_timing is not None
+        else None
+    )
     jit_estimate = (
         first_step - steady_median
         if first_step is not None and steady_median is not None
         else None
     )
     sample_phases = diagnostics.get("sample_phase_seconds")
+    if args.timing_only:
+        required_phases = ("likelihood_jit", "sampler_kernel_jit", "ns_loop")
+        missing_phases = [
+            name
+            for name in required_phases
+            if not isinstance(sample_phases, Mapping) or sample_phases.get(name) is None
+        ]
+        if missing_phases:
+            raise RuntimeError(
+                "timing-only run did not directly measure phases: "
+                + ", ".join(missing_phases)
+            )
 
     inferred_root = Path(jimgw.__file__).resolve().parents[2]
     implementation_root = args.implementation_root or inferred_root
@@ -1877,11 +2460,9 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "result_extraction": result_extraction_seconds,
         "jit_compile_estimate": jit_estimate,
         "jit_note": (
-            "The first observed outer step includes lazy JIT compilation. The "
-            "reported estimate subtracts the median of later synchronized outer "
-            "steps; the raw host timestamp series is retained. See "
-            "timing_seconds.paper_convention for the arXiv:2607.28265-convention "
-            "post-JIT sampling time that also excludes the likelihood JIT."
+            "timing-only runs AOT-compile both kernels and measure ns_loop "
+            "directly without an observer. Other runs estimate sampler JIT as "
+            "first observed step minus the later synchronized-step median."
         ),
         "sample_phases": sample_phases,
         "paper_convention": _derive_paper_convention(
@@ -1893,6 +2474,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "benchmark": BENCHMARK_NAME,
+        "timing_only": bool(args.timing_only),
+        "ablation": ablation,
         "implementation": {
             "label": args.implementation_label,
             "module_file": str(Path(jimgw.__file__).resolve()),
@@ -1931,6 +2514,11 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 args.n_devices,
                 args.workload,
                 args.blocking_scheme,
+                direction_mode=args.direction_mode,
+                de_fraction=args.de_fraction,
+                num_de_jumps=args.num_de_jumps,
+                de_jump_blocks=args.de_jump_block,
+                sampler_seed=args.sampler_seed,
             ),
             "initial_positions_sha256": initial_positions_sha256,
         },
@@ -1939,6 +2527,151 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             "n_iterations": _safe_int(diagnostics.get("n_iterations")),
             "n_likelihood_evaluations": _safe_int(
                 diagnostics.get("n_likelihood_evaluations")
+            ),
+            "n_likelihood_evaluations_physical": _safe_int(
+                diagnostics.get("n_likelihood_evaluations_physical")
+            ),
+            "n_slice_updates": _safe_int(diagnostics.get("n_slice_updates")),
+            "n_periodic_uniform_independence_attempts": _safe_int(
+                diagnostics.get("n_periodic_uniform_independence_attempts")
+            ),
+            "n_periodic_uniform_independence_acceptances": _safe_int(
+                diagnostics.get("n_periodic_uniform_independence_acceptances")
+            ),
+            "periodic_uniform_independence_acceptance_rate": _safe_float(
+                diagnostics.get("periodic_uniform_independence_acceptance_rate")
+            ),
+            "n_likelihood_evaluations_periodic_uniform_independence": _safe_int(
+                diagnostics.get(
+                    "n_likelihood_evaluations_periodic_uniform_independence"
+                )
+            ),
+            "n_likelihood_evaluations_periodic_uniform_independence_waveform_rebuild": _safe_int(
+                diagnostics.get(
+                    "n_likelihood_evaluations_periodic_uniform_independence_waveform_rebuild"
+                )
+            ),
+            "n_likelihood_evaluations_periodic_uniform_independence_cache_hit": _safe_int(
+                diagnostics.get(
+                    "n_likelihood_evaluations_periodic_uniform_independence_cache_hit"
+                )
+            ),
+            "periodic_uniform_independence_blocks": _json_safe(
+                diagnostics.get("periodic_uniform_independence_blocks")
+            ),
+            "periodic_uniform_independence_attempts_by_block_history": _json_safe(
+                diagnostics.get(
+                    "periodic_uniform_independence_attempts_by_block_history"
+                )
+            ),
+            "periodic_uniform_independence_acceptances_by_block_history": (
+                _json_safe(
+                    diagnostics.get(
+                        "periodic_uniform_independence_acceptances_by_block_history"
+                    )
+                )
+            ),
+            **(
+                {
+                    "n_likelihood_evaluations_complementary_de": _safe_int(
+                        diagnostics.get("n_likelihood_evaluations_complementary_de")
+                    ),
+                    "n_likelihood_evaluations_complementary_de_waveform_rebuild": _safe_int(
+                        diagnostics.get(
+                            "n_likelihood_evaluations_complementary_de_waveform_rebuild"
+                        )
+                    ),
+                    "n_likelihood_evaluations_complementary_de_cache_hit": _safe_int(
+                        diagnostics.get(
+                            "n_likelihood_evaluations_complementary_de_cache_hit"
+                        )
+                    ),
+                    "n_complementary_de_attempts": _safe_int(
+                        diagnostics.get("n_complementary_de_attempts")
+                    ),
+                    "n_complementary_de_acceptances": _safe_int(
+                        diagnostics.get("n_complementary_de_acceptances")
+                    ),
+                    "n_complementary_de_donor_policy_violations": _safe_int(
+                        diagnostics.get("n_complementary_de_donor_policy_violations")
+                    ),
+                    "complementary_de_acceptance_rate": _safe_float(
+                        diagnostics.get("complementary_de_acceptance_rate")
+                    ),
+                    "complementary_de_blocks": _json_safe(
+                        diagnostics.get("complementary_de_blocks")
+                    ),
+                    "complementary_de_attempts_history": _json_safe(
+                        diagnostics.get("complementary_de_attempts_history")
+                    ),
+                    "complementary_de_acceptances_history": _json_safe(
+                        diagnostics.get("complementary_de_acceptances_history")
+                    ),
+                    "complementary_de_attempts_by_block_history": _json_safe(
+                        diagnostics.get("complementary_de_attempts_by_block_history")
+                    ),
+                    "complementary_de_acceptances_by_block_history": _json_safe(
+                        diagnostics.get("complementary_de_acceptances_by_block_history")
+                    ),
+                    "complementary_de_donor_policy_violations_history": _json_safe(
+                        diagnostics.get(
+                            "complementary_de_donor_policy_violations_history"
+                        )
+                    ),
+                    "complementary_de_acceptances_by_attempt_history": _json_safe(
+                        diagnostics.get(
+                            "complementary_de_acceptances_by_attempt_history"
+                        )
+                    ),
+                    "complementary_de_donor_indices_by_attempt_history": _json_safe(
+                        diagnostics.get(
+                            "complementary_de_donor_indices_by_attempt_history"
+                        )
+                    ),
+                    "complementary_de_donor_policy_violations_by_attempt_history": _json_safe(
+                        diagnostics.get(
+                            "complementary_de_donor_policy_violations_by_attempt_history"
+                        )
+                    ),
+                    "complementary_de_complement_size_history": _json_safe(
+                        diagnostics.get("complementary_de_complement_size_history")
+                    ),
+                    "complementary_de_parent_index_history": _json_safe(
+                        diagnostics.get("complementary_de_parent_index_history")
+                    ),
+                    "complementary_de_position_before_by_attempt_history": _json_safe(
+                        diagnostics.get(
+                            "complementary_de_position_before_by_attempt_history"
+                        )
+                    ),
+                    "complementary_de_proposal_position_by_attempt_history": _json_safe(
+                        diagnostics.get(
+                            "complementary_de_proposal_position_by_attempt_history"
+                        )
+                    ),
+                    "complementary_de_sampling_parameter_names": list(
+                        jim.sampling_parameter_names
+                    ),
+                }
+                if args.blocking_scheme in COMPLEMENTARY_DE_BLOCKING_SCHEMES
+                else {}
+            ),
+            "n_likelihood_evaluations_de_jumps": _safe_int(
+                diagnostics.get("n_likelihood_evaluations_de_jumps")
+            ),
+            "n_de_jump_attempts": _safe_int(diagnostics.get("n_de_jump_attempts")),
+            "n_de_jump_acceptances": _safe_int(
+                diagnostics.get("n_de_jump_acceptances")
+            ),
+            "de_jump_acceptance_rate": _safe_float(
+                diagnostics.get("de_jump_acceptance_rate")
+            ),
+            "targeted_de_jump_blocks": diagnostics.get("targeted_de_jump_blocks"),
+            "n_likelihood_evaluations_de_jumps_waveform_rebuild": _safe_int(
+                diagnostics.get("n_likelihood_evaluations_de_jumps_waveform_rebuild")
+            ),
+            "n_likelihood_evaluations_de_jumps_cache_hit": _safe_int(
+                diagnostics.get("n_likelihood_evaluations_de_jumps_cache_hit")
             ),
             "log_Z": _safe_float(diagnostics.get("log_Z")),
             "log_Z_error": _safe_float(diagnostics.get("log_Z_error")),
@@ -1949,6 +2682,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             "posterior_ess_source": (
                 "anesthetic.NestedSamples.neff" if posterior_ess is not None else None
             ),
+            "nested_state_sha256": nested_state_sha256,
             "per_slice_update_info": slice_data,
             "early_stopped_for_cache_probe": args.max_outer_steps is not None,
         },
@@ -1989,7 +2723,10 @@ def _emit_report(report: dict[str, Any], output: Path | None) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    global NUM_GIBBS_SWEEPS
+
     args = _parse_args(argv)
+    NUM_GIBBS_SWEEPS = args.num_gibbs_sweeps
     _select_implementation(args.implementation_root)
     if args.prepare_data:
         started = time.perf_counter()

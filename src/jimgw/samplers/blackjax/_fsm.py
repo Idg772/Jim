@@ -27,7 +27,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array
 
-_LEFT, _RIGHT, _SHRINK, _DONE = 0, 1, 2, 3
+_LEFT, _RIGHT, _SHRINK, _DONE, _INDEPENDENCE = 0, 1, 2, 3, 4
 
 
 class SegmentSchedule(NamedTuple):
@@ -48,6 +48,45 @@ class SegmentInfo(NamedTuple):
     num_shrink: Array
     bracket_left: Array
     bracket_right: Array
+
+
+class HybridSegmentSchedule(NamedTuple):
+    """Static slice/MH operations sharing one cache-rebuild class."""
+
+    is_independence: Array
+    is_complementary_de: Array
+    parameter_index: Array
+    proposal_lower: Array
+    proposal_upper: Array
+    operation_key_data: Array
+    slice_info_index: Array
+    independence_info_index: Array
+    complementary_de_info_index: Array
+    complementary_de_displacement: Array
+    complementary_de_donor_indices: Array
+    complementary_de_donor_policy_violation: Array
+    directions: Array
+    level_u: Array
+    bracket_u: Array
+    bracket_v: Array
+    shrink_key_data: Array
+    n_slices: int
+    n_independence: int
+    n_complementary_de: int
+    complementary_de_complement_size: Array
+
+
+class HybridSegmentInfo(NamedTuple):
+    """Filtered diagnostics for one mixed slice/independence segment."""
+
+    slice_info: SegmentInfo
+    independence_acceptances: Array
+    complementary_de_acceptances: Array
+    complementary_de_donor_indices: Array
+    complementary_de_donor_policy_violations: Array
+    complementary_de_position_before: Array
+    complementary_de_proposal_position: Array
+    complementary_de_complement_size: Array
 
 
 def slice_randoms_from_keys(slice_keys):
@@ -94,6 +133,25 @@ class _Carry(NamedTuple):
     n_expand: Array
     n_shrink: Array
     info: SegmentInfo
+
+
+class _HybridCarry(NamedTuple):
+    op_idx: Array
+    phase: Array
+    state: Any
+    level: Array
+    left: Array
+    right: Array
+    j_remaining: Array
+    k_remaining: Array
+    shrink_key_data: Array
+    n_expand: Array
+    n_shrink: Array
+    slice_info: SegmentInfo
+    independence_acceptances: Array
+    complementary_de_acceptances: Array
+    complementary_de_position_before: Array
+    complementary_de_proposal_position: Array
 
 
 def _slice_entry(schedule, idx, logdensity, max_expansions, width):
@@ -296,3 +354,314 @@ def run_segment(
 
     final = jax.lax.while_loop(cond, body, carry)
     return final.state, final.info
+
+
+def run_hybrid_segment(
+    schedule: HybridSegmentSchedule,
+    state,
+    loglikelihood_0,
+    *,
+    eval_candidate: Callable,
+    wrap_position: Callable,
+    max_expansions: int,
+    max_shrinkage: int,
+    width: float = 1.0,
+):
+    """Run ordered slice and one-tick independence-MH operations in one FSM."""
+    assert max_shrinkage >= 1
+
+    n_ops = schedule.is_independence.shape[0]
+    if n_ops < 1:
+        raise ValueError("A hybrid FSM segment must contain at least one operation")
+    slice_storage = max(schedule.n_slices, 1)
+    independence_storage = max(schedule.n_independence, 1)
+    complementary_de_storage = max(schedule.n_complementary_de, 1)
+    zero_i = jnp.zeros((slice_storage,), dtype=jnp.result_type(int))
+    slice_info0 = SegmentInfo(
+        is_accepted=jnp.zeros((slice_storage,), dtype=bool),
+        num_expansions=zero_i,
+        num_shrink=zero_i,
+        bracket_left=jnp.zeros((slice_storage,)),
+        bracket_right=jnp.zeros((slice_storage,)),
+    )
+    level, left, right, j, k, shrink_key_data = _slice_entry(
+        schedule, 0, state.logdensity, max_expansions, width
+    )
+    carry = _HybridCarry(
+        op_idx=jnp.asarray(0),
+        phase=jnp.where(
+            schedule.is_independence[0] | schedule.is_complementary_de[0],
+            _INDEPENDENCE,
+            _LEFT,
+        ),
+        state=state,
+        level=level,
+        left=left,
+        right=right,
+        j_remaining=j,
+        k_remaining=k,
+        shrink_key_data=shrink_key_data,
+        n_expand=jnp.asarray(0),
+        n_shrink=jnp.asarray(0),
+        slice_info=slice_info0,
+        independence_acceptances=jnp.zeros((independence_storage,), dtype=bool),
+        complementary_de_acceptances=jnp.zeros((complementary_de_storage,), dtype=bool),
+        complementary_de_position_before=jnp.zeros(
+            (complementary_de_storage,) + state.position.shape,
+            dtype=state.position.dtype,
+        ),
+        complementary_de_proposal_position=jnp.zeros(
+            (complementary_de_storage,) + state.position.shape,
+            dtype=state.position.dtype,
+        ),
+    )
+
+    def cond(c):
+        return c.phase != _DONE
+
+    def body(c):
+        is_independence = schedule.is_independence[c.op_idx]
+        is_complementary_de = schedule.is_complementary_de[c.op_idx]
+        is_metropolis = is_independence | is_complementary_de
+
+        shrink_key = jax.random.wrap_key_data(
+            c.shrink_key_data,
+            impl="threefry2x32",
+        )
+        next_shrink_key, shrink_subkey = jax.random.split(shrink_key)
+        t_shrink = c.left + jax.random.uniform(shrink_subkey) * (c.right - c.left)
+        in_left = (c.phase == _LEFT) & ~is_metropolis
+        in_right = (c.phase == _RIGHT) & ~is_metropolis
+        in_shrink = (c.phase == _SHRINK) & ~is_metropolis
+        shrink_key_data = jnp.where(
+            in_shrink,
+            jax.random.key_data(next_shrink_key),
+            c.shrink_key_data,
+        )
+        t = jnp.where(
+            in_left,
+            c.left,
+            jnp.where(in_right, c.right, jnp.where(in_shrink, t_shrink, 0.0)),
+        )
+        slice_position = wrap_position(
+            c.state.position + t * schedule.directions[c.op_idx]
+        )
+
+        operation_key = jax.random.wrap_key_data(
+            schedule.operation_key_data[c.op_idx],
+            impl="threefry2x32",
+        )
+        proposal_key, accept_key = jax.random.split(operation_key)
+        proposed_value = jax.random.uniform(
+            proposal_key,
+            minval=schedule.proposal_lower[c.op_idx],
+            maxval=schedule.proposal_upper[c.op_idx],
+        ).astype(c.state.position.dtype)
+        independence_position = c.state.position.at[
+            schedule.parameter_index[c.op_idx]
+        ].set(proposed_value)
+        complementary_de_position = wrap_position(
+            c.state.position + schedule.complementary_de_displacement[c.op_idx]
+        )
+        position = jnp.where(
+            is_independence,
+            independence_position,
+            jnp.where(
+                is_complementary_de,
+                complementary_de_position,
+                slice_position,
+            ),
+        )
+
+        logdensity, loglikelihood, cache = eval_candidate(position, c.state.cache)
+        inside = (logdensity >= c.level) & (loglikelihood > loglikelihood_0)
+        independence_accepted = (
+            is_independence
+            & (loglikelihood > loglikelihood_0)
+            & (
+                jnp.log(jax.random.uniform(accept_key))
+                < logdensity - c.state.logdensity
+            )
+        )
+        complementary_de_accepted = (
+            is_complementary_de
+            & ~schedule.complementary_de_donor_policy_violation[
+                schedule.complementary_de_info_index[c.op_idx]
+            ]
+            & (loglikelihood > loglikelihood_0)
+            & (
+                jnp.log(jax.random.uniform(accept_key))
+                < logdensity - c.state.logdensity
+            )
+        )
+
+        expand_left = in_left & inside & (c.j_remaining > 0)
+        to_right = in_left & ~expand_left
+        expand_right = in_right & inside & (c.k_remaining > 0)
+        to_shrink = in_right & ~expand_right
+        found = in_shrink & inside
+        n_shrink = c.n_shrink + in_shrink.astype(c.n_shrink.dtype)
+        exhausted = in_shrink & ~inside & (n_shrink >= max_shrinkage)
+        slice_done = found | exhausted
+        keep_shrinking = in_shrink & ~slice_done
+        n_expand = c.n_expand + (expand_left | expand_right).astype(c.n_expand.dtype)
+
+        left = jnp.where(
+            expand_left,
+            c.left - width,
+            jnp.where(keep_shrinking & (t < 0.0), t, c.left),
+        )
+        right = jnp.where(
+            expand_right,
+            c.right + width,
+            jnp.where(keep_shrinking & (t >= 0.0), t, c.right),
+        )
+        candidate = c.state._replace(
+            position=position,
+            logdensity=logdensity,
+            loglikelihood=loglikelihood,
+            cache=cache,
+        )
+        take_candidate = found | independence_accepted | complementary_de_accepted
+        new_state = jax.tree.map(
+            lambda new, old: jnp.where(take_candidate, new, old),
+            candidate,
+            c.state,
+        )
+
+        slice_idx = schedule.slice_info_index[c.op_idx]
+        write_bracket = ~is_independence & to_shrink
+        slice_info = c.slice_info._replace(
+            bracket_left=jnp.where(
+                write_bracket,
+                c.slice_info.bracket_left.at[slice_idx].set(left),
+                c.slice_info.bracket_left,
+            ),
+            bracket_right=jnp.where(
+                write_bracket,
+                c.slice_info.bracket_right.at[slice_idx].set(right),
+                c.slice_info.bracket_right,
+            ),
+        )
+        write_slice = ~is_independence & slice_done
+        slice_info = jax.tree.map(
+            lambda arr, val: jnp.where(write_slice, arr.at[slice_idx].set(val), arr),
+            slice_info,
+            SegmentInfo(
+                is_accepted=found,
+                num_expansions=n_expand,
+                num_shrink=n_shrink,
+                bracket_left=slice_info.bracket_left[slice_idx],
+                bracket_right=slice_info.bracket_right[slice_idx],
+            ),
+        )
+        independence_idx = schedule.independence_info_index[c.op_idx]
+        independence_acceptances = jnp.where(
+            is_independence,
+            c.independence_acceptances.at[independence_idx].set(independence_accepted),
+            c.independence_acceptances,
+        )
+        complementary_de_idx = schedule.complementary_de_info_index[c.op_idx]
+        complementary_de_acceptances = jnp.where(
+            is_complementary_de,
+            c.complementary_de_acceptances.at[complementary_de_idx].set(
+                complementary_de_accepted
+            ),
+            c.complementary_de_acceptances,
+        )
+        complementary_de_position_before = jnp.where(
+            is_complementary_de,
+            c.complementary_de_position_before.at[complementary_de_idx].set(
+                c.state.position
+            ),
+            c.complementary_de_position_before,
+        )
+        complementary_de_proposal_position = jnp.where(
+            is_complementary_de,
+            c.complementary_de_proposal_position.at[complementary_de_idx].set(position),
+            c.complementary_de_proposal_position,
+        )
+
+        op_done = is_metropolis | slice_done
+        next_idx = c.op_idx + op_done.astype(c.op_idx.dtype)
+        segment_done = op_done & (next_idx >= n_ops)
+        entry_idx = jnp.minimum(next_idx, n_ops - 1)
+        e_level, e_left, e_right, e_j, e_k, e_key_data = _slice_entry(
+            schedule,
+            entry_idx,
+            new_state.logdensity,
+            max_expansions,
+            width,
+        )
+        advance = op_done & ~segment_done
+        entry_phase = jnp.where(
+            schedule.is_independence[entry_idx]
+            | schedule.is_complementary_de[entry_idx],
+            _INDEPENDENCE,
+            _LEFT,
+        )
+        phase = jnp.where(
+            segment_done,
+            _DONE,
+            jnp.where(
+                advance,
+                entry_phase,
+                jnp.where(
+                    to_right,
+                    _RIGHT,
+                    jnp.where(to_shrink | keep_shrinking, _SHRINK, c.phase),
+                ),
+            ),
+        )
+        return _HybridCarry(
+            op_idx=jnp.where(advance, next_idx, c.op_idx),
+            phase=phase,
+            state=new_state,
+            level=jnp.where(advance, e_level, c.level),
+            left=jnp.where(advance, e_left, left),
+            right=jnp.where(advance, e_right, right),
+            j_remaining=jnp.where(
+                advance,
+                e_j,
+                c.j_remaining - expand_left.astype(c.j_remaining.dtype),
+            ),
+            k_remaining=jnp.where(
+                advance,
+                e_k,
+                c.k_remaining - expand_right.astype(c.k_remaining.dtype),
+            ),
+            shrink_key_data=jnp.where(advance, e_key_data, shrink_key_data),
+            n_expand=jnp.where(advance, 0, n_expand),
+            n_shrink=jnp.where(advance, 0, n_shrink),
+            slice_info=slice_info,
+            independence_acceptances=independence_acceptances,
+            complementary_de_acceptances=complementary_de_acceptances,
+            complementary_de_position_before=complementary_de_position_before,
+            complementary_de_proposal_position=complementary_de_proposal_position,
+        )
+
+    final = jax.lax.while_loop(cond, body, carry)
+    return final.state, HybridSegmentInfo(
+        slice_info=jax.tree.map(lambda x: x[: schedule.n_slices], final.slice_info),
+        independence_acceptances=final.independence_acceptances[
+            : schedule.n_independence
+        ],
+        complementary_de_acceptances=final.complementary_de_acceptances[
+            : schedule.n_complementary_de
+        ],
+        complementary_de_donor_indices=schedule.complementary_de_donor_indices[
+            : schedule.n_complementary_de
+        ],
+        complementary_de_donor_policy_violations=(
+            schedule.complementary_de_donor_policy_violation[
+                : schedule.n_complementary_de
+            ]
+        ),
+        complementary_de_position_before=final.complementary_de_position_before[
+            : schedule.n_complementary_de
+        ],
+        complementary_de_proposal_position=(
+            final.complementary_de_proposal_position[: schedule.n_complementary_de]
+        ),
+        complementary_de_complement_size=schedule.complementary_de_complement_size,
+    )

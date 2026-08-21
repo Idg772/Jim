@@ -683,6 +683,68 @@ class TestJimPriorLikelihoodConsistencyChecks:
             if block != intrinsic_block
         )
 
+    def test_swig_rejects_unknown_named_de_jump_parameters(self):
+        from jimgw.samplers.config import BlackJAXSwiGConfig
+
+        lh = self._make_mock_single_event_likelihood(
+            waveform_parameter_names=("M_c", "q"),
+        )
+        with pytest.raises(ValueError, match="not sampling parameters"):
+            Jim(
+                likelihood=lh,
+                prior=CombinePrior(
+                    [
+                        UniformPrior(10.0, 80.0, parameter_names=["M_c"]),
+                        UniformPrior(0.125, 1.0, parameter_names=["q"]),
+                    ]
+                ),
+                sampler_config=BlackJAXSwiGConfig(
+                    blocks=[["M_c"], ["q"]],
+                    de_jump_blocks=[{"parameters": ["missing"]}],
+                    n_live=4,
+                    n_delete_frac=0.5,
+                ),
+            )
+
+    @pytest.mark.parametrize("attempts", [4, 8], ids=["h5-cde4", "h6-cde8"])
+    def test_swig_resolves_complementary_de_block_and_cache_price(self, attempts):
+        from jimgw.samplers.config import BlackJAXSwiGConfig
+
+        intrinsic = [f"x{i}" for i in range(8)]
+        prior = CombinePrior(
+            [
+                *(UniformPrior(0.0, 1.0, parameter_names=[name]) for name in intrinsic),
+                UniformPrior(0.0, 3.1416, parameter_names=["psi"]),
+            ]
+        )
+        likelihood = self._make_mock_single_event_likelihood(
+            waveform_parameter_names=tuple(intrinsic),
+            fixed_parameters={"ra": 0.0, "dec": 0.0, "t_c": 0.0},
+        )
+        config = BlackJAXSwiGConfig(
+            blocks=[intrinsic, ["psi"]],
+            block_kernel_modes=["slice", "periodic-uniform-independence"],
+            complementary_de_jump_block={
+                "parameters": intrinsic,
+                "attempts": attempts,
+            },
+            num_gibbs_sweeps=1,
+            num_inner_steps_per_dim=1,
+            n_live=4,
+            n_delete_frac=0.5,
+        )
+
+        jim = Jim(
+            likelihood=likelihood,
+            prior=prior,
+            sampler_config=config,
+            periodic={"psi": (0.0, 3.1416)},
+        )
+
+        resolved = jim._sampler_backend_kwargs["resolved_complementary_de_jump_block"]
+        assert resolved == (tuple(range(8)), True, attempts)
+        assert jim.sampler._resolved_complementary_de_jump_block == resolved
+
     def test_sample_transform_overwrites_unconsumed_prior_parameter_raises(self):
         # Prior defines both M_c and M_c_unbounded; sample transform maps
         # M_c → M_c_unbounded without consuming M_c_unbounded — silent overwrite.

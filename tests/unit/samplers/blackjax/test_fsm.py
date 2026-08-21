@@ -16,6 +16,7 @@ from blackjax.ns.nss import slice_constrained_step
 from jax.sharding import Mesh
 
 from jimgw.samplers.blackjax._fsm import (
+    SegmentInfo,
     SegmentSchedule,
     run_segment,
     slice_randoms_from_keys,
@@ -27,9 +28,14 @@ from jimgw.samplers.blackjax.nss import (
 )
 from jimgw.samplers.blackjax.sharding import update_with_mcmc_take_last_replicated
 from jimgw.samplers.blackjax.swig import (
+    _COMPLEMENTARY_DE_KEY_DOMAIN,
     CachedSliceState,
+    _apply_complementary_de_proposals,
     _build_swig_constrained_step,
     _build_swig_constrained_step_lockstep,
+    _ComplementaryDEProposalSchedule,
+    _prepare_complementary_de_proposals,
+    _sample_signed_permuted_covariance_basis,
 )
 from jimgw.samplers.periodic import to_prior_space_proposal
 
@@ -221,7 +227,7 @@ def _toy_log_likelihood_from_cache(position, cache):
     return -jnp.sum((cache - 0.3) ** 2) - jnp.sum((position[3:] - 0.1) ** 2)
 
 
-def _swig_builders(per_slice_info=False):
+def _swig_builders(per_slice_info=False, num_slice_steps_by_block=None):
     common = {
         "log_prior_fn": _toy_log_prior,
         "build_cache": _toy_build_cache,
@@ -229,6 +235,7 @@ def _swig_builders(per_slice_info=False):
         "rebuild_required_by_block": _REBUILD_BY_BLOCK,
         "num_gibbs_sweeps": 2,
         "num_inner_steps_per_dim": 1,
+        "num_slice_steps_by_block": num_slice_steps_by_block,
         "max_steps": 10,
         "max_shrinkage": 100,
         "periodic": {4: (0.0, 2.0)},
@@ -312,6 +319,24 @@ def test_swig_factor_direction_has_mahalanobis_norm_two():
     )
 
 
+def test_swig_covariance_basis_uses_each_signed_factor_column_once():
+    covariance_factor = jnp.asarray(
+        [
+            [1.2, 0.0, 0.0],
+            [0.3, 0.8, 0.0],
+            [-0.2, 0.1, 0.5],
+        ]
+    )
+    directions = _sample_signed_permuted_covariance_basis(
+        jax.random.key(41), covariance_factor
+    )
+
+    whitened = jnp.linalg.solve(covariance_factor, directions.T).T
+    np.testing.assert_array_equal(jnp.sum(jnp.abs(whitened) > 0.0, axis=1), 1)
+    np.testing.assert_array_equal(jnp.sum(jnp.abs(whitened) > 0.0, axis=0), 1)
+    np.testing.assert_allclose(jnp.max(jnp.abs(whitened), axis=1), 2.0)
+
+
 def test_swig_legacy_covariance_path_matches_lockstep_bitwise():
     lockstep, fsm = _swig_builders()
     key = jax.random.key(29)
@@ -343,6 +368,926 @@ def test_swig_legacy_covariance_path_matches_lockstep_bitwise():
         strict=True,
     ):
         np.testing.assert_array_equal(actual, expected)
+
+
+def test_swig_default_block_budget_matches_the_legacy_dimension_budget_bitwise():
+    _, default_budget = _swig_builders()
+    _, explicit_legacy_budget = _swig_builders(num_slice_steps_by_block=(2, 1, 1, 2))
+    key = jax.random.key(32)
+    position = jnp.linspace(-0.4, 0.4, _N_DIMS)
+    threshold = jnp.asarray(-25.0)
+    state = _particle_state(position, threshold)
+    covariance_factors = _block_covariance_factors()
+
+    def run(step):
+        return jax.jit(
+            lambda: step(
+                key,
+                state,
+                threshold,
+                block_covariance_factors=covariance_factors,
+            )
+        )()
+
+    expected = run(default_budget)
+    actual = run(explicit_legacy_budget)
+    for actual_leaf, expected_leaf in zip(
+        jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+    ):
+        np.testing.assert_array_equal(actual_leaf, expected_leaf)
+
+
+_H2_REBUILD_BY_BLOCK = {
+    tuple(range(8)): True,
+    (8,): True,
+    (9,): True,
+    (10, 11): False,
+    (12,): False,
+    (13, 14): False,
+}
+_H2_N_DIMS = 15
+
+
+def _h2_builders(
+    *,
+    per_slice_info=False,
+    direction_mode="covariance-basis-8d",
+    num_slice_steps_by_block=None,
+    build_cache=None,
+    log_likelihood_from_cache_fn=None,
+    block_kernel_modes=None,
+    periodic=None,
+    resolved_complementary_de_jump_block=None,
+):
+    build_cache = build_cache or (lambda position: jnp.tanh(position[:10]))
+    log_likelihood_from_cache_fn = log_likelihood_from_cache_fn or (
+        lambda position, cache: (
+            -jnp.sum((cache - 0.2) ** 2) - jnp.sum((position[10:] + 0.1) ** 2)
+        )
+    )
+    common = {
+        "log_prior_fn": _toy_log_prior,
+        "build_cache": build_cache,
+        "log_likelihood_from_cache_fn": log_likelihood_from_cache_fn,
+        "rebuild_required_by_block": _H2_REBUILD_BY_BLOCK,
+        "num_gibbs_sweeps": 1,
+        "num_inner_steps_per_dim": 1,
+        "num_slice_steps_by_block": num_slice_steps_by_block,
+        "max_steps": 4,
+        "max_shrinkage": 30,
+        "periodic": periodic,
+        "n_dims": _H2_N_DIMS,
+        "direction_mode": direction_mode,
+        "block_kernel_modes": block_kernel_modes,
+        "resolved_complementary_de_jump_block": (resolved_complementary_de_jump_block),
+    }
+    return (
+        _build_swig_constrained_step_lockstep(**common),
+        _build_swig_constrained_step(**common, per_slice_info=per_slice_info),
+    )
+
+
+@pytest.mark.parametrize("attempts", [4, 8], ids=["h5-cde4", "h6-cde8"])
+def test_swig_complementary_de_uses_fixed_strict_parent_excluded_complement(attempts):
+    modes = (
+        "slice",
+        "periodic-uniform-independence",
+        "periodic-uniform-independence",
+        "slice",
+        "periodic-uniform-independence",
+        "slice",
+    )
+    _, fsm = _h2_builders(
+        direction_mode="covariance",
+        block_kernel_modes=modes,
+        periodic={8: (-jnp.pi, jnp.pi), 9: (-jnp.pi, jnp.pi), 12: (0.0, jnp.pi)},
+        resolved_complementary_de_jump_block=(tuple(range(8)), True, attempts),
+    )
+    threshold = jnp.asarray(-20.0)
+    live_positions = jax.random.normal(jax.random.key(74), (12, _H2_N_DIMS)) * 0.05
+    live_loglikelihoods = jnp.ones((12,))
+    live_loglikelihoods = live_loglikelihoods.at[jnp.asarray([1, 7])].set(threshold)
+    parent_index = jnp.asarray(4, dtype=jnp.int32)
+
+    _, info = jax.jit(
+        lambda: fsm(
+            jax.random.key(75),
+            _h2_particle_state(live_positions[parent_index], threshold),
+            threshold,
+            block_covariance_factors=_h2_covariance_factors(),
+            live_positions=live_positions,
+            live_loglikelihoods=live_loglikelihoods,
+            parent_index=parent_index,
+        )
+    )()
+
+    donors = np.asarray(info.complementary_de_donor_indices_by_attempt)
+    assert donors.shape == (attempts, 2)
+    assert np.all(donors[:, 0] != donors[:, 1])
+    assert not np.any(donors == int(parent_index))
+    assert np.all(np.asarray(live_loglikelihoods)[donors] > float(threshold))
+    np.testing.assert_array_equal(
+        info.complementary_de_donor_policy_violations_by_attempt,
+        np.zeros((attempts,), dtype=bool),
+    )
+    np.testing.assert_array_equal(info.complementary_de_complement_size, 9)
+    np.testing.assert_array_equal(info.complementary_de_parent_index, parent_index)
+    np.testing.assert_array_equal(info.num_complementary_de_attempts, attempts)
+
+
+@pytest.mark.parametrize("attempts", [1, 2, 3, 5, 6, 7, 9])
+def test_swig_complementary_de_builders_reject_unregistered_attempt_budgets(attempts):
+    modes = (
+        "slice",
+        "periodic-uniform-independence",
+        "periodic-uniform-independence",
+        "slice",
+        "periodic-uniform-independence",
+        "slice",
+    )
+
+    with pytest.raises(ValueError, match="exactly four or eight attempts"):
+        _h2_builders(
+            direction_mode="covariance",
+            block_kernel_modes=modes,
+            periodic={
+                8: (-jnp.pi, jnp.pi),
+                9: (-jnp.pi, jnp.pi),
+                12: (0.0, jnp.pi),
+            },
+            resolved_complementary_de_jump_block=(
+                tuple(range(8)),
+                True,
+                attempts,
+            ),
+        )
+
+
+def test_complementary_de_redraws_ordered_pairs_from_one_frozen_complement():
+    key = jax.random.key(78)
+    live_positions = jnp.arange(90, dtype=jnp.float32).reshape(10, 9) / 100.0
+    threshold = jnp.asarray(0.0)
+    live_loglikelihoods = jnp.asarray(
+        [1.0, 0.0, 2.0, 3.0, 0.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    )
+    parent_index = jnp.asarray(5, dtype=jnp.int32)
+    schedule = _prepare_complementary_de_proposals(
+        key,
+        live_positions=live_positions,
+        live_loglikelihoods=live_loglikelihoods,
+        loglikelihood_0=threshold,
+        parent_index=parent_index,
+        parameter_indices=tuple(range(8)),
+        attempts=4,
+    )
+
+    eligible = (live_loglikelihoods > threshold) & (
+        jnp.arange(live_positions.shape[0]) != parent_index
+    )
+    expected_pairs = []
+    expected_key_data = []
+    for attempt_index in range(4):
+        operation_key = jax.random.fold_in(
+            key, _COMPLEMENTARY_DE_KEY_DOMAIN + attempt_index
+        )
+        pair_key, _ = jax.random.split(operation_key)
+        expected_pairs.append(
+            jax.random.choice(
+                pair_key,
+                live_positions.shape[0],
+                shape=(2,),
+                replace=False,
+                p=eligible.astype(jnp.float32) / eligible.sum(),
+            )
+        )
+        expected_key_data.append(jax.random.key_data(operation_key))
+
+    expected_pairs = jnp.stack(expected_pairs)
+    np.testing.assert_array_equal(schedule.donor_indices, expected_pairs)
+    np.testing.assert_array_equal(
+        schedule.operation_key_data, jnp.stack(expected_key_data)
+    )
+    assert np.unique(np.asarray(schedule.operation_key_data), axis=0).shape[0] == 4
+    for attempt_index, (donor_a, donor_b) in enumerate(np.asarray(expected_pairs)):
+        expected_displacement = np.zeros((9,), dtype=np.float32)
+        expected_displacement[:8] = np.asarray(
+            live_positions[donor_a, :8] - live_positions[donor_b, :8]
+        )
+        np.testing.assert_array_equal(
+            schedule.displacement[attempt_index], expected_displacement
+        )
+        reverse_displacement = np.asarray(
+            live_positions[donor_b, :8] - live_positions[donor_a, :8]
+        )
+        np.testing.assert_array_equal(reverse_displacement, -expected_displacement[:8])
+
+
+def test_eight_attempt_complementary_de_appends_to_four_attempt_schedule():
+    key = jax.random.key(780)
+    live_positions = jnp.arange(108, dtype=jnp.float32).reshape(12, 9) / 100.0
+    threshold = jnp.asarray(0.0)
+    live_loglikelihoods = jnp.asarray(
+        [1.0, 0.0, 2.0, 3.0, 0.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+    )
+    kwargs = {
+        "live_positions": live_positions,
+        "live_loglikelihoods": live_loglikelihoods,
+        "loglikelihood_0": threshold,
+        "parent_index": jnp.asarray(5, dtype=jnp.int32),
+        "parameter_indices": tuple(range(8)),
+    }
+
+    four = _prepare_complementary_de_proposals(key, attempts=4, **kwargs)
+    eight = _prepare_complementary_de_proposals(key, attempts=8, **kwargs)
+
+    for four_values, eight_values in (
+        (four.operation_key_data, eight.operation_key_data),
+        (four.donor_indices, eight.donor_indices),
+        (four.donor_policy_violations, eight.donor_policy_violations),
+        (four.displacement, eight.displacement),
+    ):
+        np.testing.assert_array_equal(eight_values[:4], four_values)
+    np.testing.assert_array_equal(eight.complement_size, four.complement_size)
+    assert eight.operation_key_data.shape == (8, 2)
+    assert eight.donor_indices.shape == (8, 2)
+    assert eight.displacement.shape == (8, 9)
+    expected_appended_keys = jnp.stack(
+        [
+            jax.random.key_data(
+                jax.random.fold_in(key, _COMPLEMENTARY_DE_KEY_DOMAIN + index)
+            )
+            for index in range(4, 8)
+        ]
+    )
+    np.testing.assert_array_equal(eight.operation_key_data[4:], expected_appended_keys)
+
+
+def test_complementary_de_fails_closed_when_strict_complement_is_too_small():
+    live_positions = jnp.arange(36, dtype=jnp.float32).reshape(4, 9) / 100.0
+    threshold = jnp.asarray(1.0)
+    schedule = _prepare_complementary_de_proposals(
+        jax.random.key(79),
+        live_positions=live_positions,
+        live_loglikelihoods=jnp.asarray([1.0, 2.0, 1.0, 0.0]),
+        loglikelihood_0=threshold,
+        parent_index=jnp.asarray(0, dtype=jnp.int32),
+        parameter_indices=tuple(range(8)),
+        attempts=4,
+    )
+
+    np.testing.assert_array_equal(schedule.complement_size, 1)
+    np.testing.assert_array_equal(
+        schedule.donor_indices, np.full((4, 2), -1, dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        schedule.donor_policy_violations, np.ones((4,), dtype=bool)
+    )
+    np.testing.assert_array_equal(schedule.displacement, np.zeros((4, 9)))
+
+
+def test_rejected_complementary_de_restores_h4_endpoint_and_cache_bitwise():
+    position = jnp.linspace(0.1, 0.9, 9)
+    initial = CachedSliceState(
+        position=position,
+        logdensity=jnp.asarray(0.0),
+        loglikelihood=jnp.asarray(1.0),
+        loglikelihood_birth=jnp.asarray(0.0),
+        cache=position[:8] ** 2,
+    )
+    schedule = _ComplementaryDEProposalSchedule(
+        operation_key_data=jnp.stack(
+            [
+                jax.random.key_data(jax.random.fold_in(jax.random.key(80), index))
+                for index in range(4)
+            ]
+        ),
+        displacement=jnp.full((4, 9), 0.01),
+        donor_indices=jnp.asarray([[1, 2], [2, 1], [3, 4], [4, 3]]),
+        donor_policy_violations=jnp.zeros((4,), dtype=bool),
+        complement_size=jnp.asarray(8, dtype=jnp.int32),
+    )
+
+    def tied_candidate(candidate, cache):
+        del cache
+        return jnp.asarray(0.0), jnp.asarray(0.0), candidate[:8] ** 2
+
+    actual, info = _apply_complementary_de_proposals(
+        schedule,
+        initial,
+        jnp.asarray(0.0),
+        eval_candidate=tied_candidate,
+        wrap_position=lambda candidate: candidate,
+    )
+
+    for expected_leaf, actual_leaf in zip(
+        jax.tree.leaves(initial), jax.tree.leaves(actual), strict=True
+    ):
+        np.testing.assert_array_equal(actual_leaf, expected_leaf)
+    np.testing.assert_array_equal(info.acceptances, np.zeros((4,), dtype=bool))
+
+
+def test_accepted_complementary_de_cache_matches_rebuild_and_next_cache_hit():
+    position = jnp.linspace(0.1, 0.5, 9)
+    initial = CachedSliceState(
+        position=position,
+        logdensity=jnp.asarray(0.0),
+        loglikelihood=jnp.asarray(-1.0),
+        loglikelihood_birth=jnp.asarray(-10.0),
+        cache=position[:8] ** 2,
+    )
+    displacements = jnp.zeros((4, 9)).at[:, 0].set(0.01)
+    schedule = _ComplementaryDEProposalSchedule(
+        operation_key_data=jnp.stack(
+            [
+                jax.random.key_data(jax.random.fold_in(jax.random.key(81), index))
+                for index in range(4)
+            ]
+        ),
+        displacement=displacements,
+        donor_indices=jnp.asarray([[1, 2], [2, 1], [3, 4], [4, 3]]),
+        donor_policy_violations=jnp.zeros((4,), dtype=bool),
+        complement_size=jnp.asarray(8, dtype=jnp.int32),
+    )
+    evaluations = []
+
+    def rebuild_candidate(candidate, cache):
+        del cache
+        evaluations.append(candidate)
+        rebuilt = candidate[:8] ** 2
+        return jnp.asarray(0.0), -jnp.sum((rebuilt - 0.25) ** 2), rebuilt
+
+    actual, info = _apply_complementary_de_proposals(
+        schedule,
+        initial,
+        jnp.asarray(-10.0),
+        eval_candidate=rebuild_candidate,
+        wrap_position=lambda candidate: candidate,
+    )
+
+    expected_cache = actual.position[:8] ** 2
+    assert len(evaluations) == 4
+    np.testing.assert_array_equal(info.acceptances, np.ones((4,), dtype=bool))
+    np.testing.assert_array_equal(actual.cache, expected_cache)
+    np.testing.assert_array_equal(
+        actual.loglikelihood, -jnp.sum((expected_cache - 0.25) ** 2)
+    )
+    next_position = actual.position.at[8].add(0.125)
+    cache_hit_loglikelihood = (
+        -jnp.sum((actual.cache - 0.25) ** 2) - next_position[8] ** 2
+    )
+    rebuilt_loglikelihood = (
+        -jnp.sum((next_position[:8] ** 2 - 0.25) ** 2) - next_position[8] ** 2
+    )
+    np.testing.assert_array_equal(cache_hit_loglikelihood, rebuilt_loglikelihood)
+
+
+def test_complementary_de_mh_uses_full_coupled_prior_ratio():
+    position = jnp.zeros((9,)).at[8].set(1.0)
+    initial = CachedSliceState(
+        position=position,
+        logdensity=jnp.asarray(0.0),
+        loglikelihood=jnp.asarray(0.0),
+        loglikelihood_birth=jnp.asarray(-1.0),
+        cache=position[:8] ** 2,
+    )
+    operation_key = jax.random.key(2)
+    schedule = _ComplementaryDEProposalSchedule(
+        operation_key_data=jax.random.key_data(operation_key)[None, :],
+        displacement=jnp.zeros((1, 9)).at[0, 0].set(0.1),
+        donor_indices=jnp.asarray([[1, 2]]),
+        donor_policy_violations=jnp.zeros((1,), dtype=bool),
+        complement_size=jnp.asarray(8, dtype=jnp.int32),
+    )
+
+    def coupled_prior_candidate(candidate, cache):
+        return -candidate[0] * candidate[8], jnp.asarray(0.0), cache
+
+    actual, info = _apply_complementary_de_proposals(
+        schedule,
+        initial,
+        jnp.asarray(-1.0),
+        eval_candidate=coupled_prior_candidate,
+        wrap_position=lambda candidate: candidate,
+    )
+
+    _, accept_key = jax.random.split(operation_key)
+    expected_acceptance = jnp.log(jax.random.uniform(accept_key)) < -0.1
+    np.testing.assert_array_equal(expected_acceptance, False)
+    np.testing.assert_array_equal(info.acceptances, expected_acceptance[None])
+    np.testing.assert_array_equal(actual.position, initial.position)
+
+
+@pytest.mark.parametrize("attempts", [4, 8], ids=["h5-cde4", "h6-cde8"])
+def test_swig_complementary_de_fsm_matches_lockstep_pathwise(attempts):
+    modes = (
+        "slice",
+        "periodic-uniform-independence",
+        "periodic-uniform-independence",
+        "slice",
+        "periodic-uniform-independence",
+        "slice",
+    )
+    lockstep, fsm = _h2_builders(
+        direction_mode="covariance",
+        block_kernel_modes=modes,
+        periodic={8: (-jnp.pi, jnp.pi), 9: (-jnp.pi, jnp.pi), 12: (0.0, jnp.pi)},
+        resolved_complementary_de_jump_block=(tuple(range(8)), True, attempts),
+    )
+    live_positions = jax.random.normal(jax.random.key(76), (16, _H2_N_DIMS)) * 0.05
+    live_loglikelihoods = jnp.ones((16,))
+    parent_indices = jnp.asarray([0, 2, 4, 6, 8, 10, 12, 14], dtype=jnp.int32)
+    keys = jax.random.split(jax.random.key(77), parent_indices.size)
+    thresholds = jnp.full((parent_indices.size,), -20.0)
+    factors = _h2_covariance_factors()
+
+    def run(step):
+        return jax.jit(
+            jax.vmap(
+                lambda key, parent_index, threshold: step(
+                    key,
+                    _h2_particle_state(live_positions[parent_index], threshold),
+                    threshold,
+                    block_covariance_factors=factors,
+                    live_positions=live_positions,
+                    live_loglikelihoods=live_loglikelihoods,
+                    parent_index=parent_index,
+                )
+            )
+        )(keys, parent_indices, thresholds)
+
+    expected = run(lockstep)
+    actual = run(fsm)
+    for actual_leaf, expected_leaf in zip(
+        jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+    ):
+        np.testing.assert_array_equal(actual_leaf, expected_leaf)
+
+
+def test_forced_reject_h5_reproduces_h4_endpoint_bitwise():
+    modes = (
+        "slice",
+        "periodic-uniform-independence",
+        "periodic-uniform-independence",
+        "slice",
+        "periodic-uniform-independence",
+        "slice",
+    )
+    common = {
+        "direction_mode": "covariance",
+        "block_kernel_modes": modes,
+        "periodic": {
+            8: (-jnp.pi, jnp.pi),
+            9: (-jnp.pi, jnp.pi),
+            12: (0.0, jnp.pi),
+        },
+    }
+    _, h4 = _h2_builders(**common)
+    _, h5 = _h2_builders(
+        **common,
+        resolved_complementary_de_jump_block=(tuple(range(8)), True, 4),
+    )
+    position = jnp.linspace(-0.1, 0.1, _H2_N_DIMS)
+    threshold = jnp.asarray(-20.0)
+    live_positions = jnp.broadcast_to(position, (12, _H2_N_DIMS))
+    live_positions = live_positions.at[:, 0].add(
+        100.0 * jnp.arange(12, dtype=position.dtype)
+    )
+    live_loglikelihoods = jnp.ones((12,))
+    parent_index = jnp.asarray(0, dtype=jnp.int32)
+    state = _h2_particle_state(position, threshold)
+    factors = _h2_covariance_factors()
+    key = jax.random.key(83)
+
+    def run(step):
+        return jax.jit(
+            lambda: step(
+                key,
+                state,
+                threshold,
+                block_covariance_factors=factors,
+                live_positions=live_positions,
+                live_loglikelihoods=live_loglikelihoods,
+                parent_index=parent_index,
+            )
+        )()
+
+    h4_state, h4_info = run(h4)
+    h5_state, h5_info = run(h5)
+    for expected_leaf, actual_leaf in zip(
+        jax.tree.leaves(h4_state), jax.tree.leaves(h5_state), strict=True
+    ):
+        np.testing.assert_array_equal(actual_leaf, expected_leaf)
+    for field in (
+        "is_accepted",
+        "num_expansions",
+        "num_shrink",
+        "num_periodic_uniform_independence_attempts",
+        "num_periodic_uniform_independence_acceptances",
+        "num_periodic_uniform_independence_attempts_by_block",
+        "num_periodic_uniform_independence_acceptances_by_block",
+    ):
+        np.testing.assert_array_equal(getattr(h5_info, field), getattr(h4_info, field))
+    np.testing.assert_array_equal(
+        h5_info.complementary_de_acceptances_by_attempt,
+        np.zeros((4,), dtype=bool),
+    )
+
+
+def _h2_covariance_factors():
+    return tuple(
+        jnp.diag(jnp.linspace(0.4, 1.1, len(indices)))
+        for indices in _H2_REBUILD_BY_BLOCK
+    )
+
+
+def _h2_particle_state(position, threshold):
+    cache = jnp.tanh(position[:10])
+    return StateWithLogLikelihood(
+        position=position,
+        logdensity=_toy_log_prior(position),
+        loglikelihood=-jnp.sum((cache - 0.2) ** 2)
+        - jnp.sum((position[10:] + 0.1) ** 2),
+        loglikelihood_birth=jnp.asarray(threshold),
+    )
+
+
+def test_swig_covariance_basis_fsm_matches_lockstep_bitwise():
+    lockstep, fsm = _h2_builders()
+    keys = jax.random.split(jax.random.key(43), 8)
+    positions = jax.random.normal(jax.random.key(44), (8, _H2_N_DIMS)) * 0.2
+    thresholds = jnp.linspace(-40.0, -3.0, 8)
+    factors = _h2_covariance_factors()
+
+    def run(step):
+        return jax.jit(
+            jax.vmap(
+                lambda key, position, threshold: step(
+                    key,
+                    _h2_particle_state(position, threshold),
+                    threshold,
+                    block_covariance_factors=factors,
+                )
+            )
+        )(keys, positions, thresholds)
+
+    expected = run(lockstep)
+    actual = run(fsm)
+    for actual_leaf, expected_leaf in zip(
+        jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+    ):
+        np.testing.assert_array_equal(actual_leaf, expected_leaf)
+
+
+def test_swig_explicit_block_budget_fsm_matches_lockstep_bitwise():
+    lockstep, fsm = _h2_builders(
+        direction_mode="covariance",
+        num_slice_steps_by_block=(5, 1, 1, 2, 1, 2),
+    )
+    keys = jax.random.split(jax.random.key(48), 8)
+    positions = jax.random.normal(jax.random.key(49), (8, _H2_N_DIMS)) * 0.2
+    thresholds = jnp.linspace(-40.0, -3.0, 8)
+    factors = _h2_covariance_factors()
+
+    def run(step):
+        return jax.jit(
+            jax.vmap(
+                lambda key, position, threshold: step(
+                    key,
+                    _h2_particle_state(position, threshold),
+                    threshold,
+                    block_covariance_factors=factors,
+                )
+            )
+        )(keys, positions, thresholds)
+
+    expected = run(lockstep)
+    actual = run(fsm)
+    for actual_leaf, expected_leaf in zip(
+        jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+    ):
+        np.testing.assert_array_equal(actual_leaf, expected_leaf)
+
+
+def test_swig_periodic_uniform_independence_fsm_matches_lockstep_pathwise():
+    modes = (
+        "slice",
+        "periodic-uniform-independence",
+        "periodic-uniform-independence",
+        "slice",
+        "periodic-uniform-independence",
+        "slice",
+    )
+    lockstep, fsm = _h2_builders(
+        direction_mode="covariance",
+        block_kernel_modes=modes,
+        periodic={8: (-jnp.pi, jnp.pi), 9: (-jnp.pi, jnp.pi), 12: (0.0, jnp.pi)},
+    )
+    keys = jax.random.split(jax.random.key(52), 16)
+    positions = jax.random.normal(jax.random.key(53), (16, _H2_N_DIMS)) * 0.2
+    thresholds = jnp.linspace(-40.0, -3.0, 16)
+    factors = _h2_covariance_factors()
+
+    def run(step):
+        return jax.jit(
+            jax.vmap(
+                lambda key, position, threshold: step(
+                    key,
+                    _h2_particle_state(position, threshold),
+                    threshold,
+                    block_covariance_factors=factors,
+                )
+            )
+        )(keys, positions, thresholds)
+
+    expected = run(lockstep)
+    actual = run(fsm)
+    for actual_leaf, expected_leaf in zip(
+        jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+    ):
+        np.testing.assert_array_equal(actual_leaf, expected_leaf)
+
+
+@pytest.mark.parametrize(
+    "complementary_de_attempts",
+    [None, 4, 8],
+    ids=["h4", "h5-cde4", "h6-cde8"],
+)
+def test_swig_periodic_uniform_independence_keeps_two_segments_and_12_slices(
+    complementary_de_attempts,
+):
+    modes = (
+        "slice",
+        "periodic-uniform-independence",
+        "periodic-uniform-independence",
+        "slice",
+        "periodic-uniform-independence",
+        "slice",
+    )
+    _, fsm = _h2_builders(
+        per_slice_info=True,
+        direction_mode="covariance",
+        block_kernel_modes=modes,
+        periodic={8: (-jnp.pi, jnp.pi), 9: (-jnp.pi, jnp.pi), 12: (0.0, jnp.pi)},
+        resolved_complementary_de_jump_block=(
+            (tuple(range(8)), True, complementary_de_attempts)
+            if complementary_de_attempts is not None
+            else None
+        ),
+    )
+    keys = jax.random.split(jax.random.key(54), 4)
+    live_positions = jax.random.normal(jax.random.key(55), (16, _H2_N_DIMS)) * 0.2
+    positions = live_positions[:4]
+    live_loglikelihoods = jnp.ones((16,))
+    parent_indices = jnp.arange(4, dtype=jnp.int32)
+    thresholds = jnp.linspace(-20.0, -3.0, 4)
+    factors = _h2_covariance_factors()
+
+    def batched(keys, positions, thresholds, parent_indices):
+        return jax.vmap(
+            lambda key, position, threshold, parent_index: fsm(
+                key,
+                _h2_particle_state(position, threshold),
+                threshold,
+                block_covariance_factors=factors,
+                live_positions=live_positions,
+                live_loglikelihoods=live_loglikelihoods,
+                parent_index=parent_index,
+            )
+        )(keys, positions, thresholds, parent_indices)
+
+    lowered = jax.jit(batched).lower(keys, positions, thresholds, parent_indices)
+    _, info = lowered.compile()(keys, positions, thresholds, parent_indices)
+    assert info.num_expansions.shape == (4, 12)
+    assert info.num_shrink.shape == (4, 12)
+    np.testing.assert_array_equal(
+        info.num_periodic_uniform_independence_attempts,
+        jnp.full((4,), 3),
+    )
+    total_updates = info.num_expansions.shape[1] + int(
+        np.asarray(info.num_periodic_uniform_independence_attempts)[0]
+    )
+    if complementary_de_attempts is not None:
+        np.testing.assert_array_equal(
+            info.num_complementary_de_attempts,
+            jnp.full((4,), complementary_de_attempts),
+        )
+        total_updates += int(np.asarray(info.num_complementary_de_attempts)[0])
+    assert total_updates == (
+        15 if complementary_de_attempts is None else 15 + complementary_de_attempts
+    )
+    if complementary_de_attempts == 8:
+        assert total_updates == 23
+    main_text = lowered.as_text().split("func.func private", 1)[0]
+    assert main_text.count("stablehlo.while") == 2
+
+
+def test_swig_explicit_all_slice_modes_match_no_feature_bitwise():
+    _, default_step = _h2_builders()
+    _, explicit_step = _h2_builders(block_kernel_modes=("slice",) * 6)
+    key = jax.random.key(56)
+    threshold = jnp.asarray(-10.0)
+    position = jnp.linspace(-0.2, 0.2, _H2_N_DIMS)
+    state = _h2_particle_state(position, threshold)
+    factors = _h2_covariance_factors()
+
+    expected = jax.jit(
+        lambda: default_step(
+            key,
+            state,
+            threshold,
+            block_covariance_factors=factors,
+        )
+    )()
+    actual = jax.jit(
+        lambda: explicit_step(
+            key,
+            state,
+            threshold,
+            block_covariance_factors=factors,
+        )
+    )()
+    for actual_leaf, expected_leaf in zip(
+        jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+    ):
+        np.testing.assert_array_equal(actual_leaf, expected_leaf)
+
+
+def test_swig_periodic_uniform_independence_fsm_calls_likelihood_once():
+    evaluations = []
+
+    def log_likelihood_from_cache(position, cache):
+        del cache
+        jax.debug.callback(lambda value: evaluations.append(float(value)), position[0])
+        return jnp.asarray(0.0)
+
+    step = _build_swig_constrained_step(
+        log_prior_fn=lambda position: jnp.log(2.0 * position[0]),
+        build_cache=lambda position: position[0],
+        log_likelihood_from_cache_fn=log_likelihood_from_cache,
+        rebuild_required_by_block={(0,): False},
+        num_gibbs_sweeps=1,
+        num_inner_steps_per_dim=1,
+        max_steps=4,
+        max_shrinkage=30,
+        periodic={0: (0.0, 1.0)},
+        n_dims=1,
+        block_kernel_modes=("periodic-uniform-independence",),
+    )
+    position = jnp.asarray([0.5])
+    state = StateWithLogLikelihood(
+        position=position,
+        logdensity=jnp.log(jnp.asarray(1.0)),
+        loglikelihood=jnp.asarray(0.0),
+        loglikelihood_birth=jnp.asarray(-1.0),
+    )
+    _, info = jax.jit(
+        lambda: step(
+            jax.random.key(57),
+            state,
+            jnp.asarray(-1.0),
+            block_covariance_factors=(jnp.ones((1, 1)),),
+        )
+    )()
+    jax.block_until_ready(info.num_periodic_uniform_independence_acceptances)
+
+    assert len(evaluations) == 1
+    np.testing.assert_array_equal(info.num_periodic_uniform_independence_attempts, 1)
+    np.testing.assert_array_equal(info.num_expansions, 0)
+    np.testing.assert_array_equal(info.num_shrink, 0)
+
+
+def test_swig_covariance_basis_changes_only_the_8d_block(monkeypatch):
+    captured = []
+
+    def capture_segment(
+        schedule,
+        state,
+        loglikelihood_0,
+        **kwargs,
+    ):
+        del loglikelihood_0, kwargs
+        captured.append(schedule.directions)
+        n_slices = schedule.directions.shape[0]
+        zeros = jnp.zeros((n_slices,), dtype=int)
+        return state, SegmentInfo(
+            is_accepted=jnp.ones((n_slices,), dtype=bool),
+            num_expansions=zeros,
+            num_shrink=zeros,
+            bracket_left=jnp.zeros((n_slices,)),
+            bracket_right=jnp.zeros((n_slices,)),
+        )
+
+    monkeypatch.setattr(
+        "jimgw.samplers.blackjax.swig.run_segment",
+        capture_segment,
+    )
+    key = jax.random.key(45)
+    threshold = jnp.asarray(-20.0)
+    state = _h2_particle_state(jnp.zeros(_H2_N_DIMS), threshold)
+    factors = _h2_covariance_factors()
+
+    def directions_for(direction_mode):
+        captured.clear()
+        _, step = _h2_builders(direction_mode=direction_mode)
+        step(
+            key,
+            state,
+            threshold,
+            block_covariance_factors=factors,
+        )
+        return jnp.concatenate(tuple(captured))
+
+    basis_directions = directions_for("covariance-basis-8d")
+    covariance_directions = directions_for("covariance")
+
+    assert basis_directions.shape == (15, 15)
+    whitened = jnp.linalg.solve(factors[0], basis_directions[:8, :8].T).T
+    np.testing.assert_array_equal(jnp.sum(jnp.abs(whitened) > 0.0, axis=1), 1)
+    np.testing.assert_array_equal(jnp.sum(jnp.abs(whitened) > 0.0, axis=0), 1)
+    np.testing.assert_allclose(jnp.max(jnp.abs(whitened), axis=1), 2.0)
+    np.testing.assert_array_equal(basis_directions[8:], covariance_directions[8:])
+
+
+def test_swig_covariance_basis_keeps_exact_15_slice_10_plus_5_pricing():
+    cache_calls = []
+    likelihood_calls = []
+
+    def counted_build_cache(position):
+        jax.debug.callback(lambda _: cache_calls.append(None), position[0])
+        return jnp.tanh(position[:10])
+
+    def counted_log_likelihood(position, cache):
+        jax.debug.callback(lambda _: likelihood_calls.append(None), position[0])
+        return -jnp.sum((cache - 0.2) ** 2) - jnp.sum((position[10:] + 0.1) ** 2)
+
+    _, fsm = _h2_builders(
+        per_slice_info=True,
+        build_cache=counted_build_cache,
+        log_likelihood_from_cache_fn=counted_log_likelihood,
+    )
+    threshold = jnp.asarray(-30.0)
+    state = _h2_particle_state(jnp.zeros(_H2_N_DIMS), threshold)
+    result = jax.jit(
+        lambda: fsm(
+            jax.random.key(46),
+            state,
+            threshold,
+            block_covariance_factors=_h2_covariance_factors(),
+        )
+    )()
+    jax.block_until_ready(result)
+    info = jax.device_get(result[1])
+
+    evaluations_per_slice = (
+        np.asarray(info.num_expansions) + np.asarray(info.num_shrink) + 2
+    )
+    assert evaluations_per_slice.shape == (15,)
+    assert len(likelihood_calls) == int(evaluations_per_slice.sum())
+    assert len(cache_calls) == 1 + int(evaluations_per_slice[:10].sum())
+    assert int(evaluations_per_slice[:10].size) == 10
+    assert int(evaluations_per_slice[10:].size) == 5
+
+
+def test_swig_explicit_block_budget_keeps_exact_12_slice_7_plus_5_pricing():
+    cache_calls = []
+    likelihood_calls = []
+
+    def counted_build_cache(position):
+        jax.debug.callback(lambda _: cache_calls.append(None), position[0])
+        return jnp.tanh(position[:10])
+
+    def counted_log_likelihood(position, cache):
+        jax.debug.callback(lambda _: likelihood_calls.append(None), position[0])
+        return -jnp.sum((cache - 0.2) ** 2) - jnp.sum((position[10:] + 0.1) ** 2)
+
+    _, fsm = _h2_builders(
+        per_slice_info=True,
+        direction_mode="covariance",
+        num_slice_steps_by_block=(5, 1, 1, 2, 1, 2),
+        build_cache=counted_build_cache,
+        log_likelihood_from_cache_fn=counted_log_likelihood,
+    )
+    threshold = jnp.asarray(-30.0)
+    state = _h2_particle_state(jnp.zeros(_H2_N_DIMS), threshold)
+    result = jax.jit(
+        lambda: fsm(
+            jax.random.key(47),
+            state,
+            threshold,
+            block_covariance_factors=_h2_covariance_factors(),
+        )
+    )()
+    jax.block_until_ready(result)
+    info = jax.device_get(result[1])
+
+    evaluations_per_slice = (
+        np.asarray(info.num_expansions) + np.asarray(info.num_shrink) + 2
+    )
+    assert evaluations_per_slice.shape == (12,)
+    assert len(likelihood_calls) == int(evaluations_per_slice.sum())
+    assert len(cache_calls) == 1 + int(evaluations_per_slice[:7].sum())
+    assert int(evaluations_per_slice[:7].size) == 7
+    assert int(evaluations_per_slice[7:].size) == 5
 
 
 def test_swig_fsm_per_slice_info_shapes_and_totals():
@@ -667,3 +1612,4 @@ def test_replicated_update_can_fold_inner_steps_without_changing_info_shape():
 
     for leaf in jax.tree.leaves(info):
         assert leaf.shape == (1, n_inner_steps)
+

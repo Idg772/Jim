@@ -19,6 +19,7 @@ from pydantic import BaseModel, Discriminator, Field, field_validator, model_val
 logger = logging.getLogger(__name__)
 
 _SamplerType = TypeVar("_SamplerType", bound=str)
+SUPPORTED_COMPLEMENTARY_DE_ATTEMPTS = (4, 8)
 
 
 class BaseSamplerConfig(BaseModel, Generic[_SamplerType]):
@@ -370,6 +371,29 @@ class BlackJAXNSSConfig(
     termination_dlogz: float = Field(default=0.1, gt=0.0)
 
 
+class DEJumpBlockConfig(BaseModel):
+    """Named sampling-space coordinates for fixed-cost DE jump attempts."""
+
+    model_config = {"extra": "forbid"}
+
+    parameters: list[str]
+    attempts: int = Field(default=1, ge=1)
+
+    @field_validator("parameters")
+    @classmethod
+    def _validate_parameters(cls, parameters: list[str]) -> list[str]:
+        if not parameters:
+            raise ValueError("DE jump block parameters cannot be empty")
+        if any(not name for name in parameters):
+            raise ValueError("DE jump block parameter names cannot be empty")
+        duplicates = sorted({name for name in parameters if parameters.count(name) > 1})
+        if duplicates:
+            raise ValueError(
+                f"parameters appear more than once in a DE jump block: {duplicates}"
+            )
+        return parameters
+
+
 class BlackJAXSwiGConfig(
     BaseSamplerConfig[Literal["blackjax-swig"]],
     _CheckpointMixin,
@@ -381,19 +405,47 @@ class BlackJAXSwiGConfig(
     ``blocks`` are expressed in sampling-space parameter names.
     A supported likelihood validates that they form an exact partition and
     identifies which blocks refresh its cache.
+
+    ``num_slice_steps_by_block`` optionally assigns an exact positive number
+    of slice updates to each block, in ``blocks`` order, per Gibbs sweep. When
+    omitted, every block retains the legacy
+    ``len(block) * num_inner_steps_per_dim`` budget exactly. The explicit form
+    requires ``num_inner_steps_per_dim=1`` so two work budgets cannot conflict.
+
+    ``block_kernel_modes`` optionally replaces selected singleton slice blocks
+    with one exact uniform-independence Metropolis update over their declared
+    periodic support. The uniform proposal is corrected by the full prior
+    density ratio. This fixed-work mode requires one Gibbs sweep, the legacy
+    one-update-per-dimension budget, covariance directions, and no DE moves.
+
+    ``covariance-basis-8d`` is the fixed-work 15D mode: the unique 8D block
+    receives one randomly signed and permuted covariance-factor basis, while
+    every other block retains the established covariance-direction draws.  It
+    deliberately requires one Gibbs sweep and one update per dimension.
     """
 
     type: Literal["blackjax-swig"] = "blackjax-swig"
 
     blocks: list[list[str]]
+    block_kernel_modes: Optional[
+        list[Literal["slice", "periodic-uniform-independence"]]
+    ] = None
     scheduler: Literal["fsm", "pre-fsm-lockstep"] = "fsm"
     n_live: int = 500
     n_delete_frac: float = 0.125
     num_gibbs_sweeps: int = Field(default=2, ge=1)
     num_inner_steps_per_dim: int = Field(default=1, ge=1)
+    num_slice_steps_by_block: Optional[list[Annotated[int, Field(ge=1)]]] = None
     max_steps: int = Field(default=10, ge=1)
     max_shrinkage: int = Field(default=100, ge=1)
     termination_dlogz: float = Field(default=0.1, gt=0.0)
+    direction_mode: Literal["covariance", "de-mix", "covariance-basis-8d"] = (
+        "covariance"
+    )
+    de_fraction: float = Field(default=0.5, gt=0.0, le=1.0)
+    num_de_jumps: int = Field(default=0, ge=0)
+    de_jump_blocks: list[DEJumpBlockConfig] = Field(default_factory=list)
+    complementary_de_jump_block: Optional[DEJumpBlockConfig] = None
 
     @field_validator("blocks")
     @classmethod
@@ -407,6 +459,138 @@ class BlackJAXSwiGConfig(
         if duplicates:
             raise ValueError(f"parameters appear in multiple blocks: {duplicates}")
         return blocks
+
+    @field_validator("de_jump_blocks")
+    @classmethod
+    def _validate_de_jump_blocks(
+        cls, blocks: list[DEJumpBlockConfig]
+    ) -> list[DEJumpBlockConfig]:
+        canonical = [frozenset(block.parameters) for block in blocks]
+        if len(set(canonical)) != len(canonical):
+            raise ValueError("DE jump blocks must target distinct parameter groups")
+        return blocks
+
+    @model_validator(mode="after")
+    def _validate_covariance_basis_mode(self) -> Self:
+        if self.block_kernel_modes is not None and len(self.block_kernel_modes) != len(
+            self.blocks
+        ):
+            raise ValueError(
+                "block_kernel_modes must contain exactly one mode per block"
+            )
+        if self.complementary_de_jump_block is not None:
+            target = self.complementary_de_jump_block.parameters
+            if target not in self.blocks:
+                raise ValueError(
+                    "complementary_de_jump_block parameters must match one complete "
+                    "slice block in blocks order"
+                )
+            if (
+                self.complementary_de_jump_block.attempts
+                not in SUPPORTED_COMPLEMENTARY_DE_ATTEMPTS
+            ):
+                raise ValueError(
+                    "complementary_de_jump_block requires exactly four or eight "
+                    "attempts"
+                )
+            if len(target) != 8:
+                raise ValueError(
+                    "complementary_de_jump_block requires one eight-dimensional block"
+                )
+            if self.scheduler != "fsm":
+                raise ValueError("complementary_de_jump_block requires scheduler='fsm'")
+            if self.num_gibbs_sweeps != 1 or self.num_inner_steps_per_dim != 1:
+                raise ValueError(
+                    "complementary_de_jump_block requires one Gibbs sweep and one "
+                    "update per dimension"
+                )
+            if self.direction_mode != "covariance":
+                raise ValueError(
+                    "complementary_de_jump_block requires covariance directions"
+                )
+            if self.num_de_jumps or self.de_jump_blocks:
+                raise ValueError(
+                    "complementary_de_jump_block cannot be combined with legacy DE"
+                )
+            if self.num_slice_steps_by_block is not None:
+                raise ValueError(
+                    "complementary_de_jump_block cannot be combined with an explicit "
+                    "slice budget"
+                )
+            target_index = self.blocks.index(target)
+            if (
+                self.block_kernel_modes is None
+                or self.block_kernel_modes[target_index] != "slice"
+                or "periodic-uniform-independence" not in self.block_kernel_modes
+            ):
+                raise ValueError(
+                    "complementary_de_jump_block requires a slice target inside the "
+                    "periodic hybrid schedule"
+                )
+        if self.block_kernel_modes is not None:
+            uses_independence = (
+                "periodic-uniform-independence" in self.block_kernel_modes
+            )
+            nonsingleton_independence_blocks = [
+                block
+                for block, mode in zip(
+                    self.blocks, self.block_kernel_modes, strict=True
+                )
+                if mode == "periodic-uniform-independence" and len(block) != 1
+            ]
+            if nonsingleton_independence_blocks:
+                raise ValueError(
+                    "periodic-uniform-independence requires a singleton block"
+                )
+            if uses_independence and self.num_inner_steps_per_dim != 1:
+                raise ValueError(
+                    "periodic-uniform-independence requires exactly one update per block"
+                )
+            if uses_independence and (
+                self.direction_mode != "covariance"
+                or self.num_de_jumps
+                or self.de_jump_blocks
+            ):
+                raise ValueError(
+                    "periodic-uniform-independence cannot be combined with DE or "
+                    "non-covariance direction modes"
+                )
+            if uses_independence and self.num_slice_steps_by_block is not None:
+                raise ValueError(
+                    "periodic-uniform-independence cannot be combined with "
+                    "num_slice_steps_by_block"
+                )
+        if self.num_slice_steps_by_block is not None and len(
+            self.num_slice_steps_by_block
+        ) != len(self.blocks):
+            raise ValueError(
+                "num_slice_steps_by_block must contain exactly one count per block"
+            )
+        if (
+            self.num_slice_steps_by_block is not None
+            and self.num_inner_steps_per_dim != 1
+        ):
+            raise ValueError(
+                "num_slice_steps_by_block requires num_inner_steps_per_dim=1"
+            )
+        if self.direction_mode == "covariance-basis-8d":
+            if self.num_slice_steps_by_block is not None:
+                raise ValueError(
+                    "num_slice_steps_by_block cannot be combined with "
+                    "covariance-basis-8d"
+                )
+            basis_blocks = sum(len(block) == 8 for block in self.blocks)
+            if basis_blocks != 1:
+                raise ValueError("covariance-basis-8d requires exactly one 8D block")
+            if sum(map(len, self.blocks)) != 15:
+                raise ValueError("covariance-basis-8d requires 15 total slice updates")
+            if self.num_gibbs_sweeps != 1:
+                raise ValueError("covariance-basis-8d requires num_gibbs_sweeps=1")
+            if self.num_inner_steps_per_dim != 1:
+                raise ValueError(
+                    "covariance-basis-8d requires num_inner_steps_per_dim=1"
+                )
+        return self
 
 
 class BlackJAXSMCConfig(BaseSamplerConfig[Literal["blackjax-smc"]], _CheckpointMixin):

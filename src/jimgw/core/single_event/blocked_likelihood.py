@@ -30,6 +30,21 @@ def _validate_parameter_blocks(
         )
 
 
+def _validate_parameter_groups(
+    groups: Sequence[Sequence[str]],
+    *,
+    parameter_names: tuple[str, ...],
+) -> None:
+    """Validate named proposal subsets without requiring a partition."""
+    flattened_names = [name for group in groups for name in group]
+    unknown_names = sorted(set(flattened_names) - set(parameter_names))
+    if unknown_names:
+        raise ValueError(
+            "Proposal group parameter(s) "
+            f"{unknown_names} are not sampling parameters {parameter_names}."
+        )
+
+
 def _build_rebuild_required_by_block(
     likelihood: SingleEventLikelihood,
     blocks: Sequence[Sequence[str]],
@@ -51,6 +66,30 @@ def _build_rebuild_required_by_block(
         )
         for block in blocks
     }
+
+
+def _resolve_rebuild_required_by_parameter_groups(
+    likelihood: SingleEventLikelihood,
+    groups: Sequence[Sequence[str]],
+    *,
+    parameter_names: tuple[str, ...],
+    sample_transforms: Sequence[BijectiveTransform],
+    likelihood_transforms: Sequence[NtoMTransform],
+) -> tuple[tuple[tuple[int, ...], bool], ...]:
+    """Resolve optional named proposal groups to indices and cache prices."""
+    waveform_sampling_dependencies = _infer_waveform_sampling_dependencies(
+        likelihood,
+        parameter_names,
+        sample_transforms,
+        likelihood_transforms,
+    )
+    return tuple(
+        (
+            tuple(parameter_names.index(name) for name in group),
+            bool(set(group).intersection(waveform_sampling_dependencies)),
+        )
+        for group in groups
+    )
 
 
 def _infer_waveform_sampling_dependencies(

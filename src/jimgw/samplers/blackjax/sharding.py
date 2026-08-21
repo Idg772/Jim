@@ -9,13 +9,16 @@ endpoints are packed into one homogeneous buffer before they are exchanged.
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 from typing import Any, Optional, cast
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from blackjax.ns.adaptive import AdaptiveNSState
+from blackjax.ns.adaptive import build_kernel as build_adaptive_kernel
 from blackjax.ns.base import NSInfo, StateWithLogLikelihood
+from blackjax.ns.base import delete_fn as default_delete_fn
 from blackjax.ns.integrator import update_integrator
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -209,12 +212,74 @@ def _shard_by_replacement_id(mesh: Mesh, value):
     )(value)
 
 
+def update_with_mcmc_take_last_parent_index(
+    constrained_step_fn: Callable,
+    n_inner_steps: int,
+    n_delete: int,
+) -> Callable:
+    """D1 MCMC replacement update that preserves each original parent index."""
+
+    def update_function(rng_key, state, loglikelihood_0, **step_parameters):
+        choice_key, sample_key = jax.random.split(rng_key)
+        particles = state.particles
+        weights = (particles.loglikelihood > loglikelihood_0).astype(jnp.float32)
+        weights = jnp.where(weights.sum() > 0.0, weights, jnp.ones_like(weights))
+        start_idx = jax.random.choice(
+            choice_key,
+            len(weights),
+            shape=(n_delete,),
+            p=weights / weights.sum(),
+            replace=True,
+        )
+        start_states = jax.tree.map(lambda x: x[start_idx], particles)
+        sample_keys = jax.random.split(sample_key, n_delete)
+
+        def run_chain(key, chain_state, parent_index):
+            keys = jax.random.split(key, n_inner_steps)
+
+            def body_fn(current_state, step_key):
+                return constrained_step_fn(
+                    step_key,
+                    current_state,
+                    loglikelihood_0,
+                    parent_index=parent_index,
+                    **step_parameters,
+                )
+
+            return jax.lax.scan(body_fn, chain_state, keys)
+
+        return jax.vmap(run_chain)(sample_keys, start_states, start_idx)
+
+    return update_function
+
+
+def build_from_mcmc_kernel_with_parent_index(
+    constrained_step_fn: Callable,
+    n_inner_steps: int,
+    update_inner_kernel_params_fn: Callable,
+    n_delete: int,
+) -> Callable:
+    """Build an adaptive D1 NS kernel with lane-local original parent indices."""
+    inner_kernel = update_with_mcmc_take_last_parent_index(
+        constrained_step_fn,
+        n_inner_steps=n_inner_steps,
+        n_delete=n_delete,
+    )
+    delete_fn = partial(default_delete_fn, num_delete=n_delete)
+    return build_adaptive_kernel(
+        delete_fn,
+        inner_kernel,
+        update_inner_kernel_params_fn=update_inner_kernel_params_fn,
+    )
+
+
 def update_with_mcmc_take_last_replicated(
     constrained_step_fn: Callable,
     n_inner_steps: int,
     n_delete: int,
     mesh: Mesh,
     fold_inner_steps: bool = False,
+    pass_parent_index: bool = False,
 ) -> Callable:
     """Run sharded constrained chains and gather only packed endpoints."""
 
@@ -243,6 +308,63 @@ def update_with_mcmc_take_last_replicated(
         state_specs = jax.tree.map(lambda _: P(_REPLACEMENT_AXIS), start_states)
         parameter_specs = jax.tree.map(lambda _: P(), step_parameters)
         n_dims = position.shape[-1]
+
+        if pass_parent_index:
+
+            def run_local_chains_with_parent(
+                keys, states, parent_indices, threshold, parameters
+            ):
+                def run_chain(key, chain_state, parent_index):
+                    keys = jax.random.split(key, n_inner_steps)
+                    if fold_inner_steps:
+                        return constrained_step_fn(
+                            keys,
+                            chain_state,
+                            threshold,
+                            parent_index=parent_index,
+                            **parameters,
+                        )
+
+                    def body_fn(current_state, step_key):
+                        return constrained_step_fn(
+                            step_key,
+                            current_state,
+                            threshold,
+                            parent_index=parent_index,
+                            **parameters,
+                        )
+
+                    return jax.lax.scan(body_fn, chain_state, keys)
+
+                endpoints, update_info = jax.vmap(run_chain)(
+                    keys, states, parent_indices
+                )
+                packed_endpoints = _pack_particles(endpoints)
+                packed_endpoints = jax.lax.all_gather(
+                    packed_endpoints, _REPLACEMENT_AXIS, tiled=True
+                )
+                return packed_endpoints, update_info
+
+            packed_endpoints, update_info = jax.shard_map(
+                run_local_chains_with_parent,
+                mesh=mesh,
+                in_specs=(
+                    P(_REPLACEMENT_AXIS),
+                    state_specs,
+                    P(_REPLACEMENT_AXIS),
+                    P(),
+                    parameter_specs,
+                ),
+                out_specs=(P(), P(_REPLACEMENT_AXIS)),
+                check_vma=False,
+            )(
+                sample_keys,
+                start_states,
+                start_idx,
+                loglikelihood_0,
+                step_parameters,
+            )
+            return _unpack_particles(packed_endpoints, n_dims, dtypes), update_info
 
         def run_local_chains(keys, states, threshold, parameters):
             def run_chain(key, chain_state):
@@ -291,6 +413,7 @@ def build_replicated_from_mcmc_kernel(
     n_delete: int,
     mesh: Mesh,
     fold_inner_steps: bool = False,
+    pass_parent_index: bool = False,
 ) -> Callable:
     """Build Jim's fused adaptive NS step for a replicated live population.
 
@@ -306,6 +429,7 @@ def build_replicated_from_mcmc_kernel(
         n_delete=n_delete,
         mesh=mesh,
         fold_inner_steps=fold_inner_steps,
+        pass_parent_index=pass_parent_index,
     )
 
     def kernel(rng_key, state: AdaptiveNSState):

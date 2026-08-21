@@ -360,6 +360,20 @@ def test_config_fingerprint_covers_seed() -> None:
     assert first["termination_dlogz"] == pytest.approx(0.0485873516)
 
 
+def test_config_fingerprint_distinguishes_an_explicit_sampler_seed() -> None:
+    legacy = benchmark._config_report(seed=5, n_devices=1)
+    repeated = benchmark._config_report(
+        seed=5,
+        sampler_seed=1_000_005,
+        n_devices=1,
+    )
+
+    assert "sampler_seed" not in legacy
+    assert repeated["seed"] == 5
+    assert repeated["sampler_seed"] == 1_000_005
+    assert repeated["sha256"] != legacy["sha256"]
+
+
 def test_paper_workload_matches_the_full_15d_gw170817_specification() -> None:
     config = benchmark._config_report(
         seed=0,
@@ -421,6 +435,47 @@ def test_cli_accepts_paper_workload(tmp_path: Path) -> None:
     assert args.workload == benchmark.PAPER_WORKLOAD
 
 
+def test_cli_accepts_an_independent_sampler_seed(tmp_path: Path) -> None:
+    args = benchmark._parse_args(
+        [
+            "--data-file",
+            str(tmp_path / "data.npz"),
+            "--seed",
+            "5",
+            "--sampler-seed",
+            "1000005",
+        ]
+    )
+
+    assert args.seed == 5
+    assert args.sampler_seed == 1_000_005
+
+
+def test_cli_accepts_candidate_gibbs_sweep_count(tmp_path: Path) -> None:
+    args = benchmark._parse_args(
+        [
+            "--data-file",
+            str(tmp_path / "data.npz"),
+            "--num-gibbs-sweeps",
+            "3",
+        ]
+    )
+
+    assert args.num_gibbs_sweeps == 3
+
+
+def test_cli_rejects_a_negative_independent_sampler_seed(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        benchmark._parse_args(
+            [
+                "--data-file",
+                str(tmp_path / "data.npz"),
+                "--sampler-seed",
+                "-1",
+            ]
+        )
+
+
 def test_cli_accepts_all_slow_blocking_for_paper_workload(tmp_path: Path) -> None:
     args = benchmark._parse_args(
         [
@@ -434,6 +489,41 @@ def test_cli_accepts_all_slow_blocking_for_paper_workload(tmp_path: Path) -> Non
     )
 
     assert args.blocking_scheme == benchmark.ALL_SLOW_BLOCKING_SCHEME
+
+
+def test_cli_accepts_covariance_basis_for_intrinsic_fast_ridge(
+    tmp_path: Path,
+) -> None:
+    args = benchmark._parse_args(
+        [
+            "--data-file",
+            str(tmp_path / "data.npz"),
+            "--workload",
+            benchmark.PAPER_WORKLOAD,
+            "--blocking-scheme",
+            benchmark.FAST_RIDGE_INTRINSIC_BLOCKING_SCHEME,
+            "--direction-mode",
+            "covariance-basis-8d",
+        ]
+    )
+
+    assert args.direction_mode == "covariance-basis-8d"
+
+
+def test_cli_rejects_covariance_basis_without_intrinsic_fast_ridge(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(SystemExit):
+        benchmark._parse_args(
+            [
+                "--data-file",
+                str(tmp_path / "data.npz"),
+                "--workload",
+                benchmark.PAPER_WORKLOAD,
+                "--direction-mode",
+                "covariance-basis-8d",
+            ]
+        )
 
 
 def test_cli_rejects_all_slow_blocking_for_aligned_workload(
@@ -639,6 +729,414 @@ def test_all_slow_blocks_rebuild_only_the_combined_first_block() -> None:
     assert list(rebuild.values()) == [True, False, False, False]
 
 
+def test_paper_workload_accepts_the_iota_dl_blocking_scheme() -> None:
+    config = benchmark._config_report(
+        seed=0,
+        n_devices=4,
+        workload=benchmark.PAPER_WORKLOAD,
+        blocking_scheme=benchmark.IOTA_DL_BLOCKING_SCHEME,
+    )
+
+    assert config["blocking_scheme"] == "iota-dl"
+    assert config["blocks"] == [list(block) for block in benchmark.PAPER_IOTA_DL_BLOCKS]
+    assert [len(block) for block in config["blocks"]] == [4, 3, 3, 2, 2, 1]
+    assert ["iota", "d_L"] in config["blocks"]
+    assert sum(map(len, config["blocks"])) == 15
+    assert (
+        config["sha256"]
+        != benchmark._config_report(
+            0,
+            4,
+            benchmark.PAPER_WORKLOAD,
+        )["sha256"]
+    )
+
+
+def test_paper_workload_accepts_the_fast_ridge_scheme() -> None:
+    config = benchmark._config_report(
+        seed=0,
+        n_devices=1,
+        workload=benchmark.PAPER_WORKLOAD,
+        blocking_scheme=benchmark.FAST_RIDGE_BLOCKING_SCHEME,
+    )
+
+    assert config["blocking_scheme"] == "fast-ridge"
+    assert config["blocks"] == [
+        list(block) for block in benchmark.PAPER_FAST_RIDGE_BLOCKS
+    ]
+    assert config["blocks"][-1] == ["cos_iota", "d_hat"]
+    assert sum(map(len, config["blocks"])) == 15
+
+
+def test_fast_ridge_intrinsic_scheme_couples_nonperiodic_slow_coordinates() -> None:
+    config = benchmark._config_report(
+        seed=0,
+        n_devices=1,
+        workload=benchmark.PAPER_WORKLOAD,
+        blocking_scheme=benchmark.FAST_RIDGE_INTRINSIC_BLOCKING_SCHEME,
+    )
+
+    assert config["blocking_scheme"] == "fast-ridge-intrinsic"
+    assert config["blocks"] == [
+        list(block) for block in benchmark.PAPER_FAST_RIDGE_INTRINSIC_BLOCKS
+    ]
+    assert [len(block) for block in config["blocks"]] == [8, 1, 1, 2, 1, 2]
+    assert config["blocks"][0] == [
+        "M_c",
+        "q",
+        "lambda_1",
+        "lambda_2",
+        "s1_mag",
+        "s1_theta",
+        "s2_mag",
+        "s2_theta",
+    ]
+    assert config["blocks"][1:3] == [["s1_phi"], ["s2_phi"]]
+    assert config["blocks"][-1] == ["cos_iota", "d_hat"]
+    assert sum(map(len, config["blocks"])) == 15
+
+
+def test_fast_ridge_intrinsic_5step_scheme_pins_reduced_random_work() -> None:
+    config = benchmark._config_report(
+        seed=0,
+        n_devices=1,
+        workload=benchmark.PAPER_WORKLOAD,
+        blocking_scheme=benchmark.FAST_RIDGE_INTRINSIC_5STEP_BLOCKING_SCHEME,
+    )
+    legacy = benchmark._config_report(
+        seed=0,
+        n_devices=1,
+        workload=benchmark.PAPER_WORKLOAD,
+        blocking_scheme=benchmark.FAST_RIDGE_INTRINSIC_BLOCKING_SCHEME,
+    )
+
+    assert config["blocking_scheme"] == "fast-ridge-intrinsic-5step"
+    assert config["blocks"] == [
+        list(block) for block in benchmark.PAPER_FAST_RIDGE_INTRINSIC_BLOCKS
+    ]
+    assert config["num_slice_steps_by_block"] == [5, 1, 1, 2, 1, 2]
+    assert sum(config["num_slice_steps_by_block"]) == 12
+    assert "num_slice_steps_by_block" not in legacy
+    assert config["sha256"] != legacy["sha256"]
+
+
+def test_fast_ridge_intrinsic_periodic_mh_scheme_pins_hybrid_work() -> None:
+    config = benchmark._config_report(
+        seed=2,
+        n_devices=1,
+        workload=benchmark.PAPER_WORKLOAD,
+        blocking_scheme=(benchmark.FAST_RIDGE_INTRINSIC_PERIODIC_MH_BLOCKING_SCHEME),
+    )
+
+    assert config["blocking_scheme"] == "fast-ridge-intrinsic-periodic-mh"
+    assert config["blocks"] == [
+        list(block) for block in benchmark.PAPER_FAST_RIDGE_INTRINSIC_BLOCKS
+    ]
+    assert config["block_kernel_modes"] == [
+        "slice",
+        "periodic-uniform-independence",
+        "periodic-uniform-independence",
+        "slice",
+        "periodic-uniform-independence",
+        "slice",
+    ]
+    assert "num_slice_steps_by_block" not in config
+    assert config["fixed_work"] == {
+        "total_updates": 15,
+        "total_slice_updates": 12,
+        "waveform_rebuild_slice_updates": 8,
+        "cache_hit_slice_updates": 4,
+        "periodic_independence_attempts": 3,
+        "waveform_rebuild_periodic_independence_attempts": 2,
+        "cache_hit_periodic_independence_attempts": 1,
+        "cache_segments": 2,
+    }
+
+
+def test_fast_ridge_intrinsic_periodic_mh_cde4_pins_complementary_work() -> None:
+    config = benchmark._config_report(
+        seed=2,
+        n_devices=1,
+        workload=benchmark.PAPER_WORKLOAD,
+        blocking_scheme=(
+            benchmark.FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_BLOCKING_SCHEME
+        ),
+    )
+
+    assert config["blocking_scheme"] == "fast-ridge-intrinsic-periodic-mh-cde4"
+    assert config["blocks"] == [
+        list(block) for block in benchmark.PAPER_FAST_RIDGE_INTRINSIC_BLOCKS
+    ]
+    assert config["block_kernel_modes"] == list(
+        benchmark.FAST_RIDGE_INTRINSIC_PERIODIC_MH_KERNEL_MODES
+    )
+    assert config["complementary_de_jump_block"] == {
+        "parameters": [
+            "M_c",
+            "q",
+            "lambda_1",
+            "lambda_2",
+            "s1_mag",
+            "s1_theta",
+            "s2_mag",
+            "s2_theta",
+        ],
+        "attempts": 4,
+    }
+    assert config["fixed_work"] == {
+        "total_updates": 19,
+        "total_slice_updates": 12,
+        "waveform_rebuild_slice_updates": 8,
+        "cache_hit_slice_updates": 4,
+        "periodic_independence_attempts": 3,
+        "waveform_rebuild_periodic_independence_attempts": 2,
+        "cache_hit_periodic_independence_attempts": 1,
+        "complementary_de_attempts": 4,
+        "waveform_rebuild_complementary_de_attempts": 4,
+        "cache_hit_complementary_de_attempts": 0,
+        "complementary_de_gamma": 1.0,
+        "complementary_de_insert_after_block": 0,
+        "cache_segments": 2,
+    }
+    assert "num_slice_steps_by_block" not in config
+
+
+def test_fast_ridge_intrinsic_periodic_mh_cde8_pins_complementary_work() -> None:
+    config = benchmark._config_report(
+        seed=2,
+        n_devices=1,
+        workload=benchmark.PAPER_WORKLOAD,
+        blocking_scheme=(
+            benchmark.FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_BLOCKING_SCHEME
+        ),
+    )
+
+    assert config["blocking_scheme"] == "fast-ridge-intrinsic-periodic-mh-cde8"
+    assert config["blocks"] == [
+        list(block) for block in benchmark.PAPER_FAST_RIDGE_INTRINSIC_BLOCKS
+    ]
+    assert config["block_kernel_modes"] == list(
+        benchmark.FAST_RIDGE_INTRINSIC_PERIODIC_MH_KERNEL_MODES
+    )
+    assert config["complementary_de_jump_block"] == {
+        "parameters": list(benchmark.PAPER_FAST_RIDGE_INTRINSIC_BLOCKS[0]),
+        "attempts": 8,
+    }
+    assert config["fixed_work"] == {
+        **benchmark.FAST_RIDGE_INTRINSIC_PERIODIC_MH_FIXED_WORK,
+        "total_updates": 23,
+        "complementary_de_attempts": 8,
+        "waveform_rebuild_complementary_de_attempts": 8,
+        "cache_hit_complementary_de_attempts": 0,
+        "complementary_de_gamma": 1.0,
+        "complementary_de_insert_after_block": 0,
+    }
+    assert "num_slice_steps_by_block" not in config
+
+
+def test_cli_accepts_only_covariance_for_intrinsic_periodic_mh(
+    tmp_path: Path,
+) -> None:
+    scheme = benchmark.FAST_RIDGE_INTRINSIC_PERIODIC_MH_BLOCKING_SCHEME
+    args = benchmark._parse_args(
+        [
+            "--data-file",
+            str(tmp_path / "data.npz"),
+            "--workload",
+            benchmark.PAPER_WORKLOAD,
+            "--blocking-scheme",
+            scheme,
+        ]
+    )
+
+    assert args.direction_mode == "covariance"
+    with pytest.raises(SystemExit):
+        benchmark._parse_args(
+            [
+                "--data-file",
+                str(tmp_path / "data.npz"),
+                "--workload",
+                benchmark.PAPER_WORKLOAD,
+                "--blocking-scheme",
+                scheme,
+                "--direction-mode",
+                "covariance-basis-8d",
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "scheme",
+    (
+        benchmark.FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE4_BLOCKING_SCHEME,
+        benchmark.FAST_RIDGE_INTRINSIC_PERIODIC_MH_CDE8_BLOCKING_SCHEME,
+    ),
+)
+def test_cli_scopes_intrinsic_periodic_mh_cde_to_covariance_d1(
+    tmp_path: Path,
+    scheme: str,
+) -> None:
+    args = benchmark._parse_args(
+        [
+            "--data-file",
+            str(tmp_path / "data.npz"),
+            "--workload",
+            benchmark.PAPER_WORKLOAD,
+            "--blocking-scheme",
+            scheme,
+            "--n-devices",
+            "1",
+        ]
+    )
+
+    assert args.direction_mode == "covariance"
+    assert args.n_devices == 1
+    with pytest.raises(SystemExit):
+        benchmark._parse_args(
+            [
+                "--data-file",
+                str(tmp_path / "data.npz"),
+                "--workload",
+                benchmark.PAPER_WORKLOAD,
+                "--blocking-scheme",
+                scheme,
+                "--direction-mode",
+                "covariance-basis-8d",
+                "--n-devices",
+                "1",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        benchmark._parse_args(
+            [
+                "--data-file",
+                str(tmp_path / "data.npz"),
+                "--workload",
+                benchmark.PAPER_WORKLOAD,
+                "--blocking-scheme",
+                scheme,
+                "--n-devices",
+                "4",
+            ]
+        )
+
+
+def test_cli_accepts_only_covariance_for_intrinsic_5step(tmp_path: Path) -> None:
+    args = benchmark._parse_args(
+        [
+            "--data-file",
+            str(tmp_path / "data.npz"),
+            "--workload",
+            benchmark.PAPER_WORKLOAD,
+            "--blocking-scheme",
+            benchmark.FAST_RIDGE_INTRINSIC_5STEP_BLOCKING_SCHEME,
+        ]
+    )
+
+    assert args.direction_mode == "covariance"
+    with pytest.raises(SystemExit):
+        benchmark._parse_args(
+            [
+                "--data-file",
+                str(tmp_path / "data.npz"),
+                "--workload",
+                benchmark.PAPER_WORKLOAD,
+                "--blocking-scheme",
+                benchmark.FAST_RIDGE_INTRINSIC_5STEP_BLOCKING_SCHEME,
+                "--direction-mode",
+                "covariance-basis-8d",
+            ]
+        )
+
+
+def test_fast_ridge_intrinsic_basis_direction_is_fingerprinted() -> None:
+    covariance = benchmark._config_report(
+        seed=0,
+        n_devices=1,
+        workload=benchmark.PAPER_WORKLOAD,
+        blocking_scheme=benchmark.FAST_RIDGE_INTRINSIC_BLOCKING_SCHEME,
+    )
+    basis = benchmark._config_report(
+        seed=0,
+        n_devices=1,
+        workload=benchmark.PAPER_WORKLOAD,
+        blocking_scheme=benchmark.FAST_RIDGE_INTRINSIC_BLOCKING_SCHEME,
+        direction_mode="covariance-basis-8d",
+    )
+
+    assert "direction_mode" not in covariance
+    assert basis["direction_mode"] == "covariance-basis-8d"
+    assert basis["sha256"] != covariance["sha256"]
+
+
+def test_fast_ridge_components_apply_distance_then_inclination_coordinates() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+
+    components = benchmark._analysis_components(
+        benchmark.PAPER_WORKLOAD,
+        jnp,
+        [get_H1(), get_L1(), get_V1()],
+        blocking_scheme=benchmark.FAST_RIDGE_BLOCKING_SCHEME,
+    )
+
+    mappings = [transform.name_mapping for transform in components["sample_transforms"]]
+    assert mappings[0] == (["d_L"], ["d_hat"])
+    assert mappings[1] == (["iota"], ["cos_iota"])
+    assert mappings[2] == (["ra", "dec"], ["zenith", "azimuth"])
+
+
+def test_fast_ridge_intrinsic_components_use_the_same_exact_coordinates() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+
+    components = benchmark._analysis_components(
+        benchmark.PAPER_WORKLOAD,
+        jnp,
+        [get_H1(), get_L1(), get_V1()],
+        blocking_scheme=benchmark.FAST_RIDGE_INTRINSIC_BLOCKING_SCHEME,
+    )
+
+    mappings = [transform.name_mapping for transform in components["sample_transforms"]]
+    assert mappings == [
+        (["d_L"], ["d_hat"]),
+        (["iota"], ["cos_iota"]),
+        (["ra", "dec"], ["zenith", "azimuth"]),
+    ]
+
+
+def test_named_de_jump_block_keeps_the_paper_slice_partition() -> None:
+    args = benchmark._parse_args(
+        [
+            "--data-file",
+            "gw170817.npz",
+            "--workload",
+            benchmark.PAPER_WORKLOAD,
+            "--num-de-jumps",
+            "2",
+            "--de-jump-block",
+            "iota,d_L:1",
+        ]
+    )
+    config = benchmark._config_report(
+        seed=0,
+        n_devices=4,
+        workload=args.workload,
+        blocking_scheme=args.blocking_scheme,
+        num_de_jumps=args.num_de_jumps,
+        de_jump_blocks=args.de_jump_block,
+    )
+
+    assert args.blocking_scheme == benchmark.PAPER_BLOCKING_SCHEME
+    assert args.de_jump_block == [{"parameters": ["iota", "d_L"], "attempts": 1}]
+    assert config["blocks"] == [list(block) for block in benchmark.PAPER_BLOCKS]
+    assert ["iota", "d_L"] not in config["blocks"]
+    assert config["num_de_jumps"] == 2
+    assert config["de_jump_blocks"] == args.de_jump_block
+
+
 def test_cli_accepts_candidate_one_device_sweep(tmp_path: Path) -> None:
     args = benchmark._parse_args(
         ["--data-file", str(tmp_path / "data.npz"), "--n-devices", "1"]
@@ -659,6 +1157,43 @@ def test_cli_rejects_telemetry_without_profile(tmp_path: Path) -> None:
         )
 
 
+def test_timing_only_requires_an_ablation_variant(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        benchmark._parse_args(
+            ["--data-file", str(tmp_path / "data.npz"), "--timing-only"]
+        )
+
+
+def test_timing_only_rejects_observer_instrumentation(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        benchmark._parse_args(
+            [
+                "--data-file",
+                str(tmp_path / "data.npz"),
+                "--timing-only",
+                "--ablation-variant",
+                "replicated-cached-fsm-factor",
+                "--profile-dir",
+                str(tmp_path / "profile"),
+            ]
+        )
+
+
+def test_timing_only_accepts_an_uninstrumented_ablation_cell(tmp_path: Path) -> None:
+    args = benchmark._parse_args(
+        [
+            "--data-file",
+            str(tmp_path / "data.npz"),
+            "--timing-only",
+            "--ablation-variant",
+            "legacy-stock-lockstep-cov",
+        ]
+    )
+
+    assert args.timing_only is True
+    assert args.ablation_variant == "legacy-stock-lockstep-cov"
+
+
 def test_normalise_per_slice_array_removes_inner_step_axis() -> None:
     values = np.arange(3 * 11).reshape(3, 1, 11)
 
@@ -666,6 +1201,64 @@ def test_normalise_per_slice_array_removes_inner_step_axis() -> None:
 
     assert normalised.shape == (3, 11)
     np.testing.assert_array_equal(normalised, values[:, 0, :])
+
+
+def test_write_slice_data_omits_periodic_independence_operations(
+    tmp_path: Path,
+) -> None:
+    block_indices = (
+        tuple(range(8)),
+        (8,),
+        (9,),
+        (10, 11),
+        (12,),
+        (13, 14),
+    )
+    rebuild_by_block = {
+        indices: block_index < 3 for block_index, indices in enumerate(block_indices)
+    }
+    modes = (
+        "slice",
+        "periodic-uniform-independence",
+        "periodic-uniform-independence",
+        "slice",
+        "periodic-uniform-independence",
+        "slice",
+    )
+    n_slices = 12
+    n_replacements = benchmark.N_DELETE
+    expansions = np.arange(n_replacements * n_slices).reshape(n_replacements, n_slices)
+    shrink = expansions + 1
+    update_info = SimpleNamespace(num_expansions=expansions, num_shrink=shrink)
+    sampler = SimpleNamespace(
+        _final_state=SimpleNamespace(update_info=update_info),
+        _rebuild_required_by_block=rebuild_by_block,
+        _block_kernel_modes=modes,
+    )
+    jim = SimpleNamespace(
+        sampler=sampler,
+        sampling_parameter_names=tuple(f"parameter_{index}" for index in range(15)),
+    )
+    output = tmp_path / "h4-slices.npz"
+
+    report = benchmark._write_slice_data(output, jim, n_devices=1)
+
+    assert report["shape"] == [n_replacements, n_slices]
+    assert report["n_slices"] == n_slices
+    with np.load(output) as arrays:
+        np.testing.assert_array_equal(
+            arrays["slice_block_index"],
+            np.asarray([0] * 8 + [3] * 2 + [5] * 2),
+        )
+        np.testing.assert_array_equal(
+            arrays["slice_requires_rebuild"],
+            np.asarray([True] * 8 + [False] * 4),
+        )
+        assert arrays["slice_block_parameter_names"].tolist() == [
+            *([",".join(f"parameter_{index}" for index in range(8))] * 8),
+            *(["parameter_10,parameter_11"] * 2),
+            *(["parameter_13,parameter_14"] * 2),
+        ]
 
 
 def test_install_per_slice_diagnostics_forces_production_builder_flag(
@@ -733,6 +1326,18 @@ def test_derive_paper_convention_subtracts_both_jit_costs() -> None:
     assert result["likelihood_jit_seconds"] == pytest.approx(20.0)
     assert result["sampler_jit_seconds"] == pytest.approx(30.0)
     assert "2607.28265" in result["note"]
+
+
+def test_derive_paper_convention_prefers_direct_sampler_jit() -> None:
+    result = benchmark._derive_paper_convention(
+        100.0,
+        30.0,
+        {"likelihood_jit": 20.0, "sampler_kernel_jit": 10.0},
+    )
+
+    assert result["post_jit_sampling_seconds"] == pytest.approx(70.0)
+    assert result["sampler_jit_seconds"] == pytest.approx(10.0)
+    assert result["sampler_jit_source"] == "direct_aot_phase"
 
 
 def test_derive_paper_convention_without_phases_matches_legacy_post_jit() -> None:

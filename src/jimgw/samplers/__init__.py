@@ -20,6 +20,7 @@ from jimgw.samplers.config import (
     BlackJAXNSSConfig,
     BlackJAXSMCConfig,
     BlackJAXSwiGConfig,
+    DEJumpBlockConfig,
     FlowMCConfig,
     SamplerConfig,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "BlackJAXNSSConfig",
     "BlackJAXSMCConfig",
     "BlackJAXSwiGConfig",
+    "DEJumpBlockConfig",
     "FlowMCConfig",
     "Sampler",
     "SamplerConfig",

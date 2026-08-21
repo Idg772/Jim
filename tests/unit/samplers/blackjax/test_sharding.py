@@ -122,6 +122,8 @@ def swig_transition_results():
     n_delete = 4
     config = BlackJAXSwiGConfig(
         blocks=[["slow"], ["fast"]],
+        num_de_jumps=2,
+        de_jump_blocks=[{"parameters": ["slow", "fast"], "attempts": 1}],
         n_live=n_live,
         n_delete_frac=n_delete / n_live,
         num_gibbs_sweeps=1,
@@ -139,6 +141,7 @@ def swig_transition_results():
         rebuild_required_by_block={(0,): True, (1,): False},
         build_cache=_build_cache,
         log_likelihood_from_cache_fn=_log_likelihood_from_cache,
+        resolved_de_jump_blocks=(((0, 1), True, 1),),
     )
     positions = jax.random.uniform(jax.random.key(20), (n_live, 2))
     single_init = partial(
@@ -491,6 +494,246 @@ def test_replicated_swig_step_is_pathwise_equivalent(swig_transition_results):
     assert all(leaf.sharding.spec == P("replacement") for leaf in jax.tree.leaves(info))
 
 
+@pytest.mark.skipif(
+    not _HAS_FOUR_DEVICES,
+    reason="run with XLA_FLAGS=--xla_force_host_platform_device_count=4",
+)
+@pytest.mark.parametrize(
+    (
+        "direction_mode",
+        "num_slice_steps_by_block",
+        "block_kernel_modes",
+        "periodic",
+        "complementary_de_attempts",
+    ),
+    [
+        pytest.param(
+            "covariance-basis-8d",
+            None,
+            None,
+            None,
+            None,
+            id="h2-covariance-basis",
+        ),
+        pytest.param(
+            "covariance",
+            [5, 1, 1, 2, 1, 2],
+            None,
+            None,
+            None,
+            id="h3-explicit-block-budget",
+        ),
+        pytest.param(
+            "covariance",
+            None,
+            [
+                "slice",
+                "periodic-uniform-independence",
+                "periodic-uniform-independence",
+                "slice",
+                "periodic-uniform-independence",
+                "slice",
+            ],
+            {8: (0.0, 1.0), 9: (0.0, 1.0), 12: (0.0, 1.0)},
+            None,
+            id="h4-periodic-uniform-independence",
+        ),
+        pytest.param(
+            "covariance",
+            None,
+            [
+                "slice",
+                "periodic-uniform-independence",
+                "periodic-uniform-independence",
+                "slice",
+                "periodic-uniform-independence",
+                "slice",
+            ],
+            {8: (0.0, 1.0), 9: (0.0, 1.0), 12: (0.0, 1.0)},
+            4,
+            id="h5-complementary-de",
+        ),
+        pytest.param(
+            "covariance",
+            None,
+            [
+                "slice",
+                "periodic-uniform-independence",
+                "periodic-uniform-independence",
+                "slice",
+                "periodic-uniform-independence",
+                "slice",
+            ],
+            {8: (0.0, 1.0), 9: (0.0, 1.0), 12: (0.0, 1.0)},
+            8,
+            id="h6-complementary-de",
+        ),
+    ],
+)
+def test_swig_fixed_slice_budget_is_pathwise_equivalent_on_d1_and_d4(
+    direction_mode,
+    num_slice_steps_by_block,
+    block_kernel_modes,
+    periodic,
+    complementary_de_attempts,
+):
+    block_indices = (
+        tuple(range(8)),
+        (8,),
+        (9,),
+        (10, 11),
+        (12,),
+        (13, 14),
+    )
+    rebuild_required_by_block = {
+        indices: block < 3 for block, indices in enumerate(block_indices)
+    }
+    block_names = [
+        [f"parameter_{index}" for index in indices] for indices in block_indices
+    ]
+    n_live = 16
+    n_delete = 4
+    config = BlackJAXSwiGConfig(
+        blocks=block_names,
+        direction_mode=direction_mode,
+        num_slice_steps_by_block=num_slice_steps_by_block,
+        block_kernel_modes=block_kernel_modes,
+        complementary_de_jump_block=(
+            {"parameters": block_names[0], "attempts": complementary_de_attempts}
+            if complementary_de_attempts is not None
+            else None
+        ),
+        n_live=n_live,
+        n_delete_frac=n_delete / n_live,
+        num_gibbs_sweeps=1,
+        num_inner_steps_per_dim=1,
+        max_steps=3,
+        max_shrinkage=20,
+        termination_dlogz=2.0,
+        n_devices=4,
+    )
+
+    def build_cache(position):
+        return position[:10] ** 2
+
+    def log_likelihood_from_cache(position, cache):
+        return -jnp.sum((cache - 0.25) ** 2) - jnp.sum((position[10:] - 0.5) ** 2)
+
+    def log_likelihood(position):
+        return log_likelihood_from_cache(position, build_cache(position))
+
+    sampler = BlackJAXSwiGSampler(
+        n_dims=15,
+        log_prior_fn=_log_prior,
+        log_likelihood_fn=log_likelihood,
+        log_posterior_fn=lambda x: _log_prior(x) + log_likelihood(x),
+        config=config,
+        periodic=periodic,
+        rebuild_required_by_block=rebuild_required_by_block,
+        build_cache=build_cache,
+        log_likelihood_from_cache_fn=log_likelihood_from_cache,
+        resolved_complementary_de_jump_block=(
+            (block_indices[0], True, complementary_de_attempts)
+            if complementary_de_attempts is not None
+            else None
+        ),
+    )
+    positions = jax.random.uniform(jax.random.key(40), (n_live, 15))
+    single_init = partial(
+        init_state_strategy,
+        logprior_fn=_log_prior,
+        loglikelihood_fn=log_likelihood,
+    )
+    one_device_state = adaptive_init(
+        positions,
+        init_state_fn=jax.vmap(single_init),
+        update_inner_kernel_params_fn=sampler._update_inner_kernel_params_fn,
+    )
+    sharded_state = adaptive_init(
+        positions,
+        init_state_fn=jax.vmap(single_init),
+        update_inner_kernel_params_fn=sampler._fsm_update_inner_kernel_params_fn,
+    )
+    mesh = make_live_mesh(4, n_live, n_delete)
+    assert mesh is not None
+    key = jax.random.key(41)
+
+    one_device_result = jax.jit(sampler._build_nested_sampler(n_delete).step)(
+        key, one_device_state
+    )
+    replicated_state = place_replicated_state(sharded_state, mesh)
+    replicated_key = place_key(key, mesh)
+    sharded_result = jax.jit(sampler._build_nested_sampler(n_delete, mesh).step)(
+        replicated_key, replicated_state
+    )
+
+    one_device_host = jax.device_get(one_device_result)
+    sharded_host = jax.device_get(sharded_result)
+    for expected_tree, actual_tree in (
+        (one_device_host[0].particles, sharded_host[0].particles),
+        (one_device_host[0].integrator, sharded_host[0].integrator),
+        (one_device_host[1], sharded_host[1]),
+    ):
+        for expected, actual in zip(
+            jax.tree.leaves(expected_tree),
+            jax.tree.leaves(actual_tree),
+            strict=True,
+        ):
+            np.testing.assert_allclose(
+                actual,
+                expected,
+                rtol=1e-14,
+                atol=1e-14,
+                equal_nan=True,
+            )
+
+    if complementary_de_attempts is not None:
+        info = sharded_host[1].update_info
+        parents = np.asarray(info.complementary_de_parent_index).reshape(n_delete)
+        donors = np.asarray(info.complementary_de_donor_indices_by_attempt).reshape(
+            n_delete, complementary_de_attempts, 2
+        )
+        assert parents.shape == (n_delete,)
+        assert donors.shape == (n_delete, complementary_de_attempts, 2)
+        _, dead_idx = jax.lax.top_k(-one_device_state.particles.loglikelihood, n_delete)
+        threshold = one_device_state.particles.loglikelihood[dead_idx].max()
+        _, inner_key = jax.random.split(key)
+        choice_key, _ = jax.random.split(inner_key)
+        survivor_weights = (
+            one_device_state.particles.loglikelihood > threshold
+        ).astype(jnp.float32)
+        expected_parents = jax.random.choice(
+            choice_key,
+            n_live,
+            shape=(n_delete,),
+            p=survivor_weights / survivor_weights.sum(),
+            replace=True,
+        )
+        np.testing.assert_array_equal(parents, expected_parents)
+        assert not np.any(donors == parents[:, None, None])
+        incoming_positions = np.asarray(one_device_state.particles.position)
+        incoming_loglikelihoods = np.asarray(one_device_state.particles.loglikelihood)
+        assert np.all(incoming_loglikelihoods[donors] > float(threshold))
+        positions_before = np.asarray(
+            info.complementary_de_position_before_by_attempt
+        ).reshape(n_delete, complementary_de_attempts, 15)
+        proposal_positions = np.asarray(
+            info.complementary_de_proposal_position_by_attempt
+        ).reshape(n_delete, complementary_de_attempts, 15)
+        expected_displacements = (
+            incoming_positions[donors[:, :, 0]] - incoming_positions[donors[:, :, 1]]
+        )
+        np.testing.assert_allclose(
+            proposal_positions[:, :, :8] - positions_before[:, :, :8],
+            expected_displacements[:, :, :8],
+            rtol=1e-14,
+            atol=1e-14,
+        )
+        np.testing.assert_array_equal(
+            proposal_positions[:, :, 8:], positions_before[:, :, 8:]
+        )
+
+
 def test_replicated_swig_step_has_one_endpoint_all_gather(swig_transition_results):
     _, _, hlo = swig_transition_results
     assert len(re.findall(r"\ball-gather\(", hlo)) == 1
@@ -536,6 +779,8 @@ def test_nss_runs_sharded_and_preserves_diagnostics():
 def test_swig_runs_sharded_with_consistent_cache():
     config = BlackJAXSwiGConfig(
         blocks=[["slow"], ["fast"]],
+        num_de_jumps=2,
+        de_jump_blocks=[{"parameters": ["slow", "fast"], "attempts": 1}],
         n_live=16,
         n_delete_frac=0.25,
         num_gibbs_sweeps=1,
@@ -553,6 +798,7 @@ def test_swig_runs_sharded_with_consistent_cache():
         rebuild_required_by_block={(0,): True, (1,): False},
         build_cache=_build_cache,
         log_likelihood_from_cache_fn=_log_likelihood_from_cache,
+        resolved_de_jump_blocks=(((0, 1), True, 1),),
     )
 
     initial = jax.random.uniform(jax.random.key(2), (16, 2))
@@ -561,7 +807,13 @@ def test_swig_runs_sharded_with_consistent_cache():
     expected = jax.vmap(_log_likelihood)(jnp.asarray(result["samples"]))
 
     np.testing.assert_allclose(result["log_likelihood"], expected, rtol=2e-6)
-    assert sampler.get_diagnostics()["n_likelihood_evaluations"] > 0
+    diagnostics = sampler.get_diagnostics()
+    assert diagnostics["n_likelihood_evaluations"] > 0
+    expected_attempts = 3 * 4 * diagnostics["n_iterations"]
+    assert diagnostics["n_de_jump_attempts"] == expected_attempts
+    assert diagnostics["targeted_de_jump_blocks"][0]["n_attempts"] == (
+        4 * diagnostics["n_iterations"]
+    )
     assert not hasattr(sampler._final_state.particles, "cache")
 
 
