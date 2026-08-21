@@ -8,6 +8,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import jimgw.core.jim as jim_module
+from jimgw.core.folding import UnfoldedWeightedSamples
 from jimgw.core.jim import Jim
 from jimgw.core.prior import CombinePrior, UniformPrior
 from jimgw.core.transforms import BoundToUnbound
@@ -313,6 +315,74 @@ class TestGetWeightedSamples:
     def test_get_weighted_samples_rejects_unsupported_backend(self, basic_jim):
         with pytest.raises(NotImplementedError, match="does not expose weighted"):
             basic_jim.get_weighted_samples()
+
+    def test_unfold_weighted_samples_requires_enabled_fold(self, basic_jim):
+        with pytest.raises(RuntimeError, match="fold_symmetry"):
+            basic_jim.unfold_weighted_samples(
+                np.zeros((1, 2)),
+                np.zeros(1),
+            )
+
+    def test_unfold_weighted_samples_uses_preserved_base_callbacks(
+        self, basic_jim, monkeypatch
+    ):
+        fold = object()
+        base_prior = object()
+        base_cache_likelihood = object()
+        base_build_cache = object()
+        expected = UnfoldedWeightedSamples(
+            positions=jnp.zeros((8, 2)),
+            log_weights=jnp.zeros(8),
+            true_log_likelihoods=jnp.ones(8),
+            base_log_priors=jnp.arange(8.0),
+            log_branch_probabilities=jnp.full(8, -jnp.log(8.0)),
+        )
+        basic_jim._resolved_fold_symmetry = fold
+        basic_jim._base_log_prior_fn = base_prior
+        basic_jim._base_log_likelihood_from_cache_fn = base_cache_likelihood
+        basic_jim._base_build_cache = base_build_cache
+        captured = {}
+
+        def fake_unfold(
+            positions,
+            log_weights,
+            resolved_fold,
+            prior_fn,
+            cache_likelihood_fn,
+            build_cache,
+            *,
+            batch_size,
+        ):
+            captured.update(
+                positions=positions,
+                log_weights=log_weights,
+                fold=resolved_fold,
+                prior_fn=prior_fn,
+                cache_likelihood_fn=cache_likelihood_fn,
+                build_cache=build_cache,
+                batch_size=batch_size,
+            )
+            return expected
+
+        monkeypatch.setattr(jim_module, "_unfold_weighted_samples", fake_unfold)
+        positions = np.zeros((2, 2))
+        log_weights = np.log(np.array([0.4, 0.6]))
+
+        result = basic_jim.unfold_weighted_samples(
+            positions,
+            log_weights,
+            batch_size=7,
+        )
+
+        assert result is expected
+        np.testing.assert_array_equal(result.base_log_priors, np.arange(8.0))
+        assert captured["positions"] is positions
+        assert captured["log_weights"] is log_weights
+        assert captured["fold"] is fold
+        assert captured["prior_fn"] is base_prior
+        assert captured["cache_likelihood_fn"] is base_cache_likelihood
+        assert captured["build_cache"] is base_build_cache
+        assert captured["batch_size"] == 7
 
 
 # ---------------------------------------------------------------------------

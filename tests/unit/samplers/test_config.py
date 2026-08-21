@@ -13,6 +13,7 @@ from jimgw.samplers.config import (
     BlackJAXSwiGConfig,
     DEJumpBlockConfig,
     FlowMCConfig,
+    FoldSymmetryConfig,
     GRWConfig,
     HMCConfig,
     MALAConfig,
@@ -74,6 +75,63 @@ def test_swig_sampling_defaults():
     assert config.block_kernel_modes is None
     assert config.periodic_wrapped_covariance is False
     assert config.bridge_blocks == []
+    assert config.fold_symmetry is None
+
+
+def test_fold_symmetry_config_validates_names_and_finite_center():
+    fold = FoldSymmetryConfig(
+        cos_iota="cos_iota",
+        azimuth="azimuth",
+        psi="psi",
+        azimuth_reflection_center=0.25,
+    )
+    assert fold.cos_iota == "cos_iota"
+
+    for field in ("cos_iota", "azimuth", "psi"):
+        values = {
+            "cos_iota": "cos_iota",
+            "azimuth": "azimuth",
+            "psi": "psi",
+            "azimuth_reflection_center": 0.25,
+        }
+        values[field] = ""
+        with pytest.raises(ValidationError, match="cannot be empty"):
+            FoldSymmetryConfig(**values)
+
+    with pytest.raises(ValidationError, match="must be distinct"):
+        FoldSymmetryConfig(
+            cos_iota="angle",
+            azimuth="angle",
+            psi="psi",
+            azimuth_reflection_center=0.25,
+        )
+
+    for center in (np.nan, np.inf, -np.inf):
+        with pytest.raises(ValidationError, match="must be finite"):
+            FoldSymmetryConfig(
+                cos_iota="cos_iota",
+                azimuth="azimuth",
+                psi="psi",
+                azimuth_reflection_center=center,
+            )
+
+
+def test_swig_fold_symmetry_requires_fsm_scheduler():
+    fold = {
+        "cos_iota": "cos_iota",
+        "azimuth": "azimuth",
+        "psi": "psi",
+        "azimuth_reflection_center": 0.25,
+    }
+    config = BlackJAXSwiGConfig(blocks=[["x"]], fold_symmetry=fold)
+    assert config.fold_symmetry == FoldSymmetryConfig(**fold)
+
+    with pytest.raises(ValidationError, match="fold_symmetry requires scheduler='fsm'"):
+        BlackJAXSwiGConfig(
+            blocks=[["x"]],
+            fold_symmetry=fold,
+            scheduler="pre-fsm-lockstep",
+        )
 
 
 def test_swig_bridge_blocks_may_overlap_primary_but_require_unique_members():

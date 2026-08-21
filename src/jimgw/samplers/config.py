@@ -394,6 +394,38 @@ class DEJumpBlockConfig(BaseModel):
         return parameters
 
 
+class FoldSymmetryConfig(BaseModel):
+    """Sampling-space coordinates for the eight-image extrinsic quotient fold."""
+
+    model_config = {"extra": "forbid"}
+
+    cos_iota: str
+    azimuth: str
+    psi: str
+    azimuth_reflection_center: float
+
+    @field_validator("cos_iota", "azimuth", "psi")
+    @classmethod
+    def _validate_parameter_name(cls, name: str) -> str:
+        if not name:
+            raise ValueError("fold symmetry parameter names cannot be empty")
+        return name
+
+    @field_validator("azimuth_reflection_center")
+    @classmethod
+    def _validate_reflection_center(cls, center: float) -> float:
+        if not np.isfinite(center):
+            raise ValueError("azimuth_reflection_center must be finite")
+        return center
+
+    @model_validator(mode="after")
+    def _validate_distinct_parameter_names(self) -> Self:
+        names = (self.cos_iota, self.azimuth, self.psi)
+        if len(set(names)) != len(names):
+            raise ValueError("fold symmetry parameter names must be distinct")
+        return self
+
+
 class BlackJAXSwiGConfig(
     BaseSamplerConfig[Literal["blackjax-swig"]],
     _CheckpointMixin,
@@ -432,6 +464,7 @@ class BlackJAXSwiGConfig(
     type: Literal["blackjax-swig"] = "blackjax-swig"
 
     blocks: list[list[str]]
+    fold_symmetry: Optional[FoldSymmetryConfig] = None
     bridge_blocks: list[list[str]] = Field(default_factory=list)
     block_kernel_modes: Optional[
         list[Literal["slice", "periodic-uniform-independence"]]
@@ -504,6 +537,8 @@ class BlackJAXSwiGConfig(
             raise ValueError(
                 "block_kernel_modes must contain exactly one mode per block"
             )
+        if self.fold_symmetry is not None and self.scheduler != "fsm":
+            raise ValueError("fold_symmetry requires scheduler='fsm'")
         if self.bridge_blocks:
             if self.direction_mode != "covariance":
                 raise ValueError("bridge_blocks require covariance directions")

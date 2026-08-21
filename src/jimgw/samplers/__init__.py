@@ -22,6 +22,7 @@ from jimgw.samplers.config import (
     BlackJAXSwiGConfig,
     DEJumpBlockConfig,
     FlowMCConfig,
+    FoldSymmetryConfig,
     SamplerConfig,
 )
 from jimgw.samplers.diagnostics import insertion_index_diagnostic
@@ -34,6 +35,7 @@ __all__ = [
     "BlackJAXSwiGConfig",
     "DEJumpBlockConfig",
     "FlowMCConfig",
+    "FoldSymmetryConfig",
     "Sampler",
     "SamplerConfig",
     "build_sampler",

@@ -10,6 +10,15 @@ from ripplegw.interfaces import Waveform
 
 from jimgw._logging import ensure_logger_handler
 from jimgw.core.base import LikelihoodBase
+from jimgw.core.folding import (
+    ResolvedFoldSymmetry,
+    UnfoldedWeightedSamples,
+    _fold_to_fundamental,
+    _folded_log_likelihood_from_cache,
+    _folded_log_prior,
+    _in_fundamental_domain,
+    _unfold_weighted_samples,
+)
 from jimgw.core.prior import Prior
 from jimgw.core.single_event.blocked_likelihood import (
     _build_rebuild_required_by_block,
@@ -19,7 +28,7 @@ from jimgw.core.single_event.blocked_likelihood import (
 )
 from jimgw.core.single_event.likelihood import SingleEventLikelihood
 from jimgw.core.transforms import BijectiveTransform, NtoMTransform
-from jimgw.samplers import Sampler, SamplerConfig, build_sampler
+from jimgw.samplers import FoldSymmetryConfig, Sampler, SamplerConfig, build_sampler
 from jimgw.typing import FloatScalar
 
 logger = logging.getLogger(__name__)
@@ -171,6 +180,18 @@ class Jim:
                 }
         else:
             periodic_resolved = None
+
+        if (
+            sampler_config.type == "blackjax-swig"
+            and sampler_config.fold_symmetry is not None
+        ):
+            self._setup_fold_symmetry(
+                likelihood,
+                sample_transforms,
+                likelihood_transforms,
+                sampler_config.fold_symmetry,
+                periodic,
+            )
 
         self.sampler = build_sampler(
             sampler_config,
@@ -502,6 +523,150 @@ class Jim:
                     sampler_config.complementary_de_jump_block.attempts,
                 )
 
+    def _setup_fold_symmetry(
+        self,
+        likelihood: SingleEventLikelihood,
+        sample_transforms: Sequence[BijectiveTransform],
+        likelihood_transforms: Sequence[NtoMTransform],
+        fold_config: FoldSymmetryConfig,
+        periodic: Optional[list[str] | dict[str, tuple[float, float]]],
+    ) -> None:
+        """Validate and install the cache-aware eight-image quotient target."""
+
+        fold_names = (fold_config.cos_iota, fold_config.azimuth, fold_config.psi)
+        unknown_names = [
+            name for name in fold_names if name not in self.sampling_parameter_names
+        ]
+        if unknown_names:
+            raise ValueError(
+                f"Fold symmetry parameter(s) {unknown_names} are not sampling "
+                f"parameters {self.sampling_parameter_names}."
+            )
+
+        if not likelihood.phase_marginalization:
+            raise ValueError("fold_symmetry requires active phase marginalization")
+
+        detectors = tuple(likelihood.detectors)
+        if len(detectors) != 3:
+            raise ValueError(
+                "fold_symmetry requires exactly three detector sites "
+                f"(got {len(detectors)})"
+            )
+        try:
+            vertices = np.stack(
+                tuple(
+                    np.asarray(detector.vertex, dtype=float) for detector in detectors
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "fold_symmetry detector vertices must each be finite 3-vectors"
+            ) from exc
+        if vertices.shape != (3, 3):
+            raise ValueError(
+                "fold_symmetry detector vertices must each be finite 3-vectors"
+            )
+        if not np.all(np.isfinite(vertices)):
+            raise ValueError("fold_symmetry detector vertices must be finite")
+        if np.unique(vertices, axis=0).shape[0] != 3:
+            raise ValueError("fold_symmetry detector vertices must be distinct")
+        baselines = vertices[1:] - vertices[0]
+        if np.linalg.matrix_rank(baselines) != 2:
+            raise ValueError("fold_symmetry detector vertices must not be collinear")
+
+        if periodic is None or isinstance(periodic, list):
+            raise ValueError(
+                "fold_symmetry requires explicit periodic bounds for azimuth and psi"
+            )
+        expected_periods = {
+            fold_config.azimuth: (0.0, 2.0 * np.pi),
+            fold_config.psi: (0.0, np.pi),
+        }
+        for name, expected_bounds in expected_periods.items():
+            bounds = periodic.get(name)
+            try:
+                actual_bounds = tuple(float(value) for value in bounds)  # type: ignore[union-attr]
+            except (TypeError, ValueError):
+                actual_bounds = ()
+            if actual_bounds != expected_bounds:
+                raise ValueError(
+                    f"fold_symmetry requires periodic {name!r} bounds "
+                    f"{expected_bounds}, got {bounds!r}"
+                )
+
+        resolved_fold_group = _resolve_rebuild_required_by_parameter_groups(
+            likelihood,
+            [list(fold_names)],
+            parameter_names=self.sampling_parameter_names,
+            sample_transforms=sample_transforms,
+            likelihood_transforms=likelihood_transforms,
+        )
+        _, requires_rebuild = resolved_fold_group[0]
+        if requires_rebuild:
+            resolved_coordinates = _resolve_rebuild_required_by_parameter_groups(
+                likelihood,
+                [[name] for name in fold_names],
+                parameter_names=self.sampling_parameter_names,
+                sample_transforms=sample_transforms,
+                likelihood_transforms=likelihood_transforms,
+            )
+            rebuild_names = [
+                name
+                for name, (_, coordinate_requires_rebuild) in zip(
+                    fold_names, resolved_coordinates, strict=True
+                )
+                if coordinate_requires_rebuild
+            ]
+            raise ValueError(
+                "Fold symmetry coordinates must be cache-resident; waveform "
+                f"rebuilds are required by {rebuild_names}."
+            )
+
+        fold = ResolvedFoldSymmetry(
+            indices=tuple(
+                self.sampling_parameter_names.index(name) for name in fold_names
+            ),
+            azimuth_reflection_center=float(fold_config.azimuth_reflection_center),
+        )
+        self._resolved_fold_symmetry = fold
+        self._base_log_prior_fn = self._log_prior_fn
+        self._base_log_likelihood_fn = self._log_likelihood_fn
+        self._base_log_posterior_fn = self._log_posterior_fn
+        self._base_build_cache = self._sampler_backend_kwargs["build_cache"]
+        self._base_log_likelihood_from_cache_fn = self._sampler_backend_kwargs[
+            "log_likelihood_from_cache_fn"
+        ]
+
+        base_log_prior_fn = self._base_log_prior_fn
+        base_build_cache = self._base_build_cache
+        base_log_likelihood_from_cache_fn = self._base_log_likelihood_from_cache_fn
+
+        def folded_log_prior(position):
+            return _folded_log_prior(position, fold, base_log_prior_fn)
+
+        def folded_log_likelihood_from_cache(position, cache):
+            return _folded_log_likelihood_from_cache(
+                position,
+                cache,
+                fold,
+                base_log_prior_fn,
+                base_log_likelihood_from_cache_fn,
+            )
+
+        def folded_log_likelihood(position):
+            cache = base_build_cache(position)
+            return folded_log_likelihood_from_cache(position, cache)
+
+        def folded_log_posterior(position):
+            return folded_log_prior(position) + folded_log_likelihood(position)
+
+        self._log_prior_fn = folded_log_prior
+        self._log_likelihood_fn = folded_log_likelihood
+        self._log_posterior_fn = folded_log_posterior
+        self._sampler_backend_kwargs["log_likelihood_from_cache_fn"] = (
+            folded_log_likelihood_from_cache
+        )
+
     def _verify_posterior(self) -> None:
         """Draw test points from the prior and verify the posterior is not mostly NaN.
 
@@ -573,7 +738,35 @@ class Jim:
                 "Initial positions contain non-finite values (NaN or inf). "
                 "Check your priors and transforms for validity."
             )
-        return arr
+        return self._canonicalize_fold_positions(arr)
+
+    def _canonicalize_fold_positions(self, positions):
+        """Map fold-enabled initial positions to the fundamental domain."""
+
+        fold = getattr(self, "_resolved_fold_symmetry", None)
+        if fold is None:
+            return positions
+
+        arr = jnp.asarray(positions)
+        if arr.ndim == 1:
+            canonical = _fold_to_fundamental(arr, fold)
+            in_domain = _in_fundamental_domain(canonical, fold)
+        elif arr.ndim == 2:
+            canonical = jax.vmap(lambda point: _fold_to_fundamental(point, fold))(arr)
+            in_domain = jax.vmap(lambda point: _in_fundamental_domain(point, fold))(
+                canonical
+            )
+        else:
+            raise ValueError(
+                "Folded initial positions must have shape (n_dims,) or "
+                "(n_positions, n_dims)."
+            )
+        if not bool(jnp.all(in_domain)):
+            raise RuntimeError(
+                "Fold canonicalization produced a position outside the "
+                "fundamental domain."
+            )
+        return canonical
 
     # ------------------------------------------------------------------
     # Public API
@@ -667,6 +860,8 @@ class Jim:
             n = next(iter(counts.values()))
             self._rng_key, init_key = jax.random.split(self._rng_key)
             initial_position = self._draw_initial_positions(init_key, n)
+        elif hasattr(self, "_resolved_fold_symmetry"):
+            initial_position = self._canonicalize_fold_positions(initial_position)
         self.sampler.sample(self._sampler_key, initial_position)
 
     def get_samples(
@@ -687,6 +882,11 @@ class Jim:
             Dict mapping prior parameter names to 1-D numpy arrays in prior
             space, plus an extra item containing the log-likelihood values.
         """
+        if hasattr(self, "_resolved_fold_symmetry"):
+            raise NotImplementedError(
+                "Folded equally weighted samples must be unfolded before conversion "
+                "to prior space."
+            )
         result = self.sampler.get_samples()
         sample_array = result["samples"]  # (n, n_dims) in sampling space
         log_likelihood = result["log_likelihood"]  # (n,)
@@ -744,6 +944,11 @@ class Jim:
         """
         if space not in ("prior", "sampling"):
             raise ValueError("space must be 'prior' or 'sampling'")
+        if space == "prior" and hasattr(self, "_resolved_fold_symmetry"):
+            raise NotImplementedError(
+                "Folded weighted samples must be unfolded in sampling space before "
+                "conversion to prior space."
+            )
 
         result = self.sampler.get_weighted_samples()
         if space == "sampling":
@@ -754,6 +959,35 @@ class Jim:
             out["log_likelihood_birth"] = np.asarray(result["log_likelihood_birth"])
         out["log_weights"] = np.asarray(result["log_weights"])
         return out
+
+    def unfold_weighted_samples(
+        self,
+        positions: Float[Array, "n_points n_dims"] | np.ndarray,
+        log_weights: Float[Array, " n_points"] | np.ndarray,
+        *,
+        batch_size: Optional[int] = None,
+    ) -> UnfoldedWeightedSamples:
+        """Expand folded weighted points into their eight base-target images.
+
+        The input positions must be the raw sampling-space output from
+        ``get_weighted_samples(space="sampling")``. The returned image rows
+        remain in sampling space; callers must reverse sample transforms only
+        after this expansion.
+        """
+
+        if not hasattr(self, "_resolved_fold_symmetry"):
+            raise RuntimeError(
+                "unfold_weighted_samples requires an enabled fold_symmetry"
+            )
+        return _unfold_weighted_samples(
+            positions,
+            log_weights,
+            self._resolved_fold_symmetry,
+            self._base_log_prior_fn,
+            self._base_log_likelihood_from_cache_fn,
+            self._base_build_cache,
+            batch_size=batch_size,
+        )
 
     def get_diagnostics(self) -> dict[str, Any]:
         """Return run-level diagnostics from the most recent `sample` call.
