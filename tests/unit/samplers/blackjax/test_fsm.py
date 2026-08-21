@@ -275,6 +275,132 @@ def _particle_state(position, loglikelihood_0):
     )
 
 
+def test_swig_bridge_requires_one_direction_parameter_after_each_primary_block():
+    step = _build_swig_constrained_step(
+        log_prior_fn=_toy_log_prior,
+        build_cache=_toy_build_cache,
+        log_likelihood_from_cache_fn=_toy_log_likelihood_from_cache,
+        rebuild_required_by_block=_REBUILD_BY_BLOCK,
+        resolved_bridge_blocks=(((3, 4), False),),
+        num_gibbs_sweeps=1,
+        num_inner_steps_per_dim=1,
+        max_steps=10,
+        max_shrinkage=100,
+        periodic=None,
+        n_dims=_N_DIMS,
+    )
+    threshold = jnp.asarray(-25.0)
+
+    with pytest.raises(
+        ValueError,
+        match="one entry per primary and bridge block",
+    ):
+        step(
+            jax.random.key(2),
+            _particle_state(jnp.zeros(_N_DIMS), threshold),
+            threshold,
+            block_covariance_factors=_block_covariance_factors(),
+        )
+
+
+def test_swig_bridge_builder_rejects_waveform_rebuild_groups():
+    with pytest.raises(ValueError, match="bridge blocks must be cache-resident"):
+        _build_swig_constrained_step(
+            log_prior_fn=_toy_log_prior,
+            build_cache=_toy_build_cache,
+            log_likelihood_from_cache_fn=_toy_log_likelihood_from_cache,
+            rebuild_required_by_block=_REBUILD_BY_BLOCK,
+            resolved_bridge_blocks=(((0, 3), True),),
+            num_gibbs_sweeps=1,
+            num_inner_steps_per_dim=1,
+            max_steps=10,
+            max_shrinkage=100,
+            periodic=None,
+            n_dims=_N_DIMS,
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"direction_mode": "de-mix"}, "covariance directions"),
+        (
+            {
+                "block_kernel_modes": (
+                    "slice",
+                    "slice",
+                    "periodic-uniform-independence",
+                    "slice",
+                ),
+                "periodic": {3: (0.0, 1.0)},
+            },
+            "periodic-uniform-independence",
+        ),
+        ({"bracket_mode": "shrink-only"}, "stepping-out brackets"),
+    ],
+)
+def test_swig_bridge_builder_rejects_incompatible_slice_schedules(overrides, match):
+    kwargs = {
+        "log_prior_fn": _toy_log_prior,
+        "build_cache": _toy_build_cache,
+        "log_likelihood_from_cache_fn": _toy_log_likelihood_from_cache,
+        "rebuild_required_by_block": _REBUILD_BY_BLOCK,
+        "resolved_bridge_blocks": (((3, 4), False),),
+        "num_gibbs_sweeps": 1,
+        "num_inner_steps_per_dim": 1,
+        "max_steps": 10,
+        "max_shrinkage": 100,
+        "periodic": None,
+        "n_dims": _N_DIMS,
+    }
+    kwargs.update(overrides)
+
+    with pytest.raises(ValueError, match=match):
+        _build_swig_constrained_step(**kwargs)
+
+
+def test_swig_bridge_adds_one_joint_cache_hit_slice_at_end_of_sweep():
+    common = {
+        "log_prior_fn": _toy_log_prior,
+        "build_cache": _toy_build_cache,
+        "log_likelihood_from_cache_fn": _toy_log_likelihood_from_cache,
+        "rebuild_required_by_block": _REBUILD_BY_BLOCK,
+        "num_gibbs_sweeps": 2,
+        "num_inner_steps_per_dim": 1,
+        "max_steps": 10,
+        "max_shrinkage": 100,
+        "periodic": None,
+        "n_dims": _N_DIMS,
+        "per_slice_info": True,
+    }
+    baseline_step = _build_swig_constrained_step(**common)
+    bridge_step = _build_swig_constrained_step(
+        **common,
+        resolved_bridge_blocks=(((3, 4), False),),
+    )
+    threshold = jnp.asarray(-25.0)
+    state = _particle_state(jnp.zeros(_N_DIMS), threshold)
+    primary_factors = _block_covariance_factors()
+    bridge_factor = jnp.linalg.cholesky(jnp.asarray([[0.6, 0.2], [0.2, 0.9]]))
+
+    baseline_state, baseline_info = baseline_step(
+        jax.random.key(3),
+        state,
+        threshold,
+        block_covariance_factors=primary_factors,
+    )
+    bridge_state, bridge_info = bridge_step(
+        jax.random.key(3),
+        state,
+        threshold,
+        block_covariance_factors=(*primary_factors, bridge_factor),
+    )
+
+    assert baseline_info.num_expansions.shape == (12,)
+    assert bridge_info.num_expansions.shape == (14,)
+    assert not jnp.array_equal(bridge_state.position, baseline_state.position)
+
+
 def test_swig_fsm_constrained_step_matches_lockstep_bitwise():
     lockstep, fsm = _swig_builders()
     n_lanes = 64

@@ -140,6 +140,7 @@ class _ComplementaryDEAttemptInfo(NamedTuple):
 
 
 ResolvedDEJumpBlock = tuple[tuple[int, ...], bool, int]
+ResolvedBridgeBlock = tuple[tuple[int, ...], bool]
 
 _COMPLEMENTARY_DE_KEY_DOMAIN = 0xCDE40000
 
@@ -1160,6 +1161,7 @@ def _build_swig_constrained_step(
     direction_mode: str = "covariance",
     de_fraction: float = 0.5,
     num_de_jumps: int = 0,
+    resolved_bridge_blocks: tuple[ResolvedBridgeBlock, ...] = (),
     resolved_de_jump_blocks: tuple[ResolvedDEJumpBlock, ...] = (),
     block_kernel_modes: Optional[Sequence[str]] = None,
     resolved_complementary_de_jump_block: Optional[ResolvedDEJumpBlock] = None,
@@ -1193,6 +1195,16 @@ def _build_swig_constrained_step(
     uses_periodic_independence = (
         "periodic-uniform-independence" in resolved_block_kernel_modes
     )
+    if any(requires_rebuild for _, requires_rebuild in resolved_bridge_blocks):
+        raise ValueError("bridge blocks must be cache-resident")
+    if resolved_bridge_blocks and direction_mode != "covariance":
+        raise ValueError("bridge blocks require covariance directions")
+    if resolved_bridge_blocks and uses_periodic_independence:
+        raise ValueError(
+            "bridge blocks cannot combine with periodic-uniform-independence"
+        )
+    if resolved_bridge_blocks and shrink_only:
+        raise ValueError("bridge blocks require stepping-out brackets")
     if resolved_complementary_de_jump_block is not None:
         complementary_indices, complementary_rebuild, complementary_attempts = (
             resolved_complementary_de_jump_block
@@ -1267,6 +1279,15 @@ def _build_swig_constrained_step(
                 block_covariance_factors,
             )
         )
+        n_primary_blocks = len(rebuild_required_by_block)
+        expected_direction_parameters = n_primary_blocks + len(resolved_bridge_blocks)
+        if len(block_direction_parameters) != expected_direction_parameters:
+            raise ValueError(
+                "block direction parameters must contain one entry per primary "
+                "and bridge block"
+            )
+        primary_direction_parameters = block_direction_parameters[:n_primary_blocks]
+        bridge_direction_parameters = block_direction_parameters[n_primary_blocks:]
         if block_widths is not None and len(block_widths) != len(
             rebuild_required_by_block
         ):
@@ -1312,7 +1333,7 @@ def _build_swig_constrained_step(
                 ) in enumerate(
                     zip(
                         rebuild_required_by_block.items(),
-                        block_direction_parameters,
+                        primary_direction_parameters,
                         block_step_counts,
                         resolved_block_kernel_modes,
                         strict=True,
@@ -1740,7 +1761,7 @@ def _build_swig_constrained_step(
             ) in enumerate(
                 zip(
                     rebuild_required_by_block.items(),
-                    block_direction_parameters,
+                    primary_direction_parameters,
                     block_step_counts,
                     strict=True,
                 )
@@ -1833,6 +1854,47 @@ def _build_swig_constrained_step(
                             shrink_key_data[slice_idx],
                         )
                     )
+            for (
+                (parameter_indices, requires_rebuild),
+                direction_parameter,
+            ) in zip(
+                resolved_bridge_blocks,
+                bridge_direction_parameters,
+                strict=True,
+            ):
+                parameter_index_array = jnp.asarray(parameter_indices)
+                keys = jax.random.split(key, 2)
+                key = keys[0]
+                (
+                    prop_keys,
+                    level_u,
+                    bracket_u,
+                    bracket_v,
+                    shrink_key_data,
+                ) = slice_randoms_from_keys(keys[1:])
+                bridge_direction = cast(
+                    Array,
+                    sample_block_direction(
+                        prop_keys[0],
+                        jnp.zeros_like(state.position[parameter_index_array]),
+                        direction_parameter,
+                    ),
+                )
+                direction = (
+                    jnp.zeros(n_dims, dtype=state.position.dtype)
+                    .at[parameter_index_array]
+                    .set(bridge_direction)
+                )
+                slice_records.append(
+                    (
+                        requires_rebuild,
+                        direction,
+                        level_u[0],
+                        bracket_u[0],
+                        bracket_v[0],
+                        shrink_key_data[0],
+                    )
+                )
 
         segments = []
         run_start = 0
@@ -1975,6 +2037,7 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
         rebuild_required_by_block: Optional[dict[tuple[int, ...], bool]] = None,
         build_cache: Optional[Callable] = None,
         log_likelihood_from_cache_fn: Optional[Callable] = None,
+        resolved_bridge_blocks: tuple[ResolvedBridgeBlock, ...] = (),
         resolved_de_jump_blocks: tuple[ResolvedDEJumpBlock, ...] = (),
         resolved_complementary_de_jump_block: Optional[ResolvedDEJumpBlock] = None,
     ) -> None:
@@ -2027,6 +2090,28 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
             raise ValueError(
                 "Resolved DE jump blocks must match the named sampler configuration."
             )
+        if len(resolved_bridge_blocks) != len(config.bridge_blocks):
+            raise ValueError(
+                "Resolved bridge blocks must match the named sampler configuration."
+            )
+        for (parameter_indices, requires_rebuild), configured_block in zip(
+            resolved_bridge_blocks,
+            config.bridge_blocks,
+            strict=True,
+        ):
+            if len(parameter_indices) != len(configured_block):
+                raise ValueError(
+                    "Resolved bridge blocks must contain the same number of "
+                    "parameters as their named configuration."
+                )
+            if (
+                not parameter_indices
+                or len(set(parameter_indices)) != len(parameter_indices)
+                or any(index < 0 or index >= n_dims for index in parameter_indices)
+            ):
+                raise ValueError("Resolved bridge block contains invalid indices.")
+            if requires_rebuild:
+                raise ValueError("Resolved bridge blocks must be cache-resident.")
         for (parameter_indices, _, attempts), configured in zip(
             resolved_de_jump_blocks, config.de_jump_blocks, strict=True
         ):
@@ -2103,6 +2188,7 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
         self._log_likelihood_from_cache_fn = log_likelihood_from_cache_fn
         self._periodic = periodic
         self._block_kernel_modes = block_kernel_modes
+        self._resolved_bridge_blocks = tuple(resolved_bridge_blocks)
         self._resolved_de_jump_blocks = tuple(resolved_de_jump_blocks)
         self._resolved_complementary_de_jump_block = (
             resolved_complementary_de_jump_block
@@ -2132,6 +2218,10 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
         n_blocks = len(rebuild_required_by_block)
         initial_widths = tuple(jnp.asarray(1.0, dtype=float) for _ in range(n_blocks))
         self._initial_block_widths = initial_widths
+        covariance_block_indices = (
+            *self._rebuild_required_by_block,
+            *(indices for indices, _ in self._resolved_bridge_blocks),
+        )
 
         def block_covariances(state):
             positions = state.particles.position
@@ -2148,7 +2238,7 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
                         jnp.asarray(parameter_indices),
                     )
                 ]
-                for parameter_indices in self._rebuild_required_by_block
+                for parameter_indices in covariance_block_indices
             )
 
         def update_block_covariances(rng_key, state, info, params=None):
@@ -2709,6 +2799,9 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
             )
             if mode == "slice"
         )
+        slice_updates_per_replacement += self._swig_config.num_gibbs_sweeps * len(
+            self._resolved_bridge_blocks
+        )
         n_replacements = np.asarray(update_info.is_accepted).size
         n_slice_updates = slice_updates_per_replacement * n_replacements
         # Stepping-out slice updates evaluate both bracket endpoints (2 evals
@@ -2768,6 +2861,10 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
             constrained_step_kwargs["per_slice_info"] = (
                 self._swig_config.adaptive_slice_widths
             )
+            if self._resolved_bridge_blocks:
+                constrained_step_kwargs["resolved_bridge_blocks"] = (
+                    self._resolved_bridge_blocks
+                )
         constrained_step = constrained_step_builder(**constrained_step_kwargs)
         if mesh is None:
             if self._resolved_complementary_de_jump_block is None:

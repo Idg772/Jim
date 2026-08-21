@@ -73,6 +73,71 @@ def test_swig_sampling_defaults():
     assert config.complementary_de_jump_block is None
     assert config.block_kernel_modes is None
     assert config.periodic_wrapped_covariance is False
+    assert config.bridge_blocks == []
+
+
+def test_swig_bridge_blocks_may_overlap_primary_but_require_unique_members():
+    config = BlackJAXSwiGConfig(
+        blocks=[["a"], ["b"]],
+        bridge_blocks=[["a", "b"]],
+    )
+    assert config.bridge_blocks == [["a", "b"]]
+
+    with pytest.raises(ValidationError, match="cannot contain empty"):
+        BlackJAXSwiGConfig(
+            blocks=[["a"], ["b"]],
+            bridge_blocks=[[]],
+        )
+    with pytest.raises(ValidationError, match="duplicate parameters"):
+        BlackJAXSwiGConfig(
+            blocks=[["a"], ["b"]],
+            bridge_blocks=[["a", "a"]],
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"direction_mode": "de-mix"}, "covariance directions"),
+        ({"scheduler": "pre-fsm-lockstep"}, "scheduler='fsm'"),
+        (
+            {
+                "block_kernel_modes": [
+                    "periodic-uniform-independence",
+                    "slice",
+                ]
+            },
+            "periodic-uniform-independence",
+        ),
+        ({"adaptive_slice_widths": True}, "fixed slice widths"),
+        (
+            {"adaptive_slice_widths": True, "bracket_mode": "shrink-only"},
+            "fixed slice widths",
+        ),
+    ],
+)
+def test_swig_bridge_blocks_require_plain_fixed_width_covariance_fsm(overrides, match):
+    with pytest.raises(ValidationError, match=match):
+        BlackJAXSwiGConfig(
+            blocks=[["a"], ["b"]],
+            bridge_blocks=[["a", "b"]],
+            **overrides,
+        )
+
+
+def test_swig_bridge_blocks_reject_complementary_de_schedule():
+    intrinsic = [f"intrinsic_{index}" for index in range(8)]
+    with pytest.raises(ValidationError, match="complementary DE"):
+        BlackJAXSwiGConfig(
+            blocks=[intrinsic, ["phase"]],
+            bridge_blocks=[[intrinsic[0], "phase"]],
+            block_kernel_modes=["slice", "periodic-uniform-independence"],
+            complementary_de_jump_block={
+                "parameters": intrinsic,
+                "attempts": 4,
+            },
+            num_gibbs_sweeps=1,
+        )
 
 
 def test_swig_accepts_one_complementary_de_block_inside_its_slice_segment():

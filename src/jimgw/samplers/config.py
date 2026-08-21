@@ -406,6 +406,11 @@ class BlackJAXSwiGConfig(
     A supported likelihood validates that they form an exact partition and
     identifies which blocks refresh its cache.
 
+    ``bridge_blocks`` optionally append one fixed-width, cache-resident
+    covariance slice per bridge at the end of every Gibbs sweep. They may
+    overlap the primary partition and are available only on the plain FSM
+    covariance schedule.
+
     ``num_slice_steps_by_block`` optionally assigns an exact positive number
     of slice updates to each block, in ``blocks`` order, per Gibbs sweep. When
     omitted, every block retains the legacy
@@ -427,6 +432,7 @@ class BlackJAXSwiGConfig(
     type: Literal["blackjax-swig"] = "blackjax-swig"
 
     blocks: list[list[str]]
+    bridge_blocks: list[list[str]] = Field(default_factory=list)
     block_kernel_modes: Optional[
         list[Literal["slice", "periodic-uniform-independence"]]
     ] = None
@@ -466,6 +472,20 @@ class BlackJAXSwiGConfig(
             raise ValueError(f"parameters appear in multiple blocks: {duplicates}")
         return blocks
 
+    @field_validator("bridge_blocks")
+    @classmethod
+    def _validate_bridge_blocks(cls, blocks: list[list[str]]) -> list[list[str]]:
+        if any(not block for block in blocks):
+            raise ValueError("bridge_blocks cannot contain empty blocks")
+        for block in blocks:
+            duplicates = sorted({name for name in block if block.count(name) > 1})
+            if duplicates:
+                raise ValueError(
+                    "bridge_blocks cannot contain duplicate parameters within a "
+                    f"block: {duplicates}"
+                )
+        return blocks
+
     @field_validator("de_jump_blocks")
     @classmethod
     def _validate_de_jump_blocks(
@@ -484,6 +504,22 @@ class BlackJAXSwiGConfig(
             raise ValueError(
                 "block_kernel_modes must contain exactly one mode per block"
             )
+        if self.bridge_blocks:
+            if self.direction_mode != "covariance":
+                raise ValueError("bridge_blocks require covariance directions")
+            if self.scheduler != "fsm":
+                raise ValueError("bridge_blocks require scheduler='fsm'")
+            if self.complementary_de_jump_block is not None:
+                raise ValueError("bridge_blocks cannot combine with complementary DE")
+            if (
+                self.block_kernel_modes is not None
+                and "periodic-uniform-independence" in self.block_kernel_modes
+            ):
+                raise ValueError(
+                    "bridge_blocks cannot combine with periodic-uniform-independence"
+                )
+            if self.adaptive_slice_widths or self.bracket_mode == "shrink-only":
+                raise ValueError("bridge_blocks require fixed slice widths")
         if self.complementary_de_jump_block is not None:
             target = self.complementary_de_jump_block.parameters
             if target not in self.blocks:

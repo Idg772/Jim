@@ -744,6 +744,75 @@ class TestJimPriorLikelihoodConsistencyChecks:
             if block != intrinsic_block
         )
 
+    def test_swig_resolves_cache_hit_bridge_blocks_and_passes_them_to_backend(self):
+        from jimgw.samplers.config import BlackJAXSwiGConfig
+
+        prior = CombinePrior(
+            [
+                UniformPrior(10.0, 80.0, parameter_names=["M_c"]),
+                UniformPrior(0.125, 1.0, parameter_names=["q"]),
+                UniformPrior(0.0, 3.14, parameter_names=["ra"]),
+                UniformPrior(-1.57, 1.57, parameter_names=["dec"]),
+                UniformPrior(0.0, 3.14, parameter_names=["psi"]),
+                UniformPrior(-0.1, 0.1, parameter_names=["t_c"]),
+            ]
+        )
+        likelihood = self._make_mock_single_event_likelihood(
+            waveform_parameter_names=("M_c", "q"),
+        )
+
+        jim = Jim(
+            likelihood=likelihood,
+            prior=prior,
+            sampler_config=BlackJAXSwiGConfig(
+                blocks=[["M_c", "q"], ["ra", "dec"], ["psi"], ["t_c"]],
+                bridge_blocks=[["ra", "dec", "psi"]],
+                n_live=4,
+                n_delete_frac=0.5,
+            ),
+        )
+
+        expected_indices = tuple(
+            jim.sampling_parameter_names.index(name) for name in ("ra", "dec", "psi")
+        )
+        expected = ((expected_indices, False),)
+        assert jim._sampler_backend_kwargs["resolved_bridge_blocks"] == expected
+        assert jim.sampler._resolved_bridge_blocks == expected
+
+    def test_swig_rejects_bridge_blocks_that_require_waveform_rebuilds(self):
+        from jimgw.samplers.config import BlackJAXSwiGConfig
+
+        prior = CombinePrior(
+            [
+                UniformPrior(10.0, 80.0, parameter_names=["M_c"]),
+                UniformPrior(0.125, 1.0, parameter_names=["q"]),
+                UniformPrior(0.0, 3.14, parameter_names=["ra"]),
+                UniformPrior(-1.57, 1.57, parameter_names=["dec"]),
+                UniformPrior(0.0, 3.14, parameter_names=["psi"]),
+                UniformPrior(-0.1, 0.1, parameter_names=["t_c"]),
+            ]
+        )
+        likelihood = self._make_mock_single_event_likelihood(
+            waveform_parameter_names=("M_c", "q"),
+        )
+
+        with pytest.raises(ValueError, match="Bridge blocks must be cache-resident"):
+            Jim(
+                likelihood=likelihood,
+                prior=prior,
+                sampler_config=BlackJAXSwiGConfig(
+                    blocks=[
+                        ["M_c", "q"],
+                        ["ra", "dec"],
+                        ["psi"],
+                        ["t_c"],
+                    ],
+                    bridge_blocks=[["M_c", "ra"]],
+                    n_live=4,
+                    n_delete_frac=0.5,
+                ),
+            )
+
     def test_swig_rejects_unknown_named_de_jump_parameters(self):
         from jimgw.samplers.config import BlackJAXSwiGConfig
 
@@ -762,6 +831,29 @@ class TestJimPriorLikelihoodConsistencyChecks:
                 sampler_config=BlackJAXSwiGConfig(
                     blocks=[["M_c"], ["q"]],
                     de_jump_blocks=[{"parameters": ["missing"]}],
+                    n_live=4,
+                    n_delete_frac=0.5,
+                ),
+            )
+
+    def test_swig_rejects_unknown_named_bridge_parameters(self):
+        from jimgw.samplers.config import BlackJAXSwiGConfig
+
+        likelihood = self._make_mock_single_event_likelihood(
+            waveform_parameter_names=("M_c", "q"),
+        )
+        with pytest.raises(ValueError, match="not sampling parameters"):
+            Jim(
+                likelihood=likelihood,
+                prior=CombinePrior(
+                    [
+                        UniformPrior(10.0, 80.0, parameter_names=["M_c"]),
+                        UniformPrior(0.125, 1.0, parameter_names=["q"]),
+                    ]
+                ),
+                sampler_config=BlackJAXSwiGConfig(
+                    blocks=[["M_c"], ["q"]],
+                    bridge_blocks=[["missing"]],
                     n_live=4,
                     n_delete_frac=0.5,
                 ),

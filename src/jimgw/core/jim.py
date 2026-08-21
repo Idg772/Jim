@@ -247,6 +247,10 @@ class Jim:
                     [block.parameters for block in sampler_config.de_jump_blocks],
                     parameter_names=self.sampling_parameter_names,
                 )
+                _validate_parameter_groups(
+                    sampler_config.bridge_blocks,
+                    parameter_names=self.sampling_parameter_names,
+                )
                 if sampler_config.complementary_de_jump_block is not None:
                     _validate_parameter_groups(
                         [sampler_config.complementary_de_jump_block.parameters],
@@ -418,6 +422,27 @@ class Jim:
                 sample_transforms=sample_transforms,
                 likelihood_transforms=likelihood_transforms,
             )
+            resolved_bridge_blocks = _resolve_rebuild_required_by_parameter_groups(
+                likelihood,
+                sampler_config.bridge_blocks,
+                parameter_names=self.sampling_parameter_names,
+                sample_transforms=sample_transforms,
+                likelihood_transforms=likelihood_transforms,
+            )
+            rebuild_bridge_blocks = [
+                block
+                for block, (_, requires_rebuild) in zip(
+                    sampler_config.bridge_blocks,
+                    resolved_bridge_blocks,
+                    strict=True,
+                )
+                if requires_rebuild
+            ]
+            if rebuild_bridge_blocks:
+                raise ValueError(
+                    "Bridge blocks must be cache-resident; waveform rebuilds are "
+                    f"required by {rebuild_bridge_blocks}."
+                )
             resolved_de_jump_blocks = _resolve_rebuild_required_by_parameter_groups(
                 likelihood,
                 [block.parameters for block in sampler_config.de_jump_blocks],
@@ -455,6 +480,10 @@ class Jim:
                 "build_cache": build_cache,
                 "log_likelihood_from_cache_fn": log_likelihood_from_cache_fn,
             }
+            if resolved_bridge_blocks:
+                self._sampler_backend_kwargs["resolved_bridge_blocks"] = (
+                    resolved_bridge_blocks
+                )
             if resolved_de_jump_blocks:
                 self._sampler_backend_kwargs["resolved_de_jump_blocks"] = tuple(
                     (indices, requires_rebuild, block.attempts)

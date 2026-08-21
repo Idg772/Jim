@@ -83,6 +83,62 @@ def test_wrapped_covariance_requires_declared_periodic_bounds(periodic):
         )
 
 
+def test_swig_resolved_bridge_count_must_match_configuration():
+    config = BlackJAXSwiGConfig(
+        blocks=[["slow"], ["fast"]],
+        bridge_blocks=[["slow", "fast"]],
+        n_live=24,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Resolved bridge blocks must match the named sampler configuration",
+    ):
+        BlackJAXSwiGSampler(
+            n_dims=2,
+            log_prior_fn=_log_prior,
+            log_likelihood_fn=_log_likelihood,
+            log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+            config=config,
+            rebuild_required_by_block={(0,): True, (1,): False},
+            build_cache=_build_cache,
+            log_likelihood_from_cache_fn=_log_likelihood_from_cache,
+            resolved_bridge_blocks=(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("resolved_bridge_blocks", "match"),
+    [
+        ((((0, 1), True),), "cache-resident"),
+        ((((0, 0), False),), "invalid indices"),
+        ((((0, 2), False),), "invalid indices"),
+        ((((0,), False),), "same number of parameters"),
+    ],
+)
+def test_swig_resolved_bridges_require_valid_cache_hit_indices(
+    resolved_bridge_blocks, match
+):
+    config = BlackJAXSwiGConfig(
+        blocks=[["slow"], ["fast"]],
+        bridge_blocks=[["slow", "fast"]],
+        n_live=24,
+    )
+
+    with pytest.raises(ValueError, match=match):
+        BlackJAXSwiGSampler(
+            n_dims=2,
+            log_prior_fn=_log_prior,
+            log_likelihood_fn=_log_likelihood,
+            log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+            config=config,
+            rebuild_required_by_block={(0,): True, (1,): False},
+            build_cache=_build_cache,
+            log_likelihood_from_cache_fn=_log_likelihood_from_cache,
+            resolved_bridge_blocks=resolved_bridge_blocks,
+        )
+
+
 def _make_sampler(
     checkpoint_dir: Optional[Path] = None,
     **config_overrides,
@@ -395,6 +451,43 @@ def test_swig_has_a_distinct_sampler_name():
     assert _make_sampler().sampler_name == "BlackJAX SwiG"
 
 
+def test_swig_bridge_updates_are_included_in_slice_work_accounting():
+    config = BlackJAXSwiGConfig(
+        blocks=[["slow"], ["fast"]],
+        bridge_blocks=[["slow", "fast"]],
+        n_live=24,
+        n_delete_frac=0.25,
+        num_gibbs_sweeps=2,
+        termination_dlogz=1.5,
+        max_steps=4,
+        max_shrinkage=30,
+    )
+    sampler = BlackJAXSwiGSampler(
+        n_dims=2,
+        log_prior_fn=_log_prior,
+        log_likelihood_fn=_log_likelihood,
+        log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+        config=config,
+        rebuild_required_by_block={(0,): True, (1,): False},
+        build_cache=_build_cache,
+        log_likelihood_from_cache_fn=_log_likelihood_from_cache,
+        resolved_bridge_blocks=(((0, 1), False),),
+    )
+    initial = jax.random.uniform(jax.random.key(90), (24, 2))
+
+    sampler.sample(jax.random.key(91), initial)
+    diagnostics = sampler.get_diagnostics()
+
+    replacements = 6 * diagnostics["n_iterations"]
+    expected_updates_per_replacement = 2 * (2 + 1)
+    assert diagnostics["n_slice_updates"] == (
+        expected_updates_per_replacement * replacements
+    )
+    assert diagnostics["n_likelihood_evaluations_physical"] == (
+        diagnostics["n_likelihood_evaluations"] + 2 * diagnostics["n_slice_updates"]
+    )
+
+
 def test_swig_forwards_n_devices_to_internal_nss_config():
     """`n_devices` must reach the internally-built `BlackJAXNSSConfig` that
     `_sample` actually reads — a value forwarded by hand across two Pydantic
@@ -491,6 +584,57 @@ def test_wrapped_covariance_is_used_by_covariance_and_factor_updaters():
     )
     (factor,) = factor_params["block_covariance_factors"]
     np.testing.assert_allclose(factor @ factor.T, expected_covariance, atol=1e-12)
+
+
+def test_bridge_covariance_and_factor_are_appended_after_primary_blocks():
+    config = BlackJAXSwiGConfig(
+        blocks=[["first"], ["second"]],
+        bridge_blocks=[["first", "second"]],
+        n_live=24,
+    )
+    sampler = BlackJAXSwiGSampler(
+        n_dims=2,
+        log_prior_fn=_log_prior,
+        log_likelihood_fn=_log_likelihood,
+        log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+        config=config,
+        rebuild_required_by_block={(0,): True, (1,): False},
+        build_cache=_build_cache,
+        log_likelihood_from_cache_fn=_log_likelihood_from_cache,
+        resolved_bridge_blocks=(((0, 1), False),),
+    )
+    positions = jnp.asarray(
+        [
+            [-2.0, -1.0],
+            [-1.0, 0.5],
+            [0.0, 2.0],
+            [1.0, 1.0],
+            [2.0, -2.0],
+        ]
+    )
+    covariance = jnp.cov(positions, ddof=0, rowvar=False)
+    state = SimpleNamespace(particles=SimpleNamespace(position=positions))
+
+    covariance_params = sampler._update_inner_kernel_params_fn(
+        jax.random.key(0), state, None
+    )
+    actual_covariances = covariance_params["block_covariances"]
+    assert len(actual_covariances) == 3
+    np.testing.assert_allclose(actual_covariances[0], covariance[0:1, 0:1])
+    np.testing.assert_allclose(actual_covariances[1], covariance[1:2, 1:2])
+    np.testing.assert_allclose(actual_covariances[2], covariance)
+
+    factor_params = sampler._fsm_update_inner_kernel_params_fn(
+        jax.random.key(0), state, None
+    )
+    actual_factors = factor_params["block_covariance_factors"]
+    assert len(actual_factors) == 3
+    for factor, expected in zip(
+        actual_factors,
+        (*actual_covariances[:2], covariance),
+        strict=True,
+    ):
+        np.testing.assert_allclose(factor @ factor.T, expected)
 
 
 def test_swig_fsm_update_params_factors_each_block_once(monkeypatch):
@@ -655,6 +799,42 @@ def test_swig_forwards_explicit_block_slice_budget_to_fsm_builder(monkeypatch):
     sampler._build_nested_sampler(6)
 
     assert selected["num_slice_steps_by_block"] == [3, 1]
+
+
+def test_swig_forwards_resolved_bridge_blocks_to_fsm_builder(monkeypatch):
+    config = BlackJAXSwiGConfig(
+        blocks=[["slow"], ["fast"]],
+        bridge_blocks=[["slow", "fast"]],
+        n_live=24,
+        n_delete_frac=0.25,
+    )
+    resolved_bridge_blocks = (((0, 1), False),)
+    sampler = BlackJAXSwiGSampler(
+        n_dims=2,
+        log_prior_fn=_log_prior,
+        log_likelihood_fn=_log_likelihood,
+        log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+        config=config,
+        rebuild_required_by_block={(0,): True, (1,): False},
+        build_cache=_build_cache,
+        log_likelihood_from_cache_fn=_log_likelihood_from_cache,
+        resolved_bridge_blocks=resolved_bridge_blocks,
+    )
+    selected = {}
+
+    def fsm_builder(**kwargs):
+        selected.update(kwargs)
+        return lambda *args, **kwargs: None
+
+    def from_mcmc_builder(*args, **kwargs):
+        return lambda *args, **kwargs: None
+
+    monkeypatch.setattr(swig, "_build_swig_constrained_step", fsm_builder)
+    monkeypatch.setattr(swig, "build_from_mcmc_kernel", from_mcmc_builder)
+
+    sampler._build_nested_sampler(6)
+
+    assert selected["resolved_bridge_blocks"] == resolved_bridge_blocks
 
 
 def _make_de_mix_sampler(
