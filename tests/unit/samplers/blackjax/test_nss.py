@@ -255,6 +255,7 @@ def test_nss_sample_phase_seconds():
     phases = diag["sample_phase_seconds"]
     assert set(phases) == {
         "init_total",
+        "init_adaptive_init",
         "likelihood_jit",
         "initial_likelihood_eval",
         "sampler_kernel_jit",
@@ -262,6 +263,9 @@ def test_nss_sample_phase_seconds():
         "finalise",
     }
     assert phases["init_total"] is not None and phases["init_total"] > 0.0
+    assert (
+        phases["init_adaptive_init"] is not None and phases["init_adaptive_init"] >= 0.0
+    )
     assert phases["ns_loop"] is not None and phases["ns_loop"] > 0.0
     assert phases["finalise"] is not None and phases["finalise"] >= 0.0
 
@@ -522,3 +526,174 @@ def test_nss_resume_gives_same_result(tmp_path, monkeypatch):
 
     assert s_c.get_diagnostics()["log_Z"] == pytest.approx(log_z_a, rel=1e-6)
     assert not (tmp_path / "checkpoint.pkl").exists(), "Checkpoint was not cleaned up"
+
+
+def test_termination_reached_is_nan_safe_and_single_valued(caplog):
+    """Task 10: ``_termination_reached`` is a single-sync, NaN-safe predicate.
+
+    The previous ``bool(jnp.isfinite(dlogz) and dlogz < threshold)`` never
+    terminated when ``dlogz`` was NaN, because Python's ``and`` returns the
+    falsy left-hand array without evaluating the right-hand comparison.
+
+    ``dlogz`` is only ever non-finite as ``+inf`` (the expected value at
+    t=0, since blackjax's integrator initialises ``logZ=-inf`` with a
+    finite ``logZ_live``) or ``NaN`` (indeterminate ``inf - inf``, e.g. both
+    ``logZ_live`` and ``logZ`` simultaneously ``-inf``).  Only the NaN case
+    must terminate; treating ``+inf`` as terminal would end every run after
+    zero iterations.
+    """
+    from jimgw.samplers.blackjax.nss import _termination_reached
+
+    # t=0 initial state: logZ=-inf, logZ_live finite -> dlogz=+inf.
+    # Must NOT terminate (or every real run would stop after zero steps).
+    initial_state = SimpleNamespace(logZ_live=jnp.array(-3.2), logZ=jnp.array(-jnp.inf))
+    with caplog.at_level("WARNING"):
+        result = _termination_reached(initial_state, termination_dlogz=0.5)
+    assert result is False
+    assert isinstance(result, bool)
+    assert not caplog.records
+
+    # logZ_live == logZ == -inf -> logaddexp(0, nan) -> dlogz is NaN.
+    caplog.clear()
+    nan_integrator = SimpleNamespace(
+        logZ_live=jnp.array(-jnp.inf), logZ=jnp.array(-jnp.inf)
+    )
+    with caplog.at_level("WARNING"):
+        result = _termination_reached(nan_integrator, termination_dlogz=0.5)
+    assert result is True  # NaN dlogz now terminates (semantics change)
+    assert isinstance(result, bool)
+    assert any("nan" in rec.message.lower() for rec in caplog.records)
+
+    # Finite dlogz well above the threshold: must not terminate.
+    caplog.clear()
+    non_terminal = SimpleNamespace(logZ_live=jnp.array(0.0), logZ=jnp.array(-100.0))
+    with caplog.at_level("WARNING"):
+        result = _termination_reached(non_terminal, termination_dlogz=0.5)
+    assert result is False
+    assert isinstance(result, bool)
+    assert not caplog.records
+
+    # Finite dlogz below the threshold: terminates, no warning.
+    caplog.clear()
+    terminal = SimpleNamespace(logZ_live=jnp.array(-100.0), logZ=jnp.array(0.0))
+    with caplog.at_level("WARNING"):
+        result = _termination_reached(terminal, termination_dlogz=0.5)
+    assert result is True
+    assert isinstance(result, bool)
+    assert not caplog.records
+
+
+def test_finalise_on_host_matches_blackjax_finalise():
+    """Task 11: ``_finalise_on_host`` is value-identical to blackjax's finalise."""
+    from blackjax.mcmc.slice import SliceInfo
+    from blackjax.ns.base import NSInfo, StateWithLogLikelihood
+    from blackjax.ns.utils import finalise as blackjax_finalise
+
+    from jimgw.samplers.blackjax.nss import _finalise_on_host
+
+    rng = np.random.default_rng(0)
+
+    def _make_particles(n: int) -> StateWithLogLikelihood:
+        return StateWithLogLikelihood(
+            position=jnp.asarray(rng.normal(size=(n, 3))),
+            logdensity=jnp.asarray(rng.normal(size=(n,))),
+            loglikelihood=jnp.asarray(rng.normal(size=(n,))),
+            loglikelihood_birth=jnp.asarray(rng.normal(size=(n,))),
+        )
+
+    def _make_update_info(n: int) -> SliceInfo:
+        return SliceInfo(
+            is_accepted=jnp.asarray(rng.integers(0, 2, size=(n,))).astype(bool),
+            num_expansions=jnp.asarray(rng.integers(0, 5, size=(n,))),
+            num_shrink=jnp.asarray(rng.integers(0, 5, size=(n,))),
+            bracket_left=jnp.asarray(rng.normal(size=(n, 3))),
+            bracket_right=jnp.asarray(rng.normal(size=(n, 3))),
+        )
+
+    n_delete = 2
+    dead = [
+        NSInfo(
+            particles=_make_particles(n_delete),
+            update_info=_make_update_info(n_delete),
+        )
+        for _ in range(3)
+    ]
+    state = SimpleNamespace(particles=_make_particles(4))
+
+    expected = blackjax_finalise(state, dead)
+    actual = _finalise_on_host(state, dead)
+
+    expected_leaves, expected_tree = jax.tree.flatten(expected)
+    actual_leaves, actual_tree = jax.tree.flatten(actual)
+    assert expected_tree == actual_tree
+    assert len(expected_leaves) == len(actual_leaves)
+    for expected_leaf, actual_leaf in zip(expected_leaves, actual_leaves, strict=True):
+        assert isinstance(actual_leaf, np.ndarray)
+        assert np.array_equal(np.asarray(expected_leaf), actual_leaf)
+
+    with pytest.raises(ValueError, match="finalise requires"):
+        _finalise_on_host(state, [])
+
+
+def test_nss_init_phase_seconds_keys_on_sharded_run():
+    """Task 12: mesh-path init sub-phase timers appear with non-negative values."""
+    if jax.local_device_count() < 2:
+        pytest.skip(
+            "requires >=2 local JAX devices "
+            "(e.g. XLA_FLAGS=--xla_force_host_platform_device_count=2)"
+        )
+
+    prior = CombinePrior(
+        [
+            UniformPrior(0.0, 1.0, parameter_names=["x"]),
+            UniformPrior(0.0, 1.0, parameter_names=["y"]),
+        ]
+    )
+    likelihood = _GaussianLikelihood()
+    parameter_names = prior.parameter_names
+    config = BlackJAXNSSConfig(
+        n_live=8,
+        n_delete_frac=0.5,
+        num_inner_steps_per_dim=1,
+        termination_dlogz=2.0,
+        n_devices=2,
+    )
+
+    def log_prior_fn(arr):
+        return prior.log_prob(dict(zip(parameter_names, arr, strict=True)))
+
+    def log_likelihood_fn(arr):
+        return likelihood.evaluate(dict(zip(parameter_names, arr, strict=True)))
+
+    def log_posterior_fn(arr):
+        return log_prior_fn(arr) + log_likelihood_fn(arr)
+
+    sampler = BlackJAXNSSSampler(
+        n_dims=len(parameter_names),
+        log_prior_fn=log_prior_fn,
+        log_likelihood_fn=log_likelihood_fn,
+        log_posterior_fn=log_posterior_fn,
+        config=config,
+    )
+    sampler.sample(jax.random.key(7), _init_pos(8))
+    phases = sampler.get_diagnostics()["sample_phase_seconds"]
+
+    for key in (
+        "init_adaptive_init",
+        "init_particle_replication",
+        "init_state_placement",
+    ):
+        assert key in phases, f"missing phase key {key!r}: {sorted(phases)}"
+        assert phases[key] is not None
+        assert phases[key] >= 0.0
+
+    # Pre-existing keys are untouched by the new instrumentation.
+    for key in (
+        "init_total",
+        "likelihood_jit",
+        "initial_likelihood_eval",
+        "sampler_kernel_jit",
+        "ns_loop",
+        "finalise",
+    ):
+        assert key in phases

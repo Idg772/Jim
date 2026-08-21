@@ -22,7 +22,6 @@ from blackjax.ns.nss import (
     live_covariance,
     sample_direction_from_covariance,
 )
-from blackjax.ns.utils import finalise
 from blackjax.smc.tuning.from_particles import particles_covariance_matrix
 from jax.flatten_util import ravel_pytree
 from jax.sharding import Mesh
@@ -181,6 +180,74 @@ def _build_nss_fsm_constrained_step(
         return new_state, info
 
     return constrained_step
+
+
+def _termination_reached(integrator, termination_dlogz: float) -> bool:
+    """Single-sync, NaN-safe nested-sampling termination check.
+
+    ``dlogz = logaddexp(0, logZ_live - logZ)`` estimates the remaining
+    evidence fraction still held by the live points; it is always >= 0, so
+    the only non-finite values it can take are ``+inf`` or ``NaN``.
+    ``+inf`` is the *expected* value before the first iteration --
+    ``blackjax``'s integrator initialises ``logZ = -inf`` with a finite
+    ``logZ_live``, so ``logZ_live - logZ = +inf`` at start-up -- and must
+    **not** terminate the loop.  ``NaN`` is an indeterminate ``inf - inf``
+    (e.g. ``logZ_live`` and ``logZ`` simultaneously ``-inf``: no live
+    evidence *and* no dead evidence), which cannot shrink further, so it is
+    treated as terminal to avoid an infinite loop.  The previous
+    ``bool(jnp.isfinite(dlogz) and dlogz < threshold)`` implementation
+    silently never terminated on NaN: Python's ``and`` short-circuits on the
+    falsy left-hand array, returning it (which is falsy) without ever
+    evaluating the finite-and-below-threshold comparison, and it forced two
+    device syncs (one per ``bool()``) instead of one.
+    """
+    dlogz = jnp.logaddexp(0, integrator.logZ_live - integrator.logZ)
+    is_nan = jnp.isnan(dlogz)
+    terminate = bool(is_nan | (dlogz < termination_dlogz))
+    if terminate and bool(is_nan):
+        logger.warning(
+            "Nested sampling termination criterion dlogz is NaN "
+            "(logZ_live=%s, logZ=%s); terminating the run to avoid an "
+            "infinite loop.",
+            integrator.logZ_live,
+            integrator.logZ,
+        )
+    return terminate
+
+
+def _finalise_on_host(state, dead: list) -> NSInfo:
+    """Host-numpy equivalent of ``blackjax.ns.utils.finalise``.
+
+    Avoids tracing one variadic device concatenate over the whole dead
+    history (n_iter operands x ~24 leaves) at the end of every run: pulling
+    the (already small) dead-point history and final live state to the host
+    once and concatenating with numpy is value-identical and orders of
+    magnitude cheaper than compiling blackjax's device-side ``finalise``.
+    """
+    if not dead:
+        raise ValueError("finalise requires at least one dead-point batch")
+    host_dead = jax.device_get(dead)
+    host_particles = jax.device_get(state.particles)
+    update_info = jax.tree.map(
+        lambda *leaves: np.concatenate([np.asarray(leaf) for leaf in leaves], axis=0),
+        *[info.update_info for info in host_dead],
+    )
+    particles = jax.tree.map(
+        lambda *leaves: np.concatenate([np.asarray(leaf) for leaf in leaves], axis=0),
+        *([info.particles for info in host_dead] + [host_particles]),
+    )
+    return NSInfo(particles, update_info)
+
+
+# Module-level alias so ``_sample`` resolves ``finalise`` dynamically through
+# the module's global namespace at call time (not an early-bound reference).
+# ``tests/unit/samplers/blackjax/test_swig.py`` monkeypatches
+# ``jimgw.samplers.blackjax.nss.finalise`` to spy on the live
+# ``AdaptiveNSState`` just before it is combined with the dead-point history
+# (the state itself is discarded once finalise runs); keeping the call site
+# spelled ``finalise(...)`` preserves that hook while defaulting to the
+# faster host-numpy implementation.
+finalise = _finalise_on_host
 
 
 class BlackJAXNSSSampler(Sampler):
@@ -394,10 +461,14 @@ class BlackJAXNSSSampler(Sampler):
                 return jax.lax.map(_single_init_fn, pos, batch_size=n_delete)
 
             if mesh is None:
+                _adaptive_init_t0 = time.perf_counter()
                 state = _ns_adaptive_init(
                     positions,
                     init_state_fn=_batched_fn,
                     update_inner_kernel_params_fn=update_inner_kernel_params_fn,
+                )
+                phase_seconds["init_adaptive_init"] = (
+                    time.perf_counter() - _adaptive_init_t0
                 )
                 phase_seconds["init_total"] = time.perf_counter() - _init_t0
                 return state
@@ -419,13 +490,23 @@ class BlackJAXNSSSampler(Sampler):
             _eval_t0 = time.perf_counter()
             initial_particles = jax.block_until_ready(_compiled_init(positions))
             phase_seconds["initial_likelihood_eval"] = time.perf_counter() - _eval_t0
+            _replication_t0 = time.perf_counter()
             initial_particles = replicate_initial_particles(initial_particles, mesh)
+            phase_seconds["init_particle_replication"] = (
+                time.perf_counter() - _replication_t0
+            )
+            _adaptive_init_t0 = time.perf_counter()
             state = _ns_adaptive_init(
                 initial_particles.position,
                 init_state_fn=lambda _: initial_particles,
                 update_inner_kernel_params_fn=update_inner_kernel_params_fn,
             )
+            phase_seconds["init_adaptive_init"] = (
+                time.perf_counter() - _adaptive_init_t0
+            )
+            _placement_t0 = time.perf_counter()
             state = place_replicated_state(state, mesh)
+            phase_seconds["init_state_placement"] = time.perf_counter() - _placement_t0
             phase_seconds["init_total"] = time.perf_counter() - _init_t0
             return state
 
@@ -485,8 +566,7 @@ class BlackJAXNSSSampler(Sampler):
             rng_key = place_key(rng_key, mesh)
 
         def _terminate(state: AdaptiveNSState) -> bool:
-            dlogz = jnp.logaddexp(0, state.integrator.logZ_live - state.integrator.logZ)
-            return bool(jnp.isfinite(dlogz) and dlogz < config.termination_dlogz)
+            return _termination_reached(state.integrator, config.termination_dlogz)
 
         # Compile the outer sampler kernel explicitly so its one-off cost is
         # measured independently of steady-state nested-sampling work.  This
@@ -535,7 +615,7 @@ class BlackJAXNSSSampler(Sampler):
 
         _finalise_t0 = time.perf_counter()
         final_state = finalise(state, dead)  # type: ignore[arg-type]  # AdaptiveNSState structurally satisfies NSState (.particles field)
-        self._final_state = jax.device_get(final_state)
+        self._final_state = final_state
         self._n_iterations = n_iter
 
         # Build anesthetic NestedSamples for use in get_samples() and get_diagnostics().
