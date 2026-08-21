@@ -10,6 +10,7 @@ from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.scipy.special import logsumexp
 from jaxtyping import Array, Float
 
@@ -289,7 +290,7 @@ def _folded_log_posterior(
     return jnp.where(_in_fundamental_domain(position, fold), log_posterior, -jnp.inf)
 
 
-def _unfold_weighted_samples(
+def _unfold_weighted_samples_static(
     positions: Float[Array, "n_points n_dims"],
     log_weights: Float[Array, " n_points"],
     fold: ResolvedFoldSymmetry,
@@ -299,12 +300,11 @@ def _unfold_weighted_samples(
     *,
     batch_size: int | None = None,
 ) -> UnfoldedWeightedSamples:
-    """Deterministically split weighted representatives over all eight images.
+    """JIT-compatible fixed-shape eight-image expansion kernel.
 
     The returned arrays have fixed size ``n_points * 8`` and retain zero-mass
-    branches as ``-inf`` log weights.  This static representation is suitable
-    for JIT compilation; callers may remove zero-mass rows after computing any
-    full-image telemetry they require.
+    branches as ``-inf`` log weights. Host-side input filtering and validation
+    belong to `_unfold_weighted_samples`.
     """
 
     positions = jnp.asarray(positions)
@@ -354,3 +354,69 @@ def _unfold_weighted_samples(
         true_log_likelihoods=likelihoods.reshape((-1,)),
         log_branch_probabilities=branch_probabilities.reshape((-1,)),
     )
+
+
+def _unfold_weighted_samples(
+    positions: Float[Array, "n_points n_dims"],
+    log_weights: Float[Array, " n_points"],
+    fold: ResolvedFoldSymmetry,
+    base_log_prior_fn: Callable[[Array], Array],
+    base_log_likelihood_from_cache_fn: Callable[[Array, Any], Array],
+    build_cache: Callable[[Array], Any],
+    *,
+    batch_size: int | None = None,
+) -> UnfoldedWeightedSamples:
+    """Safely unfold a host-side weighted nested-sampling collection.
+
+    Exactly zero-mass nested rows (``log_weight == -inf``) are discarded before
+    the static kernel builds waveform caches. Unsupported image branches remain
+    present in the returned eight-image tables with ``-inf`` weights.
+    """
+
+    host_positions = np.asarray(positions)
+    host_log_weights = np.asarray(log_weights)
+    if host_positions.ndim != 2:
+        raise ValueError("positions must have shape (n_points, n_dims)")
+    if (
+        host_log_weights.ndim != 1
+        or host_log_weights.shape[0] != host_positions.shape[0]
+    ):
+        raise ValueError("log_weights must have shape (n_points,)")
+    if np.any(np.isnan(host_log_weights)) or np.any(np.isposinf(host_log_weights)):
+        raise ValueError("log_weights may be finite or -inf, but not NaN or +inf")
+
+    retained = ~np.isneginf(host_log_weights)
+    if not np.any(retained):
+        raise ValueError("at least one finite-weight row is required for unfolding")
+    retained_positions = jnp.asarray(host_positions[retained])
+    retained_log_weights = jnp.asarray(host_log_weights[retained])
+    unfolded = _unfold_weighted_samples_static(
+        retained_positions,
+        retained_log_weights,
+        fold,
+        base_log_prior_fn,
+        base_log_likelihood_from_cache_fn,
+        build_cache,
+        batch_size=batch_size,
+    )
+
+    n_retained = int(retained_log_weights.shape[0])
+    branch_probabilities = np.asarray(unfolded.log_branch_probabilities).reshape(
+        n_retained, 8
+    )
+    impossible_rows = ~np.any(np.isfinite(branch_probabilities), axis=1)
+    if np.any(impossible_rows):
+        bad_rows = np.flatnonzero(retained)[impossible_rows].tolist()
+        raise ValueError(
+            "finite-weight row has no finite base posterior branch: "
+            f"input row(s) {bad_rows}"
+        )
+
+    input_log_total = float(logsumexp(retained_log_weights))
+    output_log_total = float(logsumexp(unfolded.log_weights))
+    if not np.isclose(output_log_total, input_log_total, rtol=0.0, atol=1.0e-12):
+        raise RuntimeError(
+            "deterministic unfolding did not preserve total log weight: "
+            f"input={input_log_total}, output={output_log_total}"
+        )
+    return unfolded

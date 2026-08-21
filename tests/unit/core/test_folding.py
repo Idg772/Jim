@@ -19,6 +19,7 @@ from jimgw.core.folding import (
     _folded_target_from_image_values,
     _in_fundamental_domain,
     _unfold_weighted_samples,
+    _unfold_weighted_samples_static,
 )
 
 
@@ -352,7 +353,7 @@ def test_deterministic_unfolding_splits_each_weight_over_aligned_images() -> Non
         )
 
     unfold = jax.jit(
-        lambda x, w: _unfold_weighted_samples(
+        lambda x, w: _unfold_weighted_samples_static(
             x,
             w,
             fold,
@@ -403,3 +404,150 @@ def test_deterministic_unfolding_splits_each_weight_over_aligned_images() -> Non
 
     first_image_priors = jax.vmap(base_log_prior)(expected_images[0])
     assert jnp.all(jnp.isneginf(output_weights[0][~jnp.isfinite(first_image_priors)]))
+
+
+def test_unfolding_drops_zero_weight_rows_before_building_caches() -> None:
+    fold = _fold()
+    positions = jnp.asarray(
+        [
+            [1.0, 0.2, 0.3, 0.1, -1.0],
+            [999.0, 0.2, 0.3, 0.1, -2.0],
+            [3.0, 0.2, 0.3, 0.1, -3.0],
+        ]
+    )
+    log_weights = jnp.asarray([jnp.log(0.4), -jnp.inf, jnp.log(0.6)])
+    cache_inputs: list[float] = []
+
+    def base_log_prior(position: jax.Array) -> jax.Array:
+        return jnp.where(position[fold.indices[0]] < 0.0, 0.0, -jnp.inf)
+
+    def build_cache(position: jax.Array) -> jax.Array:
+        jax.debug.callback(
+            lambda value: cache_inputs.append(float(value)),
+            position[0],
+            ordered=True,
+        )
+        return position[0]
+
+    def true_log_likelihood(position: jax.Array, cache: jax.Array) -> jax.Array:
+        return position[1] + 0.01 * cache
+
+    unfolded = _unfold_weighted_samples(
+        positions,
+        log_weights,
+        fold,
+        base_log_prior,
+        true_log_likelihood,
+        build_cache,
+        batch_size=1,
+    )
+    jax.block_until_ready(unfolded.log_weights)
+
+    assert unfolded.positions.shape == (16, 5)
+    assert cache_inputs == [1.0, 3.0]
+    assert 999.0 not in cache_inputs
+    output_weights = unfolded.log_weights.reshape(2, 8)
+    assert jnp.all(jnp.sum(jnp.isneginf(output_weights), axis=1) == 4)
+    assert float(jax.scipy.special.logsumexp(unfolded.log_weights)) == pytest.approx(
+        0.0, abs=1.0e-12
+    )
+
+
+def test_unfolding_rejects_finite_row_with_no_posterior_branch_without_nans() -> None:
+    fold = _fold()
+    positions = jnp.asarray([[1.0, 0.2, 0.3, 0.1, -1.0]])
+    log_weights = jnp.asarray([0.0])
+
+    def base_log_prior(position: jax.Array) -> jax.Array:
+        del position
+        return jnp.asarray(0.0)
+
+    def build_cache(position: jax.Array) -> jax.Array:
+        return position[0]
+
+    def impossible_log_likelihood(position: jax.Array, cache: jax.Array) -> jax.Array:
+        del position, cache
+        return jnp.asarray(-jnp.inf)
+
+    static_unfold = jax.jit(
+        lambda x, w: _unfold_weighted_samples_static(
+            x,
+            w,
+            fold,
+            base_log_prior,
+            impossible_log_likelihood,
+            build_cache,
+            batch_size=1,
+        )
+    )
+    impossible = static_unfold(positions, log_weights)
+    assert jnp.all(jnp.isneginf(impossible.log_branch_probabilities))
+    assert not bool(jnp.any(jnp.isnan(impossible.log_branch_probabilities)))
+    assert not bool(jnp.any(jnp.isnan(impossible.log_weights)))
+
+    with pytest.raises(ValueError, match="no finite base posterior branch"):
+        _unfold_weighted_samples(
+            positions,
+            log_weights,
+            fold,
+            base_log_prior,
+            impossible_log_likelihood,
+            build_cache,
+            batch_size=1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("positions", "log_weights", "message"),
+    [
+        (jnp.zeros(5), jnp.zeros(1), "positions must have shape"),
+        (jnp.zeros((1, 5)), jnp.zeros((1, 1)), "log_weights must have shape"),
+        (jnp.zeros((2, 5)), jnp.zeros(1), "log_weights must have shape"),
+        (jnp.zeros((1, 5)), jnp.asarray([jnp.nan]), "finite or -inf"),
+        (jnp.zeros((1, 5)), jnp.asarray([jnp.inf]), "finite or -inf"),
+        (jnp.zeros((1, 5)), jnp.asarray([-jnp.inf]), "finite-weight row"),
+    ],
+    ids=(
+        "positions-rank",
+        "weights-rank",
+        "weights-length",
+        "weights-nan",
+        "weights-positive-infinity",
+        "no-finite-weight-row",
+    ),
+)
+def test_host_unfolding_rejects_invalid_inputs_before_cache_builds(
+    positions: jax.Array,
+    log_weights: jax.Array,
+    message: str,
+) -> None:
+    fold = _fold()
+    cache_inputs: list[float] = []
+
+    def base_log_prior(position: jax.Array) -> jax.Array:
+        del position
+        return jnp.asarray(0.0)
+
+    def build_cache(position: jax.Array) -> jax.Array:
+        jax.debug.callback(
+            lambda value: cache_inputs.append(float(value)),
+            position[0],
+            ordered=True,
+        )
+        return position[0]
+
+    def true_log_likelihood(position: jax.Array, cache: jax.Array) -> jax.Array:
+        return position[1] + cache
+
+    with pytest.raises(ValueError, match=message):
+        _unfold_weighted_samples(
+            positions,
+            log_weights,
+            fold,
+            base_log_prior,
+            true_log_likelihood,
+            build_cache,
+            batch_size=1,
+        )
+
+    assert cache_inputs == []
