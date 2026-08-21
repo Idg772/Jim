@@ -546,6 +546,42 @@ def _transient_likelihood_kwargs(
     }
 
 
+def _detector_plane_azimuth(ifos: list[Any]) -> float:
+    """Return the detector-plane reflection center in detector-sky azimuth."""
+
+    if len(ifos) != 3:
+        raise ValueError(
+            "detector-plane folding currently requires exactly 3 detectors"
+        )
+
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.transform_utils import euler_rotation
+
+    first_baseline = jnp.asarray(ifos[0].vertex) - jnp.asarray(ifos[1].vertex)
+    third_site_baseline = jnp.asarray(ifos[2].vertex) - jnp.asarray(ifos[0].vertex)
+    first_length = float(jnp.linalg.vector_norm(first_baseline))
+    third_length = float(jnp.linalg.vector_norm(third_site_baseline))
+    area = float(jnp.linalg.vector_norm(jnp.cross(first_baseline, third_site_baseline)))
+    relative_area = (
+        area / (first_length * third_length)
+        if first_length > 0.0 and third_length > 0.0
+        else 0.0
+    )
+    if (
+        not np.isfinite((first_length, third_length, relative_area)).all()
+        or third_length <= 0.0
+        or relative_area <= 1.0e-12
+    ):
+        raise ValueError(
+            "detector-plane folding requires three non-collinear detector sites"
+        )
+
+    detector_rotation_inv = jnp.linalg.inv(euler_rotation(first_baseline))
+    third_baseline = detector_rotation_inv @ third_site_baseline
+    return float(jnp.arctan2(third_baseline[1], third_baseline[0]))
+
+
 def _analysis_components(
     config: dict[str, Any], jnp: Any, ifos: list[Any]
 ) -> dict[str, Any]:

@@ -30,6 +30,7 @@ from benchmarks.injection_campaign.run_campaign import _is_complete
 from benchmarks.injection_campaign.run_injection import (
     _analysis_components,
     _build_sampler_config,
+    _detector_plane_azimuth,
     _implementation_report,
     _marginalized_parameters,
     _paper_convention_timing,
@@ -459,6 +460,90 @@ def test_netsky_transform_chain_round_trips_physical_coordinates() -> None:
     assert set(recovered) == set(physical)
     for name, expected in physical.items():
         assert float(recovered[name]) == pytest.approx(expected, abs=1.0e-10)
+
+
+def test_detector_plane_reflection_preserves_hlv_arrival_time_differences() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+    from jimgw.core.single_event.transforms import (
+        SkyFrameToDetectorFrameSkyPositionTransform,
+    )
+
+    ifos = [get_H1(), get_L1(), get_V1()]
+    sky_transform = SkyFrameToDetectorFrameSkyPositionTransform(
+        trigger_time=1187008882.4,
+        ifos=ifos,
+    )
+    rng = np.random.default_rng(20260821)
+    zenith = np.concatenate(([0.2, np.pi / 2.0, 2.8], rng.uniform(0.0, np.pi, size=50)))
+    azimuth = np.concatenate(([0.4, 2.3, 5.7], rng.uniform(0.0, 2.0 * np.pi, size=50)))
+    reflection_center = _detector_plane_azimuth(ifos)
+
+    sky = sky_transform.backward(
+        {"zenith": jnp.asarray(zenith), "azimuth": jnp.asarray(azimuth)}
+    )
+    reflected_sky = sky_transform.backward(
+        {
+            "zenith": jnp.asarray(zenith),
+            "azimuth": jnp.mod(
+                2.0 * reflection_center - jnp.asarray(azimuth), 2.0 * jnp.pi
+            ),
+        }
+    )
+    delays = np.stack(
+        [
+            np.asarray(
+                ifo.delay_from_geocenter(sky["ra"], sky["dec"], sky_transform.gmst)
+            )
+            for ifo in ifos
+        ]
+    )
+    reflected_delays = np.stack(
+        [
+            np.asarray(
+                ifo.delay_from_geocenter(
+                    reflected_sky["ra"],
+                    reflected_sky["dec"],
+                    sky_transform.gmst,
+                )
+            )
+            for ifo in ifos
+        ]
+    )
+
+    for first, second in ((0, 1), (0, 2), (1, 2)):
+        np.testing.assert_allclose(
+            delays[first] - delays[second],
+            reflected_delays[first] - reflected_delays[second],
+            rtol=0.0,
+            atol=1.0e-10,
+        )
+
+
+def test_detector_plane_azimuth_requires_exactly_three_sites() -> None:
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+
+    h1, l1, v1 = get_H1(), get_L1(), get_V1()
+    for ifos in ([h1, l1], [h1, l1, v1, h1]):
+        with pytest.raises(ValueError, match="requires exactly 3 detectors"):
+            _detector_plane_azimuth(ifos)
+
+
+def test_detector_plane_azimuth_rejects_degenerate_geometry() -> None:
+    import jax.numpy as jnp
+
+    def site(x: float, y: float, z: float) -> SimpleNamespace:
+        return SimpleNamespace(vertex=jnp.asarray([x, y, z]))
+
+    degenerate_networks = (
+        [site(0.0, 0.0, 0.0), site(0.0, 0.0, 0.0), site(0.0, 1.0, 0.0)],
+        [site(0.0, 0.0, 0.0), site(1.0, 0.0, 0.0), site(0.0, 0.0, 0.0)],
+        [site(0.0, 0.0, 0.0), site(1.0, 0.0, 0.0), site(2.0, 0.0, 0.0)],
+    )
+    for ifos in degenerate_networks:
+        with pytest.raises(ValueError, match="non-collinear detector sites"):
+            _detector_plane_azimuth(ifos)
 
 
 def test_netsky_requires_time_marginalization() -> None:
