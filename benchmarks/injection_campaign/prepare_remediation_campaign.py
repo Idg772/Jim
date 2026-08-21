@@ -80,6 +80,7 @@ _NETSKY_SAMPLING_PARAMETERIZATION = {
 def _is_expected_netsky_source(config: dict[str, Any]) -> bool:
     """Return whether config is the frozen D=4/M=2 fast-ridge source arm."""
 
+    prior = config.get("prior")
     return (
         config.get("blocking_scheme") == "fast-ridge"
         and config.get("blocks") == _FAST_RIDGE_SOURCE_BLOCKS
@@ -99,6 +100,21 @@ def _is_expected_netsky_source(config: dict[str, Any]) -> bool:
         and config.get("width_adaptation_rate") == 0.25
         and config.get("width_target_expansions") == 1.0
         and config.get("width_target_shrinks") == 3.0
+        and config.get("detectors") == ["H1", "L1", "V1"]
+        and config.get("waveform") == "IMRPhenomPv2_NRTidalv2"
+        and isinstance(prior, dict)
+        and prior.get("phase_c")
+        == {
+            "distribution": "uniform",
+            "range_radians": [0.0, "2pi"],
+        }
+        and prior.get("psi")
+        == {
+            "distribution": "uniform",
+            "range_radians": [0.0, "pi"],
+        }
+        and prior.get("spin_magnitudes")
+        == {"distribution": "uniform", "range": [0.0, 0.05]}
     )
 
 
@@ -234,6 +250,7 @@ def prepare_remediation_campaign(
                     "periodic_wrapped_covariance": True,
                     "num_gibbs_sweeps": 2,
                     "fold_symmetry": {},
+                    "fold_unfold_batch_size": 1,
                 }
             )
 
@@ -271,6 +288,10 @@ def prepare_remediation_campaign(
                     "fold_symmetry": {
                         "source": copy.deepcopy(source_config.get("fold_symmetry")),
                         "remediation": {},
+                    },
+                    "fold_unfold_batch_size": {
+                        "source": source_config.get("fold_unfold_batch_size"),
+                        "remediation": 1,
                     },
                 }
             )

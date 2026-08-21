@@ -69,6 +69,7 @@ required_paths = {
         "benchmarks/device_parallel_nss/summarize_gw170817_diagnostics.py",
         "benchmarks/injection_campaign/__init__.py",
         "benchmarks/injection_campaign/common.py",
+        "benchmarks/injection_campaign/folded_results.py",
         "benchmarks/injection_campaign/evaluate_time_marginalization_diagnostic.py",
         "benchmarks/injection_campaign/evaluate_historical_stress.py",
         "benchmarks/injection_campaign/prepare_campaign.py",

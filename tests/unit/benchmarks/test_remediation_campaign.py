@@ -222,6 +222,7 @@ def test_preparer_builds_netsky_arm_from_fast_ridge_m2_source(
     assert config["adaptive_slice_widths"] is False
     assert config["bracket_mode"] == "stepping-out"
     assert config["fold_symmetry"] == {}
+    assert config["fold_unfold_batch_size"] == 1
     changed_config_fields = {
         key
         for key in source_manifest["config"].keys() | config.keys()
@@ -235,6 +236,7 @@ def test_preparer_builds_netsky_arm_from_fast_ridge_m2_source(
         "bridge_blocks",
         "campaign",
         "fold_symmetry",
+        "fold_unfold_batch_size",
         "paper_configuration",
         "periodic_wrapped_covariance",
     }
@@ -311,6 +313,38 @@ def test_preparer_builds_netsky_arm_from_fast_ridge_m2_source(
         ("width_adaptation_rate", 0.5),
         ("width_target_expansions", 2.0),
         ("width_target_shrinks", 2.0),
+        ("detectors", ["H1", "L1"]),
+        ("waveform", "unsupported-precessing-model"),
+        (
+            "prior",
+            {
+                **copy.deepcopy(common.DEFAULT_CONFIG["prior"]),
+                "phase_c": {
+                    "distribution": "uniform",
+                    "range_radians": [0.0, "pi"],
+                },
+            },
+        ),
+        (
+            "prior",
+            {
+                **copy.deepcopy(common.DEFAULT_CONFIG["prior"]),
+                "psi": {
+                    "distribution": "uniform",
+                    "range_radians": [0.0, "2pi"],
+                },
+            },
+        ),
+        (
+            "prior",
+            {
+                **copy.deepcopy(common.DEFAULT_CONFIG["prior"]),
+                "spin_magnitudes": {
+                    "distribution": "uniform",
+                    "range": [0.0, 0.5],
+                },
+            },
+        ),
     ],
 )
 def test_netsky_preparer_rejects_incompatible_fast_ridge_source(

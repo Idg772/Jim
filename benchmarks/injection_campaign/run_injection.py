@@ -19,8 +19,12 @@ import numpy as np
 from scipy.special import logsumexp
 
 from benchmarks.injection_campaign.common import (
+    FOLDED_TARGET_SEMANTICS,
     MARGINALIZED_PARAMETERS,
     PARAMETERS,
+    POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS,
+    UNFOLDED_POSTERIOR_WEIGHTING,
+    UNFOLDED_RANK_WEIGHTING,
     atomic_savez_compressed,
     atomic_write_json,
     file_sha256,
@@ -30,11 +34,19 @@ from benchmarks.injection_campaign.common import (
     result_dir,
     validate_completed_result,
 )
+from benchmarks.injection_campaign.folded_results import (
+    extract_unfolded_weighted_posterior,
+)
 
 _SIMPLIFIED_CONSTANTS_ENV = "JAX_USE_SIMPLIFIED_JAXPR_CONSTANTS"
 _EMBEDDED_CONSTANTS_ENV = "JAX_EMBEDDED_CONSTANTS_MAX_BYTES"
 _DEFAULT_EMBEDDED_CONSTANTS_MAX_BYTES = 32
 _TRUE_ENV_VALUES = frozenset({"1", "true", "t", "yes", "y", "on"})
+_FOLD_MODEL_LIMITATION = (
+    "aligned/weak-precession proxy: cos_iota is not cos(theta_JN) and the full "
+    "precessing phi_JL handedness term is omitted; keep folding default-off "
+    "outside the validated low-spin campaign"
+)
 
 
 def _nonnegative_int(value: str) -> int:
@@ -833,9 +845,15 @@ def _implementation_report(
     }
 
 
-def _build_sampler_config(config: dict[str, Any], config_type: type[Any]) -> Any:
+def _build_sampler_config(
+    config: dict[str, Any],
+    config_type: type[Any],
+    *,
+    ifos: list[Any] | None = None,
+) -> Any:
     """Build SwiG config across the pinned paper and candidate APIs."""
 
+    model_fields = getattr(config_type, "model_fields", {})
     kwargs: dict[str, Any] = {
         "blocks": config["blocks"],
         "n_live": int(config["n_live"]),
@@ -845,8 +863,59 @@ def _build_sampler_config(config: dict[str, Any], config_type: type[Any]) -> Any
         "termination_dlogz": float(config["termination_dlogz"]),
         "n_devices": int(config["n_devices"]),
     }
-    if "scheduler" in getattr(config_type, "model_fields", {}):
+    if "scheduler" in model_fields:
         kwargs["scheduler"] = str(config.get("sampler_scheduler", "fsm"))
+    optional_fields = (
+        "direction_mode",
+        "num_de_jumps",
+        "adaptive_slice_widths",
+        "bracket_mode",
+        "width_adaptation_rate",
+        "width_target_expansions",
+        "width_target_shrinks",
+        "num_slice_steps_by_block",
+        "bridge_blocks",
+        "periodic_wrapped_covariance",
+    )
+    for field in optional_fields:
+        if field not in config:
+            continue
+        if field not in model_fields:
+            raise RuntimeError(
+                f"campaign config requests unsupported sampler field {field!r}"
+            )
+        kwargs[field] = config[field]
+
+    raw_fold = config.get("fold_symmetry")
+    if raw_fold is not None:
+        if "fold_symmetry" not in model_fields:
+            raise RuntimeError(
+                "campaign config requests unsupported sampler field 'fold_symmetry'"
+            )
+        if not isinstance(raw_fold, Mapping):
+            raise TypeError("fold_symmetry must be a mapping or null")
+        if ifos is None:
+            raise ValueError("fold_symmetry requires detector geometry")
+        reflection_center = _detector_plane_azimuth(ifos)
+        declared_center = raw_fold.get("azimuth_reflection_center")
+        if declared_center is not None and not np.isclose(
+            float(declared_center),
+            reflection_center,
+            rtol=0.0,
+            atol=1.0e-12,
+        ):
+            raise ValueError(
+                "fold_symmetry azimuth_reflection_center disagrees with detector "
+                "geometry"
+            )
+        completed_fold = {
+            "cos_iota": "cos_iota",
+            "azimuth": "azimuth",
+            "psi": "psi",
+            **raw_fold,
+            "azimuth_reflection_center": reflection_center,
+        }
+        kwargs["fold_symmetry"] = completed_fold
     return config_type(**kwargs)
 
 
@@ -904,6 +973,7 @@ def run_injection(
     directory.mkdir(parents=True, exist_ok=True)
     summary_path = directory / "summary.json"
     posterior_path = directory / "posterior.npz"
+    folded_diagnostics_path = directory / "folded_nested_diagnostics.npz"
     catalogue = (
         runtime.catalogue
         if runtime is not None
@@ -1000,7 +1070,11 @@ def run_injection(
     implementation = _implementation_report(
         manifest, runtime.jimgw, runtime.BlackJAXSwiGConfig
     )
-    sampler_config = _build_sampler_config(config, runtime.BlackJAXSwiGConfig)
+    sampler_config = _build_sampler_config(
+        config,
+        runtime.BlackJAXSwiGConfig,
+        ifos=ifos,
+    )
     jim = runtime.Jim(
         likelihood,
         components["prior"],
@@ -1034,11 +1108,37 @@ def run_injection(
             "The pinned paper baseline predates split likelihood/sampler JIT "
             "phase instrumentation; no post-JIT timing is inferred."
         )
-    weighted = _weighted_samples(jim, jax, jnp)
-    log_weights = weighted.pop("log_weights")
-    log_likelihood = weighted.pop("log_likelihood")
-    log_likelihood_birth = weighted.pop("log_likelihood_birth")
-    samples = weighted
+    quotient_fold_enabled = config.get("fold_symmetry") is not None
+    fold_telemetry: dict[str, Any] | None = None
+    fold_postprocessing_seconds: float | None = None
+    if quotient_fold_enabled:
+        unfold_batch_size = config.get("fold_unfold_batch_size", 1)
+        if type(unfold_batch_size) is not int or unfold_batch_size < 1:
+            raise ValueError("fold_unfold_batch_size must be a positive integer")
+        fold_postprocessing_started = time.perf_counter()
+        unfolded = extract_unfolded_weighted_posterior(
+            jim,
+            n_live=int(config["n_live"]),
+            batch_size=unfold_batch_size,
+        )
+        fold_postprocessing_seconds = time.perf_counter() - fold_postprocessing_started
+        samples = unfolded.samples
+        log_weights = unfolded.log_weights
+        log_likelihood = unfolded.true_log_likelihood
+        log_likelihood_birth = unfolded.folded_log_likelihood_birth
+        folded_log_likelihood = unfolded.folded_log_likelihood
+        insertion_diagnostic = unfolded.insertion_diagnostic
+        fold_telemetry = {
+            **unfolded.telemetry,
+            "batch_size": unfold_batch_size,
+        }
+    else:
+        weighted = _weighted_samples(jim, jax, jnp)
+        log_weights = weighted.pop("log_weights")
+        log_likelihood = weighted.pop("log_likelihood")
+        log_likelihood_birth = weighted.pop("log_likelihood_birth")
+        samples = weighted
+        folded_log_likelihood = log_likelihood
     sampled_parameters = _sampled_parameters(config)
     missing = sorted(set(sampled_parameters) - samples.keys())
     if missing:
@@ -1049,29 +1149,44 @@ def run_injection(
     ):
         raise RuntimeError(f"invalid posterior array shapes: {counts}")
     sample_count = next(iter(counts.values()))
-    if (
-        log_weights.shape != (sample_count,)
-        or log_likelihood.shape != (sample_count,)
-        or log_likelihood_birth.shape != (sample_count,)
-    ):
+    if log_weights.shape != (sample_count,) or log_likelihood.shape != (sample_count,):
         raise RuntimeError(
             "weighted posterior metadata does not align with parameter samples"
         )
-    from jimgw.samplers.diagnostics import insertion_index_diagnostic
+    if folded_log_likelihood.shape != log_likelihood_birth.shape:
+        raise RuntimeError("folded death and birth likelihoods are not aligned")
+    if not quotient_fold_enabled:
+        from jimgw.samplers.diagnostics import insertion_index_diagnostic
 
-    insertion_diagnostic = insertion_index_diagnostic(
-        log_likelihood,
-        log_likelihood_birth,
-        n_live=int(config["n_live"]),
-    )
-    atomic_savez_compressed(
-        posterior_path,
-        {
+        insertion_diagnostic = insertion_index_diagnostic(
+            folded_log_likelihood,
+            log_likelihood_birth,
+            n_live=int(config["n_live"]),
+        )
+    if quotient_fold_enabled:
+        posterior_arrays = {
+            **samples,
+            "log_likelihood": log_likelihood,
+            "log_weights": log_weights,
+        }
+        atomic_savez_compressed(
+            folded_diagnostics_path,
+            {
+                "log_likelihood": folded_log_likelihood,
+                "log_likelihood_birth": log_likelihood_birth,
+            },
+        )
+    else:
+        folded_diagnostics_path.unlink(missing_ok=True)
+        posterior_arrays = {
             **samples,
             "log_likelihood": log_likelihood,
             "log_likelihood_birth": log_likelihood_birth,
             "log_weights": log_weights,
-        },
+        }
+    atomic_savez_compressed(
+        posterior_path,
+        posterior_arrays,
     )
     rank_truth = _rank_truth_coordinates(
         truth,
@@ -1083,7 +1198,7 @@ def run_injection(
         for name in sampled_parameters
     }
     weights = np.exp(log_weights)
-    effective_sample_size = float(1.0 / np.sum(weights**2))
+    posterior_weight_effective_size = float(1.0 / np.sum(weights**2))
     extraction_seconds = time.perf_counter() - extraction_started
 
     cache_diagnostics = (
@@ -1093,6 +1208,43 @@ def run_injection(
         else None
     )
     total_seconds = time.perf_counter() - started
+    rank_method = {
+        "weighting": (
+            UNFOLDED_RANK_WEIGHTING
+            if quotient_fold_enabled
+            else "original nested-sampling weights"
+        ),
+        "comparison": "sample < truth",
+        "resampled": False,
+    }
+    posterior_metadata: dict[str, Any] = {
+        "path": "posterior.npz",
+        "sha256": file_sha256(posterior_path),
+        "bytes": posterior_path.stat().st_size,
+        "fields": list(posterior_arrays),
+        "space": "prior",
+        "weighting": (
+            UNFOLDED_POSTERIOR_WEIGHTING
+            if quotient_fold_enabled
+            else "normalized nested-sampling log weights"
+        ),
+    }
+    effective_size_summary = {
+        (
+            "posterior_weight_effective_size"
+            if quotient_fold_enabled
+            else "posterior_effective_sample_size"
+        ): posterior_weight_effective_size
+    }
+    if quotient_fold_enabled:
+        posterior_metadata.update(
+            {
+                "schema_version": 2,
+                "weight_effective_size_semantics": (
+                    POSTERIOR_WEIGHT_EFFECTIVE_SIZE_SEMANTICS
+                ),
+            }
+        )
     summary = {
         "schema_version": 2,
         "campaign": manifest["config"]["campaign"],
@@ -1132,26 +1284,10 @@ def run_injection(
             "sampled": list(sampled_parameters),
             "marginalized": list(_marginalized_parameters(config)),
         },
-        "rank_method": {
-            "weighting": "original nested-sampling weights",
-            "comparison": "sample < truth",
-            "resampled": False,
-        },
+        "rank_method": rank_method,
         "posterior_samples": sample_count,
-        "posterior_effective_sample_size": effective_sample_size,
-        "posterior": {
-            "path": "posterior.npz",
-            "sha256": file_sha256(posterior_path),
-            "bytes": posterior_path.stat().st_size,
-            "fields": [
-                *samples,
-                "log_likelihood",
-                "log_likelihood_birth",
-                "log_weights",
-            ],
-            "space": "prior",
-            "weighting": "normalized nested-sampling log weights",
-        },
+        **effective_size_summary,
+        "posterior": posterior_metadata,
         "diagnostics": {
             "n_iterations": _safe_int(diagnostics.get("n_iterations")),
             "n_likelihood_evaluations": _safe_int(
@@ -1196,6 +1332,27 @@ def run_injection(
         ),
         "sampler_ablation": runtime.sampler_ablation,
     }
+    if quotient_fold_enabled:
+        fold_config = getattr(sampler_config, "fold_symmetry", None)
+        if fold_config is None or not hasattr(fold_config, "model_dump"):
+            raise RuntimeError("completed fold configuration is unavailable")
+        assert fold_telemetry is not None
+        assert fold_postprocessing_seconds is not None
+        summary["folded_nested_diagnostics"] = {
+            "path": "folded_nested_diagnostics.npz",
+            "sha256": file_sha256(folded_diagnostics_path),
+            "bytes": folded_diagnostics_path.stat().st_size,
+            "fields": ["log_likelihood", "log_likelihood_birth"],
+            "semantics": FOLDED_TARGET_SEMANTICS,
+        }
+        summary["diagnostics"]["quotient_fold"] = {
+            "completed_config": fold_config.model_dump(),
+            "model_limitation": _FOLD_MODEL_LIMITATION,
+            **fold_telemetry,
+        }
+        summary["timing_seconds"]["fold_unfold_postprocessing"] = (
+            fold_postprocessing_seconds
+        )
     if cache_diagnostics is not None:
         summary["jax_cache_diagnostics"] = cache_diagnostics
     if timing_unavailable_reason is not None:
