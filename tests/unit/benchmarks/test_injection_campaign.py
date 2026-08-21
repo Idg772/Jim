@@ -341,6 +341,310 @@ def test_appendix_a_parameter_treatment_samples_distance_and_marginalizes_time()
     assert likelihood_kwargs["distance_marginalization"] is None
 
 
+def test_fast_ridge_uses_real_event_distance_inclination_coordinates() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+    from jimgw.core.single_event.transforms import (
+        DistanceToSNRWeightedDistanceTransform,
+        SkyFrameToDetectorFrameSkyPositionTransform,
+    )
+    from jimgw.core.transforms import CosineTransform
+
+    config = copy.deepcopy(common.DEFAULT_CONFIG)
+    config["blocking_scheme"] = "fast-ridge"
+    config["time_marginalization"] = {
+        "tc_range_seconds": [-0.03, 0.03],
+        "upsample_factor": 1,
+    }
+    config["distance_marginalization"] = False
+    config["blocks"] = [
+        *copy.deepcopy(common.DEFAULT_CONFIG["blocks"][:3]),
+        ["zenith", "azimuth"],
+        ["psi"],
+        ["cos_iota", "d_hat"],
+    ]
+
+    components = _analysis_components(
+        config,
+        jnp,
+        [get_H1(), get_L1(), get_V1()],
+    )
+
+    assert [type(transform) for transform in components["sample_transforms"]] == [
+        DistanceToSNRWeightedDistanceTransform,
+        CosineTransform,
+        SkyFrameToDetectorFrameSkyPositionTransform,
+    ]
+    sampling_names = components["prior"].parameter_names
+    for transform in components["sample_transforms"]:
+        sampling_names = transform.propagate_name(sampling_names)
+    assert set(sampling_names) == (
+        set(_sampled_parameters(config)) - {"ra", "dec", "iota", "d_L"}
+    ) | {"zenith", "azimuth", "cos_iota", "d_hat"}
+
+
+def test_netsky_uses_bounded_sky_and_log_distance_coordinates() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+    from jimgw.core.single_event.transforms import (
+        DistanceToSNRWeightedDistanceTransform,
+        SkyFrameToDetectorFrameSkyPositionTransform,
+    )
+    from jimgw.core.transforms import CosineTransform, SingleSidedUnboundTransform
+
+    config = copy.deepcopy(common.DEFAULT_CONFIG)
+    config["blocking_scheme"] = "netsky"
+    config["time_marginalization"] = {
+        "tc_range_seconds": [-0.03, 0.03],
+        "upsample_factor": 1,
+    }
+    config["distance_marginalization"] = False
+
+    components = _analysis_components(
+        config,
+        jnp,
+        [get_H1(), get_L1(), get_V1()],
+    )
+
+    assert [type(transform) for transform in components["sample_transforms"]] == [
+        DistanceToSNRWeightedDistanceTransform,
+        CosineTransform,
+        SkyFrameToDetectorFrameSkyPositionTransform,
+        CosineTransform,
+        SingleSidedUnboundTransform,
+    ]
+    sampling_names = components["prior"].parameter_names
+    for transform in components["sample_transforms"]:
+        sampling_names = transform.propagate_name(sampling_names)
+    assert set(sampling_names) == (
+        set(_sampled_parameters(config)) - {"ra", "dec", "iota", "d_L"}
+    ) | {"cos_zenith", "azimuth", "cos_iota", "log_d_hat"}
+
+
+def test_netsky_transform_chain_round_trips_physical_coordinates() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+
+    config = copy.deepcopy(common.DEFAULT_CONFIG)
+    config["blocking_scheme"] = "netsky"
+    config["time_marginalization"] = {
+        "tc_range_seconds": [-0.03, 0.03],
+        "upsample_factor": 1,
+    }
+    config["distance_marginalization"] = False
+    components = _analysis_components(
+        config,
+        jnp,
+        [get_H1(), get_L1(), get_V1()],
+    )
+    physical = {
+        "M_c": 2.0,
+        "ra": 1.3,
+        "dec": 0.2,
+        "psi": 0.4,
+        "iota": 1.0,
+        "d_L": 90.0,
+    }
+
+    sampled = physical
+    for transform in components["sample_transforms"]:
+        sampled = transform.forward(sampled)
+    recovered = sampled
+    for transform in reversed(components["sample_transforms"]):
+        recovered = transform.backward(recovered)
+
+    assert set(recovered) == set(physical)
+    for name, expected in physical.items():
+        assert float(recovered[name]) == pytest.approx(expected, abs=1.0e-10)
+
+
+def test_netsky_requires_time_marginalization() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+
+    config = copy.deepcopy(common.DEFAULT_CONFIG)
+    config["blocking_scheme"] = "netsky"
+
+    with pytest.raises(ValueError, match="netsky requires.*time marginalization"):
+        _analysis_components(
+            config,
+            jnp,
+            [get_H1(), get_L1(), get_V1()],
+        )
+
+
+def test_log_d_hat_prior_matches_analytic_density_and_support() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+
+    config = copy.deepcopy(common.DEFAULT_CONFIG)
+    config["blocking_scheme"] = "netsky"
+    config["time_marginalization"] = {
+        "tc_range_seconds": [-0.03, 0.03],
+        "upsample_factor": 1,
+    }
+    config["distance_marginalization"] = False
+    components = _analysis_components(
+        config,
+        jnp,
+        [get_H1(), get_L1(), get_V1()],
+    )
+    distance_transform = components["sample_transforms"][0]
+    log_transform = components["sample_transforms"][-1]
+    distance_prior = components["distance_prior"]
+    d_min, d_max = map(float, config["prior"]["d_L"]["range_mpc"])
+    normalization = 3.0 / (d_max**3 - d_min**3)
+    scale_factors = []
+
+    for orientation in (
+        {"M_c": 2.0, "ra": 1.3, "dec": 0.2, "psi": 0.4, "iota": 1.0},
+        {"M_c": 2.0, "ra": 2.1, "dec": -0.4, "psi": 1.0, "iota": 2.2},
+    ):
+        reference = {**orientation, "d_L": 90.0}
+        d_hat = float(distance_transform.forward(reference)["d_hat"])
+        scale = reference["d_L"] / d_hat
+        scale_factors.append(scale)
+        lower = np.log(d_min / scale)
+        upper = np.log(d_max / scale)
+
+        def transformed_log_density(
+            log_d_hat: float,
+            orientation: dict[str, float],
+        ) -> float:
+            sampled = {**orientation, "log_d_hat": log_d_hat}
+            with_d_hat, log_jacobian = log_transform.inverse(sampled)
+            physical, distance_log_jacobian = distance_transform.inverse(with_d_hat)
+            return float(
+                distance_prior.log_prob(physical) + log_jacobian + distance_log_jacobian
+            )
+
+        for log_d_hat in (
+            lower + 1.0e-6,
+            0.4 * lower + 0.6 * upper,
+            upper - 1.0e-6,
+        ):
+            expected = np.log(normalization) + 3.0 * np.log(scale) + 3.0 * log_d_hat
+            assert transformed_log_density(log_d_hat, orientation) == pytest.approx(
+                expected,
+                abs=2.0e-9,
+            )
+        assert np.isneginf(transformed_log_density(lower - 1.0e-6, orientation))
+        assert np.isneginf(transformed_log_density(upper + 1.0e-6, orientation))
+
+    assert scale_factors[0] != pytest.approx(scale_factors[1])
+
+
+def test_jim_netsky_prior_has_expected_log_distance_slope_and_support() -> None:
+    import jax.numpy as jnp
+
+    from jimgw.core.jim import Jim
+    from jimgw.core.single_event.detector import get_H1, get_L1, get_V1
+    from jimgw.samplers.config import FlowMCConfig
+
+    class FiniteLikelihood:
+        def evaluate(self, params: dict[str, object]) -> object:
+            return jnp.zeros(())
+
+    config = copy.deepcopy(common.DEFAULT_CONFIG)
+    config["blocking_scheme"] = "netsky"
+    config["time_marginalization"] = {
+        "tc_range_seconds": [-0.03, 0.03],
+        "upsample_factor": 1,
+    }
+    config["distance_marginalization"] = False
+    components = _analysis_components(
+        config,
+        jnp,
+        [get_H1(), get_L1(), get_V1()],
+    )
+    jim = Jim(
+        likelihood=FiniteLikelihood(),
+        prior=components["prior"],
+        sampler_config=FlowMCConfig(
+            n_chains=5,
+            n_local_steps=2,
+            n_global_steps=2,
+            global_thinning=1,
+            n_training_loops=1,
+            n_production_loops=1,
+            n_epochs=1,
+        ),
+        sample_transforms=components["sample_transforms"],
+    )
+    d_min, d_max = map(float, config["prior"]["d_L"]["range_mpc"])
+    physical = {
+        "M_c": 2.0,
+        "q": 0.9,
+        "s1_mag": 0.02,
+        "s1_theta": 1.1,
+        "s1_phi": 0.7,
+        "s2_mag": 0.03,
+        "s2_theta": 1.4,
+        "s2_phi": 2.0,
+        "iota": 1.0,
+        "lambda_1": 500.0,
+        "lambda_2": 700.0,
+        "ra": 1.3,
+        "dec": 0.2,
+        "psi": 0.4,
+        "d_L": 90.0,
+    }
+    orientations = (
+        {"ra": 1.3, "dec": 0.2, "psi": 0.4, "iota": 1.0},
+        {"ra": 2.1, "dec": -0.4, "psi": 1.0, "iota": 2.2},
+    )
+    sampling_points = []
+    support = []
+    scale_factors = []
+
+    for orientation in orientations:
+        point = {**physical, **orientation}
+        sampled = point
+        for transform in components["sample_transforms"]:
+            sampled = transform.forward(sampled)
+        scale = point["d_L"] / float(jnp.exp(sampled["log_d_hat"]))
+        lower = np.log(d_min / scale)
+        upper = np.log(d_max / scale)
+        sampling_points.append(sampled)
+        support.append((lower, upper))
+        scale_factors.append(scale)
+
+        def evaluate(log_d_hat: float, sampled: dict[str, object]) -> float:
+            values = {**sampled, "log_d_hat": log_d_hat}
+            array = jnp.asarray([values[name] for name in jim.sampling_parameter_names])
+            return float(jim.evaluate_prior(array))
+
+        z1 = lower + 0.25 * (upper - lower)
+        z2 = lower + 0.75 * (upper - lower)
+        assert evaluate(z2, sampled) - evaluate(z1, sampled) == pytest.approx(
+            3.0 * (z2 - z1),
+            abs=2.0e-9,
+        )
+        assert np.isfinite(evaluate(lower + 1.0e-6, sampled))
+        assert np.isfinite(evaluate(upper - 1.0e-6, sampled))
+        assert np.isneginf(evaluate(lower - 1.0e-6, sampled))
+        assert np.isneginf(evaluate(upper + 1.0e-6, sampled))
+
+    common_lower = max(bounds[0] for bounds in support)
+    common_upper = min(bounds[1] for bounds in support)
+    assert common_lower < common_upper
+    common_z = 0.5 * (common_lower + common_upper)
+    log_priors = []
+    for sampled in sampling_points:
+        values = {**sampled, "log_d_hat": common_z}
+        array = jnp.asarray([values[name] for name in jim.sampling_parameter_names])
+        log_priors.append(float(jim.evaluate_prior(array)))
+    assert log_priors[0] - log_priors[1] == pytest.approx(
+        3.0 * np.log(scale_factors[0] / scale_factors[1]),
+        abs=2.0e-8,
+    )
+
+
 def test_attribution_likelihood_axes_are_forwarded_without_collapsing() -> None:
     config = copy.deepcopy(common.DEFAULT_CONFIG)
     axes = {

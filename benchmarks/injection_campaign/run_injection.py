@@ -563,11 +563,13 @@ def _analysis_components(
         UniformSpherePrior,
     )
     from jimgw.core.single_event.transforms import (
+        DistanceToSNRWeightedDistanceTransform,
         GeocentricArrivalTimeToDetectorArrivalTimeTransform,
         MassRatioToSymmetricMassRatioTransform,
         SkyFrameToDetectorFrameSkyPositionTransform,
         SphereSpinToCartesianSpinTransform,
     )
+    from jimgw.core.transforms import CosineTransform, SingleSidedUnboundTransform
 
     prior_config = config["prior"]
     distance_config = prior_config["d_L"]
@@ -634,12 +636,41 @@ def _analysis_components(
                 ifo=time_ifo,
             )
         )
+    blocking_scheme = config.get("blocking_scheme")
+    if blocking_scheme in {"fast-ridge", "netsky"}:
+        if _time_marginalization_settings(config) is None:
+            raise ValueError(
+                f"{blocking_scheme} requires sampled luminosity distance and "
+                "time marginalization"
+            )
+        # Match the real-event fast-ridge sampling coordinates exactly. Build
+        # d_hat while physical sky position and inclination are still present;
+        # reverse application restores sky, then iota, then d_L.
+        sample_transforms.extend(
+            [
+                DistanceToSNRWeightedDistanceTransform(
+                    trigger_time=float(config["trigger_time_gps"]),
+                    ifos=ifos,
+                ),
+                CosineTransform((["iota"], ["cos_iota"])),
+            ]
+        )
     sample_transforms.append(
         SkyFrameToDetectorFrameSkyPositionTransform(
             trigger_time=float(config["trigger_time_gps"]),
             ifos=ifos,
         )
     )
+    if blocking_scheme == "netsky":
+        sample_transforms.extend(
+            [
+                CosineTransform((["zenith"], ["cos_zenith"])),
+                SingleSidedUnboundTransform(
+                    (["d_hat"], ["log_d_hat"]),
+                    original_lower_bound=0.0,
+                ),
+            ]
+        )
 
     return {
         "waveform": RippleIMRPhenomPv2NRTidalv2(
