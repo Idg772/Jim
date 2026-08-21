@@ -72,6 +72,7 @@ def test_swig_sampling_defaults():
     assert config.de_jump_blocks == []
     assert config.complementary_de_jump_block is None
     assert config.block_kernel_modes is None
+    assert config.periodic_wrapped_covariance is False
 
 
 def test_swig_accepts_one_complementary_de_block_inside_its_slice_segment():

@@ -36,6 +36,53 @@ def _log_likelihood(position):
     return _log_likelihood_from_cache(position, _build_cache(position))
 
 
+def test_wrap_periodic_positions_recenters_branch_cut_only_for_periodic_columns():
+    positions = jnp.asarray(
+        [
+            [0.05, -3.0],
+            [2.0 * jnp.pi - 0.05, 4.0],
+            [0.02, 8.0],
+            [2.0 * jnp.pi - 0.02, 10.0],
+        ]
+    )
+
+    wrapped = swig._wrap_periodic_positions(
+        positions,
+        periodic_mask=jnp.asarray([True, False]),
+        periodic_lower=jnp.asarray([0.0, 0.0]),
+        periodic_period=jnp.asarray([2.0 * jnp.pi, 1.0]),
+    )
+
+    assert jnp.var(wrapped[:, 0]) < 0.01
+    assert jnp.var(positions[:, 0]) > 1.0
+    np.testing.assert_array_equal(wrapped[:, 1], positions[:, 1])
+
+
+@pytest.mark.parametrize("periodic", [None, {}], ids=["none", "empty"])
+def test_wrapped_covariance_requires_declared_periodic_bounds(periodic):
+    config = BlackJAXSwiGConfig(
+        blocks=[["slow"], ["fast"]],
+        n_live=24,
+        periodic_wrapped_covariance=True,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="periodic_wrapped_covariance requires declared periodic bounds",
+    ):
+        BlackJAXSwiGSampler(
+            n_dims=2,
+            log_prior_fn=_log_prior,
+            log_likelihood_fn=_log_likelihood,
+            log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+            config=config,
+            periodic=periodic,
+            rebuild_required_by_block={(0,): True, (1,): False},
+            build_cache=_build_cache,
+            log_likelihood_from_cache_fn=_log_likelihood_from_cache,
+        )
+
+
 def _make_sampler(
     checkpoint_dir: Optional[Path] = None,
     **config_overrides,
@@ -393,6 +440,57 @@ def test_periodic_uniform_independence_requires_declared_periodic_bounds():
             build_cache=_build_cache,
             log_likelihood_from_cache_fn=_log_likelihood_from_cache,
         )
+
+
+def test_wrapped_covariance_is_used_by_covariance_and_factor_updaters():
+    config = BlackJAXSwiGConfig(
+        blocks=[["angle", "linear"]],
+        n_live=24,
+        periodic_wrapped_covariance=True,
+    )
+    sampler = BlackJAXSwiGSampler(
+        n_dims=2,
+        log_prior_fn=_log_prior,
+        log_likelihood_fn=_log_likelihood,
+        log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+        config=config,
+        periodic={0: (0.0, 2.0 * np.pi)},
+        rebuild_required_by_block={(0, 1): True},
+        build_cache=_build_cache,
+        log_likelihood_from_cache_fn=_log_likelihood_from_cache,
+    )
+    positions = jnp.asarray(
+        [
+            [0.05, -2.0],
+            [2.0 * jnp.pi - 0.05, -1.0],
+            [0.02, 1.0],
+            [2.0 * jnp.pi - 0.02, 3.0],
+        ]
+    )
+    expected_positions = jnp.asarray(
+        [
+            [0.05, -2.0],
+            [-0.05, -1.0],
+            [0.02, 1.0],
+            [-0.02, 3.0],
+        ]
+    )
+    expected_covariance = jnp.cov(expected_positions, ddof=0, rowvar=False)
+    state = SimpleNamespace(particles=SimpleNamespace(position=positions))
+
+    covariance_params = sampler._update_inner_kernel_params_fn(
+        jax.random.key(0), state, None
+    )
+    (actual_covariance,) = covariance_params["block_covariances"]
+    np.testing.assert_allclose(actual_covariance, expected_covariance, atol=1e-12)
+    assert jnp.var(positions[:, 0]) > 1.0
+    assert actual_covariance[0, 0] < 0.01
+
+    factor_params = sampler._fsm_update_inner_kernel_params_fn(
+        jax.random.key(0), state, None
+    )
+    (factor,) = factor_params["block_covariance_factors"]
+    np.testing.assert_allclose(factor @ factor.T, expected_covariance, atol=1e-12)
 
 
 def test_swig_fsm_update_params_factors_each_block_once(monkeypatch):

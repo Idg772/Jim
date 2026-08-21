@@ -442,6 +442,7 @@ class BlackJAXSwiGConfig(
     direction_mode: Literal["covariance", "de-mix", "covariance-basis-8d"] = (
         "covariance"
     )
+    periodic_wrapped_covariance: bool = False
     de_fraction: float = Field(default=0.5, gt=0.0, le=1.0)
     num_de_jumps: int = Field(default=0, ge=0)
     de_jump_blocks: list[DEJumpBlockConfig] = Field(default_factory=list)

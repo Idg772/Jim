@@ -144,6 +144,35 @@ ResolvedDEJumpBlock = tuple[tuple[int, ...], bool, int]
 _COMPLEMENTARY_DE_KEY_DOMAIN = 0xCDE40000
 
 
+def _wrap_periodic_positions(
+    positions,
+    periodic_mask,
+    periodic_lower,
+    periodic_period,
+):
+    """Re-centre periodic columns on their circular means.
+
+    Non-periodic columns are masked before trigonometry and modular arithmetic,
+    then returned unchanged. This keeps large unbounded coordinates out of the
+    circular calculation entirely.
+    """
+    safe_positions = jnp.where(periodic_mask, positions, periodic_lower)
+    safe_period = jnp.where(periodic_mask, periodic_period, 1.0)
+    angles = 2.0 * jnp.pi * (safe_positions - periodic_lower) / safe_period
+    circular_mean = periodic_lower + safe_period * (
+        jnp.arctan2(
+            jnp.sin(angles).mean(axis=0),
+            jnp.cos(angles).mean(axis=0),
+        )
+        / (2.0 * jnp.pi)
+    )
+    deviation = safe_positions - circular_mean
+    wrapped = circular_mean + (
+        jnp.mod(deviation + 0.5 * safe_period, safe_period) - 0.5 * safe_period
+    )
+    return jnp.where(periodic_mask, wrapped, positions)
+
+
 def _resolve_block_direction_parameters(
     block_covariances,
     block_covariance_factors,
@@ -1957,6 +1986,15 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
             raise ValueError("BlackJAXSwiGSampler requires cache callbacks.")
         if periodic is not None and not isinstance(periodic, dict):
             raise TypeError("Cache-aware sampling requires dict-form periodic bounds.")
+        if config.periodic_wrapped_covariance and not periodic:
+            raise ValueError(
+                "periodic_wrapped_covariance requires declared periodic bounds"
+            )
+        periodic_covariance_arrays = (
+            _build_masks_arrays(periodic, n_dims)
+            if config.periodic_wrapped_covariance
+            else None
+        )
         block_kernel_modes = tuple(
             config.block_kernel_modes or ("slice",) * len(config.blocks)
         )
@@ -2096,9 +2134,13 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
         self._initial_block_widths = initial_widths
 
         def block_covariances(state):
-            covariance = jnp.atleast_2d(
-                particles_covariance_matrix(state.particles.position)
-            )
+            positions = state.particles.position
+            if periodic_covariance_arrays is not None:
+                positions = _wrap_periodic_positions(
+                    positions,
+                    *periodic_covariance_arrays,
+                )
+            covariance = jnp.atleast_2d(particles_covariance_matrix(positions))
             return tuple(
                 covariance[
                     jnp.ix_(
