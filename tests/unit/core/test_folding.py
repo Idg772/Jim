@@ -394,6 +394,11 @@ def test_deterministic_unfolding_splits_each_weight_over_aligned_images() -> Non
         expected_likelihoods,
         atol=1.0e-12,
     )
+    np.testing.assert_allclose(
+        unfolded.base_log_priors.reshape(2, 8),
+        jax.vmap(jax.vmap(base_log_prior))(expected_images),
+        atol=1.0e-12,
+    )
     output_weights = unfolded.log_weights.reshape(2, 8)
     np.testing.assert_allclose(
         jax.scipy.special.logsumexp(output_weights, axis=1), input_log_weights

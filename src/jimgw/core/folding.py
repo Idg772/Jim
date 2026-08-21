@@ -37,6 +37,7 @@ class UnfoldedWeightedSamples(NamedTuple):
     positions: Array
     log_weights: Array
     true_log_likelihoods: Array
+    base_log_priors: Array
     log_branch_probabilities: Array
 
 
@@ -334,15 +335,16 @@ def _unfold_weighted_samples_static(
             images,
             log_weight + target.log_branch_probabilities,
             true_log_likelihoods,
+            image_log_priors,
             target.log_branch_probabilities,
         )
 
     if batch_size is None:
-        images, split_weights, likelihoods, branch_probabilities = jax.lax.map(
+        images, split_weights, likelihoods, priors, branch_probabilities = jax.lax.map(
             unfold_one, (positions, log_weights)
         )
     else:
-        images, split_weights, likelihoods, branch_probabilities = jax.lax.map(
+        images, split_weights, likelihoods, priors, branch_probabilities = jax.lax.map(
             unfold_one,
             (positions, log_weights),
             batch_size=batch_size,
@@ -352,6 +354,7 @@ def _unfold_weighted_samples_static(
         positions=images.reshape((-1, n_dims)),
         log_weights=split_weights.reshape((-1,)),
         true_log_likelihoods=likelihoods.reshape((-1,)),
+        base_log_priors=priors.reshape((-1,)),
         log_branch_probabilities=branch_probabilities.reshape((-1,)),
     )
 
