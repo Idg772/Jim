@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Sequence
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import jax
 import jax.numpy as jnp
@@ -554,6 +554,24 @@ class Jim:
         """Convert a flat sampling-space array to a named dict."""
         return dict(zip(self.sampling_parameter_names, x, strict=True))
 
+    def samples_to_prior_space(
+        self,
+        sample_array: Float[Array, "n_samples n_dims"] | np.ndarray,
+    ) -> dict[str, np.ndarray]:
+        """Convert a batch of sampling-space positions to named prior-space arrays.
+
+        Args:
+            sample_array: Array of shape ``(n_samples, n_dims)`` in sampling space.
+
+        Returns:
+            Dict mapping prior parameter names to 1-D numpy arrays without
+            changing the input row order.
+        """
+        named = jax.vmap(self.add_name)(jnp.array(sample_array))
+        for transform in reversed(self.sample_transforms):
+            named = jax.vmap(transform.backward)(named)
+        return {name: np.array(named[name]) for name in self.prior_parameter_names}
+
     def evaluate_prior(self, params: Float[Array, " n_dims"]) -> Float:
         """Log-prior in the sampling space (with Jacobian corrections from sample_transforms)."""
         return self._log_prior_fn(params)
@@ -662,22 +680,26 @@ class Jim:
                 sample_array = sample_array[indices]
                 log_likelihood = log_likelihood[indices]
 
-        # Backward-transform from sampling space to prior space and add names.
-        named = jax.vmap(self.add_name)(jnp.array(sample_array))
-        for transform in reversed(self.sample_transforms):
-            named = jax.vmap(transform.backward)(named)
-        out = {k: np.array(named[k]) for k in self.prior_parameter_names}
+        out = self.samples_to_prior_space(sample_array)
         out["log_likelihood"] = np.asarray(log_likelihood)
         return out
 
-    def get_weighted_samples(self) -> dict[str, np.ndarray]:
-        """Retrieve original weighted posterior samples in prior space.
+    def get_weighted_samples(
+        self,
+        space: Literal["prior", "sampling"] = "prior",
+    ) -> dict[str, np.ndarray]:
+        """Retrieve original weighted posterior samples in the requested space.
 
         This is the non-resampling counterpart to [`get_samples`][jimgw.core.jim.Jim.get_samples]
         for sampler backends that retain their weighted posterior collection.
-        Sample-space transforms are reversed exactly as they are for
-        `get_samples`, while the original nested-point ordering and aligned
-        normalized log weights are preserved.
+        By default, sample-space transforms are reversed exactly as they are for
+        `get_samples`. Pass ``space="sampling"`` to retain the backend's raw
+        sampling-space positions. The original nested-point ordering and aligned
+        normalized log weights are preserved in either space.
+
+        Args:
+            space: Return named prior-space arrays (default) or the backend's raw
+                ``"samples"`` array in sampling space.
 
         Returns:
             Dict mapping prior parameter names to 1-D numpy arrays, plus
@@ -687,18 +709,17 @@ class Jim:
             ``scipy.special.logsumexp(log_weights) == 0``.
 
         Raises:
+            ValueError: If ``space`` is not ``"prior"`` or ``"sampling"``.
             NotImplementedError: If the configured sampler does not expose
                 weighted posterior samples.
         """
-        result = self.sampler.get_weighted_samples()
-        sample_array = result["samples"]
+        if space not in ("prior", "sampling"):
+            raise ValueError("space must be 'prior' or 'sampling'")
 
-        # Backward-transform from sampling space to prior space without changing
-        # the row order, so the likelihoods and weights remain aligned.
-        named = jax.vmap(self.add_name)(jnp.array(sample_array))
-        for transform in reversed(self.sample_transforms):
-            named = jax.vmap(transform.backward)(named)
-        out = {k: np.array(named[k]) for k in self.prior_parameter_names}
+        result = self.sampler.get_weighted_samples()
+        if space == "sampling":
+            return {name: np.asarray(values) for name, values in result.items()}
+        out = self.samples_to_prior_space(result["samples"])
         out["log_likelihood"] = np.asarray(result["log_likelihood"])
         if "log_likelihood_birth" in result:
             out["log_likelihood_birth"] = np.asarray(result["log_likelihood_birth"])

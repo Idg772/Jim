@@ -267,6 +267,49 @@ class TestGetWeightedSamples:
         np.testing.assert_array_equal(result["log_weights"], log_weights)
         assert result["log_weights"].dtype == np.float64
 
+    def test_get_weighted_samples_can_return_raw_sampling_space(
+        self, jim_with_sample_transforms, monkeypatch
+    ):
+        sample_space = np.array(
+            [
+                [0.25, 0.0],
+                [0.50, np.log(3.0)],
+                [0.75, -np.log(3.0)],
+            ]
+        )
+        log_likelihood = np.array([-3.0, -2.0, -1.0])
+        log_likelihood_birth = np.array([-np.inf, -3.0, -2.0])
+        log_weights = np.log(np.array([0.2, 0.3, 0.5], dtype=np.float64))
+        monkeypatch.setattr(
+            jim_with_sample_transforms.sampler,
+            "get_weighted_samples",
+            lambda: {
+                "samples": sample_space,
+                "log_likelihood": log_likelihood,
+                "log_likelihood_birth": log_likelihood_birth,
+                "log_weights": log_weights,
+            },
+        )
+
+        result = jim_with_sample_transforms.get_weighted_samples(space="sampling")
+
+        assert set(result) == {
+            "samples",
+            "log_likelihood",
+            "log_likelihood_birth",
+            "log_weights",
+        }
+        np.testing.assert_array_equal(result["samples"], sample_space)
+        np.testing.assert_array_equal(result["log_likelihood"], log_likelihood)
+        np.testing.assert_array_equal(
+            result["log_likelihood_birth"], log_likelihood_birth
+        )
+        np.testing.assert_array_equal(result["log_weights"], log_weights)
+
+    def test_get_weighted_samples_rejects_invalid_space(self, basic_jim):
+        with pytest.raises(ValueError, match="space must be 'prior' or 'sampling'"):
+            basic_jim.get_weighted_samples(space="physical")
+
     def test_get_weighted_samples_rejects_unsupported_backend(self, basic_jim):
         with pytest.raises(NotImplementedError, match="does not expose weighted"):
             basic_jim.get_weighted_samples()
@@ -390,6 +433,24 @@ class TestJimUtilityMethods:
         assert isinstance(params_dict, dict)
         assert params_dict["M_c"] == 30.0
         assert params_dict["q"] == 0.5
+
+    def test_samples_to_prior_space_reverses_sample_transforms(
+        self, jim_with_sample_transforms
+    ):
+        sample_space = np.array(
+            [
+                [0.25, 0.0],
+                [0.50, np.log(3.0)],
+                [0.75, -np.log(3.0)],
+            ]
+        )
+
+        result = jim_with_sample_transforms.samples_to_prior_space(sample_space)
+
+        assert set(result) == {"M_c", "q"}
+        np.testing.assert_allclose(result["M_c"], [45.0, 62.5, 27.5])
+        np.testing.assert_allclose(result["q"], sample_space[:, 0])
+        assert all(isinstance(values, np.ndarray) for values in result.values())
 
     def test_evaluate_prior(self, basic_jim):
         assert jnp.isfinite(basic_jim.evaluate_prior(jnp.array([30.0, 0.5])))
