@@ -154,13 +154,17 @@ class _HybridCarry(NamedTuple):
     complementary_de_proposal_position: Array
 
 
-def _slice_entry(schedule, idx, logdensity, max_expansions, width):
+def _slice_entry(schedule, idx, logdensity, max_expansions, width, shrink_only=False):
     """Bundle initialization of the slice at ``idx``."""
     level = logdensity + jnp.log(schedule.level_u[idx])
     left = -width * schedule.bracket_u[idx]
     right = left + width
-    j = jnp.floor(max_expansions * schedule.bracket_v[idx]).astype(int)
-    k = (max_expansions - 1) - j
+    if shrink_only:
+        j = jnp.asarray(0)
+        k = jnp.asarray(0)
+    else:
+        j = jnp.floor(max_expansions * schedule.bracket_v[idx]).astype(int)
+        k = (max_expansions - 1) - j
     return level, left, right, j, k, schedule.shrink_key_data[idx]
 
 
@@ -174,12 +178,17 @@ def run_segment(
     max_expansions: int,
     max_shrinkage: int,
     width: float = 1.0,
+    shrink_only: bool = False,
 ):
     """Run every slice of one segment for a single chain.
 
     ``eval_candidate(position, cache) -> (logdensity, loglikelihood, cache)``
     is the segment's only likelihood site. ``state`` carries ``position``,
     ``logdensity``, ``loglikelihood``, ``loglikelihood_birth``, and ``cache``.
+
+    ``shrink_only`` is a static Python bool: when set, every slice enters the
+    shrink phase directly with a fixed unit bracket and never performs
+    stepping-out expansions (Neal 2003 sec 4.1).
     """
     assert max_shrinkage >= 1
 
@@ -192,12 +201,13 @@ def run_segment(
         bracket_left=jnp.zeros((n_slices,)),
         bracket_right=jnp.zeros((n_slices,)),
     )
+    entry_phase = _SHRINK if shrink_only else _LEFT
     level, left, right, j, k, shrink_key_data = _slice_entry(
-        schedule, 0, state.logdensity, max_expansions, width
+        schedule, 0, state.logdensity, max_expansions, width, shrink_only=shrink_only
     )
     carry = _Carry(
         slice_idx=jnp.asarray(0),
-        phase=jnp.asarray(_LEFT),
+        phase=jnp.asarray(entry_phase),
         state=state,
         level=level,
         left=left,
@@ -309,6 +319,7 @@ def run_segment(
             new_state.logdensity,
             max_expansions,
             width,
+            shrink_only=shrink_only,
         )
         advance = slice_done & ~segment_done
 
@@ -317,7 +328,7 @@ def run_segment(
             _DONE,
             jnp.where(
                 advance,
-                _LEFT,
+                entry_phase,
                 jnp.where(
                     to_right,
                     _RIGHT,

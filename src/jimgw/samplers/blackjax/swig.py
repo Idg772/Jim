@@ -25,7 +25,7 @@ from jimgw.samplers.blackjax._fsm import (
     run_segment,
     slice_randoms_from_keys,
 )
-from jimgw.samplers.blackjax._slice import stepping_out_cached
+from jimgw.samplers.blackjax._slice import shrink_only_bracket, stepping_out_cached
 from jimgw.samplers.blackjax.nss import (
     BlackJAXNSSSampler,
     _sample_direction_from_covariance_factor,
@@ -181,6 +181,61 @@ def _resolve_num_slice_steps_by_block(
     if any(count < 1 for count in counts):
         raise ValueError("num_slice_steps_by_block counts must all be positive")
     return counts
+
+
+def _slice_to_block_map(
+    block_step_counts: tuple[int, ...], num_gibbs_sweeps: int
+) -> tuple[int, ...]:
+    """Block index of every scheduled slice update, in schedule order."""
+    per_sweep = [
+        block_index
+        for block_index, count in enumerate(block_step_counts)
+        for _ in range(count)
+    ]
+    return tuple(per_sweep) * num_gibbs_sweeps
+
+
+def _updated_block_widths(
+    block_widths,
+    num_expansions,
+    num_shrink,
+    *,
+    slice_to_block: tuple[int, ...],
+    n_blocks: int,
+    rate: float,
+    target_expansions: float,
+    target_shrinks: float,
+    shrink_only: bool,
+):
+    """Multiplicative per-block width update from per-slice counters.
+
+    Counters arrive with the scheduled-slice axis last; every leading axis
+    (lanes, deletions) is reduced by a full-axis sum so the result is
+    replicated identically on every device under GSPMD.
+    """
+    n_slices = len(slice_to_block)
+    exp_totals = jnp.asarray(num_expansions, float).reshape(-1, n_slices)
+    shr_totals = jnp.asarray(num_shrink, float).reshape(-1, n_slices)
+    n_visits_per_slice = exp_totals.shape[0]
+    map_array = jnp.asarray(slice_to_block)
+    slice_counts = jnp.zeros(n_blocks).at[map_array].add(jnp.ones(n_slices))
+    exp_by_block = jnp.zeros(n_blocks).at[map_array].add(exp_totals.sum(axis=0))
+    shr_by_block = jnp.zeros(n_blocks).at[map_array].add(shr_totals.sum(axis=0))
+    visits = slice_counts * n_visits_per_slice
+    mean_expansions = exp_by_block / visits
+    mean_shrinks = shr_by_block / visits
+    shrink_excess = (mean_shrinks - target_shrinks) / max(target_shrinks, 1.0)
+    if shrink_only:
+        delta = -shrink_excess
+    else:
+        expansion_excess = (mean_expansions - target_expansions) / max(
+            target_expansions, 1.0
+        )
+        delta = expansion_excess - shrink_excess
+    log_widths = jnp.log(jnp.asarray(block_widths, float)) + rate * delta
+    log_widths = jnp.clip(log_widths, jnp.log(1e-3), jnp.log(1e3))
+    widths = jnp.exp(log_widths)
+    return tuple(widths[i] for i in range(n_blocks))
 
 
 def _resolve_block_kernel_modes(
@@ -568,8 +623,11 @@ def _build_swig_constrained_step_lockstep(
     resolved_de_jump_blocks: tuple[ResolvedDEJumpBlock, ...] = (),
     block_kernel_modes: Optional[Sequence[str]] = None,
     resolved_complementary_de_jump_block: Optional[ResolvedDEJumpBlock] = None,
+    bracket_mode: str = "stepping-out",
 ) -> Callable:
     """Reference scan implementation for FSM pathwise-equivalence tests."""
+    if bracket_mode not in ("stepping-out", "shrink-only"):
+        raise ValueError(f"Unsupported bracket_mode: {bracket_mode!r}")
     block_step_counts = _resolve_num_slice_steps_by_block(
         rebuild_required_by_block,
         num_inner_steps_per_dim,
@@ -605,7 +663,11 @@ def _build_swig_constrained_step_lockstep(
         if complementary_attempts not in SUPPORTED_COMPLEMENTARY_DE_ATTEMPTS:
             raise ValueError("complementary DE requires exactly four or eight attempts")
     slice_kernel = build_slice_kernel(
-        interval=stepping_out_cached,
+        interval=(
+            stepping_out_cached
+            if bracket_mode == "stepping-out"
+            else shrink_only_bracket
+        ),
         max_expansions=max_steps,
         max_shrinkage=max_shrinkage,
     )
@@ -630,6 +692,7 @@ def _build_swig_constrained_step_lockstep(
         live_positions=None,
         live_loglikelihoods=None,
         parent_index=None,
+        block_widths=None,
     ):
         root_key = rng_key
         uses_covariance_factors = block_covariance_factors is not None
@@ -639,6 +702,10 @@ def _build_swig_constrained_step_lockstep(
                 block_covariance_factors,
             )
         )
+        if block_widths is not None and len(block_widths) != len(
+            rebuild_required_by_block
+        ):
+            raise ValueError("block_widths must contain exactly one factor per block")
         if (
             direction_mode == "de-mix"
             or num_de_jumps > 0
@@ -748,6 +815,7 @@ def _build_swig_constrained_step_lockstep(
                     direction_parameter=direction_parameter,
                     requires_rebuild=requires_rebuild,
                     use_covariance_basis=use_covariance_basis,
+                    block_index=block_index,
                 ):
                     if use_covariance_basis:
                         key, basis_direction = slice_input
@@ -760,6 +828,10 @@ def _build_swig_constrained_step_lockstep(
                         block_position = position[parameter_index_array]
                         if use_covariance_basis:
                             block_direction = basis_direction
+                            if block_widths is not None:
+                                block_direction = (
+                                    block_direction * block_widths[block_index]
+                                )
                         elif direction_mode in (
                             "covariance",
                             "covariance-basis-8d",
@@ -769,7 +841,16 @@ def _build_swig_constrained_step_lockstep(
                                 block_position,
                                 direction_parameter,
                             )
+                            if block_widths is not None:
+                                block_direction = (
+                                    block_direction * block_widths[block_index]
+                                )
                         else:
+                            if block_widths is not None:
+                                raise ValueError(
+                                    "block_widths is not supported with de-mix "
+                                    "directions"
+                                )
                             block_direction = _sample_de_mix_direction(
                                 direction_key,
                                 live_positions,
@@ -1053,8 +1134,12 @@ def _build_swig_constrained_step(
     resolved_de_jump_blocks: tuple[ResolvedDEJumpBlock, ...] = (),
     block_kernel_modes: Optional[Sequence[str]] = None,
     resolved_complementary_de_jump_block: Optional[ResolvedDEJumpBlock] = None,
+    bracket_mode: str = "stepping-out",
 ) -> Callable:
     """Run a SwiG transition with one FSM loop per static cache segment."""
+    if bracket_mode not in ("stepping-out", "shrink-only"):
+        raise ValueError(f"Unsupported bracket_mode: {bracket_mode!r}")
+    shrink_only = bracket_mode == "shrink-only"
     block_step_counts = _resolve_num_slice_steps_by_block(
         rebuild_required_by_block,
         num_inner_steps_per_dim,
@@ -1072,6 +1157,10 @@ def _build_swig_constrained_step(
         num_de_jumps=num_de_jumps,
         resolved_de_jump_blocks=resolved_de_jump_blocks,
     )
+    if shrink_only and any(mode != "slice" for mode in resolved_block_kernel_modes):
+        raise ValueError(
+            "shrink-only brackets cannot combine with non-slice block_kernel_modes"
+        )
     uses_periodic_independence = (
         "periodic-uniform-independence" in resolved_block_kernel_modes
     )
@@ -1140,6 +1229,7 @@ def _build_swig_constrained_step(
         live_positions=None,
         live_loglikelihoods=None,
         parent_index=None,
+        block_widths=None,
     ):
         uses_covariance_factors = block_covariance_factors is not None
         block_direction_parameters, sample_block_direction = (
@@ -1148,6 +1238,10 @@ def _build_swig_constrained_step(
                 block_covariance_factors,
             )
         )
+        if block_widths is not None and len(block_widths) != len(
+            rebuild_required_by_block
+        ):
+            raise ValueError("block_widths must contain exactly one factor per block")
         if (
             direction_mode == "de-mix"
             or num_de_jumps > 0
@@ -1245,6 +1339,8 @@ def _build_swig_constrained_step(
                             for i in range(n_steps)
                         ]
                     )
+                    if block_widths is not None:
+                        block_directions = block_directions * block_widths[block_index]
                     directions = (
                         jnp.zeros((n_steps, n_dims), dtype=state.position.dtype)
                         .at[:, parameter_index_array]
@@ -1647,6 +1743,8 @@ def _build_swig_constrained_step(
                     block_directions = _sample_signed_permuted_covariance_basis(
                         prop_keys[0], covariance_factor
                     )
+                    if block_widths is not None:
+                        block_directions = block_directions * block_widths[block_index]
                 elif direction_mode in (
                     "covariance",
                     "covariance-basis-8d",
@@ -1666,7 +1764,13 @@ def _build_swig_constrained_step(
                             for i in range(n_steps)
                         ]
                     )
+                    if block_widths is not None:
+                        block_directions = block_directions * block_widths[block_index]
                 else:
+                    if block_widths is not None:
+                        raise ValueError(
+                            "block_widths is not supported with de-mix directions"
+                        )
                     block_directions = jnp.stack(
                         [
                             _sample_de_mix_direction(
@@ -1733,6 +1837,7 @@ def _build_swig_constrained_step(
                 wrap_position=wrap_periodic_position,
                 max_expansions=max_steps,
                 max_shrinkage=max_shrinkage,
+                shrink_only=shrink_only,
             )
             segment_infos.append(segment_info)
 
@@ -1975,6 +2080,21 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
             or self._resolved_complementary_de_jump_block is not None
         )
 
+        # Widths MUST be 0-d jnp arrays, never Python floats: they live inside
+        # state.inner_kernel_params, whose every leaf gets a P() spec via
+        # jax.tree.map at sharding.py:309 and is device_put by
+        # place_replicated_state — Python-float leaves break that contract.
+        adaptive_widths = config.adaptive_slice_widths
+        block_step_counts = _resolve_num_slice_steps_by_block(
+            rebuild_required_by_block,
+            config.num_inner_steps_per_dim,
+            config.num_slice_steps_by_block,
+        )
+        slice_to_block = _slice_to_block_map(block_step_counts, config.num_gibbs_sweeps)
+        n_blocks = len(rebuild_required_by_block)
+        initial_widths = tuple(jnp.asarray(1.0, dtype=float) for _ in range(n_blocks))
+        self._initial_block_widths = initial_widths
+
         def block_covariances(state):
             covariance = jnp.atleast_2d(
                 particles_covariance_matrix(state.particles.position)
@@ -1990,16 +2110,35 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
             )
 
         def update_block_covariances(rng_key, state, info, params=None):
-            del rng_key, info, params
+            del rng_key
             parameters = {"block_covariances": block_covariances(state)}
             if uses_live_positions:
                 parameters["live_positions"] = state.particles.position
             if uses_live_loglikelihoods:
                 parameters["live_loglikelihoods"] = state.particles.loglikelihood
+            if adaptive_widths:
+                update_info = getattr(info, "update_info", None)
+                previous_widths = (params or {}).get("block_widths")
+                if update_info is None or previous_widths is None:
+                    parameters["block_widths"] = initial_widths
+                else:
+                    parameters["block_widths"] = _updated_block_widths(
+                        previous_widths,
+                        update_info.num_expansions,
+                        update_info.num_shrink,
+                        slice_to_block=slice_to_block,
+                        n_blocks=n_blocks,
+                        rate=config.width_adaptation_rate,
+                        target_expansions=config.width_target_expansions,
+                        target_shrinks=config.width_target_shrinks,
+                        shrink_only=config.bracket_mode == "shrink-only",
+                    )
+            else:
+                del info, params
             return parameters
 
         def update_block_covariance_factors(rng_key, state, info, params=None):
-            del rng_key, info, params
+            del rng_key
             covariance_factors = tuple(
                 jnp.linalg.cholesky(covariance)
                 for covariance in block_covariances(state)
@@ -2009,6 +2148,25 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
                 parameters["live_positions"] = state.particles.position
             if uses_live_loglikelihoods:
                 parameters["live_loglikelihoods"] = state.particles.loglikelihood
+            if adaptive_widths:
+                update_info = getattr(info, "update_info", None)
+                previous_widths = (params or {}).get("block_widths")
+                if update_info is None or previous_widths is None:
+                    parameters["block_widths"] = initial_widths
+                else:
+                    parameters["block_widths"] = _updated_block_widths(
+                        previous_widths,
+                        update_info.num_expansions,
+                        update_info.num_shrink,
+                        slice_to_block=slice_to_block,
+                        n_blocks=n_blocks,
+                        rate=config.width_adaptation_rate,
+                        target_expansions=config.width_target_expansions,
+                        target_shrinks=config.width_target_shrinks,
+                        shrink_only=config.bracket_mode == "shrink-only",
+                    )
+            else:
+                del info, params
             return parameters
 
         self._update_block_covariances = update_block_covariances
@@ -2059,7 +2217,7 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
             )
             result = state._replace(inner_kernel_params=rebuild(None, state, None))
         else:
-            keys = set(params) - {"live_positions"}
+            keys = set(params) - {"live_positions", "block_widths"}
             if not use_covariance_factors:
                 if keys == {"block_covariances"}:
                     result = state
@@ -2092,6 +2250,14 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
                     "checkpoint has incompatible SwiG inner-kernel parameters: "
                     f"expected {expected!r}, found {sorted(keys)!r}"
                 )
+        normalised_params = dict(result.inner_kernel_params)
+        if self._swig_config.adaptive_slice_widths:
+            normalised_params["block_widths"] = params.get(
+                "block_widths", self._initial_block_widths
+            )
+        else:
+            normalised_params.pop("block_widths", None)
+        result = result._replace(inner_kernel_params=normalised_params)
         return result
 
     def _get_diagnostics(self) -> dict[str, Any]:
@@ -2503,11 +2669,18 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
         )
         n_replacements = np.asarray(update_info.is_accepted).size
         n_slice_updates = slice_updates_per_replacement * n_replacements
+        # Stepping-out slice updates evaluate both bracket endpoints (2 evals
+        # each); shrink-only bracket mode never evaluates an endpoint, so the
+        # endpoint term must vanish under that mode.
+        n_endpoint_evals_per_slice_update = (
+            0 if self._swig_config.bracket_mode == "shrink-only" else 2
+        )
         diagnostics.update(
             {
                 "n_slice_updates": n_slice_updates,
                 "n_likelihood_evaluations_physical": (
-                    diagnostics["n_likelihood_evaluations"] + 2 * n_slice_updates
+                    diagnostics["n_likelihood_evaluations"]
+                    + n_endpoint_evals_per_slice_update * n_slice_updates
                 ),
             }
         )
@@ -2545,7 +2718,14 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
             "resolved_complementary_de_jump_block": (
                 self._resolved_complementary_de_jump_block
             ),
+            "bracket_mode": self._swig_config.bracket_mode,
         }
+        # per_slice_info only exists on the FSM builder's signature; passing
+        # it to the lockstep builder would raise a TypeError.
+        if is_fsm_builder:
+            constrained_step_kwargs["per_slice_info"] = (
+                self._swig_config.adaptive_slice_widths
+            )
         constrained_step = constrained_step_builder(**constrained_step_kwargs)
         if mesh is None:
             if self._resolved_complementary_de_jump_block is None:

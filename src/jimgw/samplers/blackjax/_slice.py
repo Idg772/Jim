@@ -49,3 +49,17 @@ def stepping_out_cached(rng_key, in_slice: Callable, width: float, max_expansion
     num_expansions = (j - jl) + (k - kr)
     accept_fn = lambda _: jnp.asarray(True)
     return left, right, num_expansions, accept_fn
+
+
+def shrink_only_bracket(rng_key, in_slice: Callable, width: float, max_expansions: int):
+    """Fixed-width bracket with no endpoint evaluations (Neal 2003 §4.1).
+
+    Consumes the same first uniform as ``stepping_out_cached`` so the FSM
+    scheduler's pre-drawn ``bracket_u`` reproduces this bracket exactly.
+    """
+    del in_slice, max_expansions
+    u_key, _ = jax.random.split(rng_key)
+    left = -width * jax.random.uniform(u_key)
+    right = left + width
+    accept_fn = lambda _: jnp.asarray(True)
+    return left, right, jnp.asarray(0), accept_fn

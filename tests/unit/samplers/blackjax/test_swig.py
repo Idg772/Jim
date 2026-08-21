@@ -12,7 +12,11 @@ import pytest
 from blackjax.ns.adaptive import AdaptiveNSState
 
 from jimgw.samplers.blackjax import swig
-from jimgw.samplers.blackjax.swig import BlackJAXSwiGSampler
+from jimgw.samplers.blackjax.swig import (
+    BlackJAXSwiGSampler,
+    _slice_to_block_map,
+    _updated_block_widths,
+)
 from jimgw.samplers.config import BlackJAXSwiGConfig
 
 
@@ -935,6 +939,36 @@ def test_covariance_mode_leaves_update_param_keys_unchanged():
     }
 
 
+def test_swig_checkpoint_normalisation_preserves_or_removes_block_widths():
+    positions = jnp.asarray([[0.1, 0.2], [0.3, 0.4], [0.8, 0.6]])
+    particles = SimpleNamespace(position=positions)
+    learned_widths = (jnp.asarray(2.0), jnp.asarray(3.0))
+    state = AdaptiveNSState(
+        particles=particles,
+        integrator=None,
+        inner_kernel_params={
+            "block_covariances": (jnp.asarray([[1.0]]), jnp.asarray([[1.0]])),
+            "block_widths": learned_widths,
+        },
+    )
+
+    adaptive_sampler = _make_sampler(adaptive_slice_widths=True)
+    converted = adaptive_sampler._normalise_inner_kernel_params_for_mesh(
+        state, object()
+    )
+    assert "block_covariance_factors" in converted.inner_kernel_params
+    for actual, expected in zip(
+        converted.inner_kernel_params["block_widths"], learned_widths, strict=True
+    ):
+        np.testing.assert_array_equal(actual, expected)
+
+    fixed_width_sampler = _make_sampler()
+    fixed_width = fixed_width_sampler._normalise_inner_kernel_params_for_mesh(
+        state, None
+    )
+    assert "block_widths" not in fixed_width.inner_kernel_params
+
+
 def test_swig_checkpoint_records_sampler_name(tmp_path, monkeypatch):
     sampler = _make_sampler(checkpoint_dir=tmp_path)
     checkpoint_path = tmp_path / "checkpoint.pkl"
@@ -959,3 +993,171 @@ def test_swig_checkpoint_records_sampler_name(tmp_path, monkeypatch):
     assert checkpoint["sampler_name"] == sampler.sampler_name
     checkpoint_path.unlink()
 
+
+def test_slice_to_block_map_orders_blocks_per_sweep():
+    assert _slice_to_block_map((2, 1), 2) == (0, 0, 1, 0, 0, 1)
+
+
+def _run_controller(widths, exp, shr, **kw):
+    defaults = dict(
+        slice_to_block=(0, 1),
+        n_blocks=2,
+        rate=0.25,
+        target_expansions=1.0,
+        target_shrinks=3.0,
+        shrink_only=False,
+    )
+    defaults.update(kw)
+    return _updated_block_widths(
+        widths, jnp.asarray(exp, float), jnp.asarray(shr, float), **defaults
+    )
+
+
+def test_width_grows_under_expansion_pressure():
+    # one lane, two slices (one per block); block 0 saw 7 expansions
+    new = _run_controller((1.0, 1.0), [[7.0, 1.0]], [[3.0, 3.0]])
+    assert float(new[0]) > 1.0
+    assert abs(float(new[1]) - 1.0) < 1e-12
+
+
+def test_width_shrinks_under_shrink_pressure():
+    new = _run_controller((1.0, 1.0), [[1.0, 1.0]], [[19.0, 3.0]])
+    assert float(new[0]) < 1.0
+
+
+def test_width_clipped_to_bounds():
+    tiny = _run_controller((1e-3, 1.0), [[0.0, 1.0]], [[100.0, 3.0]])
+    # exp(log(1e-3)) round-trips within 1 ulp; compare with slack
+    assert float(tiny[0]) >= 1e-3 * (1.0 - 1e-12)
+
+
+def test_shrink_only_rule_ignores_expansions():
+    # shrinks exactly on target -> width unchanged even with zero expansions
+    new = _run_controller(
+        (1.0,), [[0.0]], [[3.0]], slice_to_block=(0,), n_blocks=1, shrink_only=True
+    )
+    assert abs(float(new[0]) - 1.0) < 1e-12
+
+
+def test_adaptive_width_update_preserves_jit_input_signature():
+    sampler = _make_sampler(adaptive_slice_widths=True, bracket_mode="shrink-only")
+    trace_count = 0
+
+    def update(widths):
+        nonlocal trace_count
+        trace_count += 1
+        return _updated_block_widths(
+            widths,
+            jnp.asarray([[0.0, 0.0]]),
+            jnp.asarray([[3.0, 3.0]]),
+            slice_to_block=(0, 1),
+            n_blocks=2,
+            rate=0.25,
+            target_expansions=1.0,
+            target_shrinks=3.0,
+            shrink_only=True,
+        )
+
+    jitted_update = jax.jit(update)
+    widths = jax.block_until_ready(jitted_update(sampler._initial_block_widths))
+    jax.block_until_ready(jitted_update(widths))
+
+    assert trace_count == 1
+
+
+def test_adaptive_width_sampler_smoke_end_to_end(monkeypatch):
+    # Wiring smoke test for Task 5: adaptive_slice_widths + bracket_mode must
+    # reach _build_nested_sampler's constrained_step_builder(...) call so that
+    # a real end-to-end run (a) carries "block_widths" in the live
+    # inner-kernel parameters and (b) actually samples with a shrink-only
+    # bracket (zero stepping-out evaluations), not the builder default.
+    from jimgw.samplers.blackjax import nss as nss_module
+
+    captured: dict = {}
+    real_finalise = nss_module.finalise
+
+    def _capturing_finalise(state, dead):
+        # The live AdaptiveNSState (with its final inner_kernel_params) is
+        # discarded once finalise() combines it with the dead-particle
+        # history, so intercept it here to inspect the final block_widths.
+        captured["inner_kernel_params"] = state.inner_kernel_params
+        return real_finalise(state, dead)
+
+    monkeypatch.setattr(nss_module, "finalise", _capturing_finalise)
+
+    config = BlackJAXSwiGConfig(
+        blocks=[["slow"], ["fast"]],
+        n_live=32,
+        n_delete_frac=0.125,
+        termination_dlogz=5.0,
+        max_steps=4,
+        max_shrinkage=30,
+        adaptive_slice_widths=True,
+        bracket_mode="shrink-only",
+    )
+    sampler = BlackJAXSwiGSampler(
+        n_dims=2,
+        log_prior_fn=_log_prior,
+        log_likelihood_fn=_log_likelihood,
+        log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+        config=config,
+        rebuild_required_by_block={(0,): True, (1,): False},
+        build_cache=_build_cache,
+        log_likelihood_from_cache_fn=_log_likelihood_from_cache,
+    )
+    initial = jax.random.uniform(jax.random.key(5), (32, 2))
+    sampler.sample(jax.random.key(6), initial)
+
+    inner_kernel_params = captured["inner_kernel_params"]
+    assert "block_widths" in inner_kernel_params
+    widths = np.asarray([float(width) for width in inner_kernel_params["block_widths"]])
+    assert np.all(np.isfinite(widths))
+    assert np.all(widths >= 1e-3)
+    assert np.all(widths <= 1e3)
+
+    diagnostics = sampler.get_diagnostics()
+    assert diagnostics["n_likelihood_evaluations_stepping_out"] == 0
+
+
+@pytest.mark.parametrize("bracket_mode", ["stepping-out", "shrink-only"])
+def test_physical_eval_count_endpoint_term_is_bracket_mode_aware(bracket_mode: str):
+    # `n_likelihood_evaluations_physical` adds 2 endpoint evals per slice
+    # update for stepping-out brackets, but shrink-only brackets never
+    # evaluate an endpoint, so that term must be zero in shrink-only mode.
+    config_kwargs = {
+        "blocks": [["slow"], ["fast"]],
+        "n_live": 32,
+        "n_delete_frac": 0.125,
+        "termination_dlogz": 5.0,
+        "max_steps": 4,
+        "max_shrinkage": 30,
+        "bracket_mode": bracket_mode,
+    }
+    if bracket_mode == "shrink-only":
+        config_kwargs["adaptive_slice_widths"] = True
+    config = BlackJAXSwiGConfig(**config_kwargs)
+    sampler = BlackJAXSwiGSampler(
+        n_dims=2,
+        log_prior_fn=_log_prior,
+        log_likelihood_fn=_log_likelihood,
+        log_posterior_fn=lambda x: _log_prior(x) + _log_likelihood(x),
+        config=config,
+        rebuild_required_by_block={(0,): True, (1,): False},
+        build_cache=_build_cache,
+        log_likelihood_from_cache_fn=_log_likelihood_from_cache,
+    )
+    initial = jax.random.uniform(jax.random.key(9), (32, 2))
+    sampler.sample(jax.random.key(10), initial)
+
+    diagnostics = sampler.get_diagnostics()
+    assert diagnostics["n_slice_updates"] > 0
+    if bracket_mode == "shrink-only":
+        assert diagnostics["n_likelihood_evaluations_stepping_out"] == 0
+        assert diagnostics["n_likelihood_evaluations_physical"] == (
+            diagnostics["n_likelihood_evaluations"]
+        )
+    else:
+        assert diagnostics["n_likelihood_evaluations_physical"] == (
+            diagnostics["n_likelihood_evaluations"]
+            + 2 * diagnostics["n_slice_updates"]
+        )

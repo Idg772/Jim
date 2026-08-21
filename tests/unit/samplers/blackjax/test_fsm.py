@@ -227,7 +227,9 @@ def _toy_log_likelihood_from_cache(position, cache):
     return -jnp.sum((cache - 0.3) ** 2) - jnp.sum((position[3:] - 0.1) ** 2)
 
 
-def _swig_builders(per_slice_info=False, num_slice_steps_by_block=None):
+def _swig_builders(
+    per_slice_info=False, num_slice_steps_by_block=None, bracket_mode="stepping-out"
+):
     common = {
         "log_prior_fn": _toy_log_prior,
         "build_cache": _toy_build_cache,
@@ -240,6 +242,7 @@ def _swig_builders(per_slice_info=False, num_slice_steps_by_block=None):
         "max_shrinkage": 100,
         "periodic": {4: (0.0, 2.0)},
         "n_dims": _N_DIMS,
+        "bracket_mode": bracket_mode,
     }
     lockstep = _build_swig_constrained_step_lockstep(**common)
     fsm = _build_swig_constrained_step(**common, per_slice_info=per_slice_info)
@@ -938,6 +941,35 @@ def test_swig_covariance_basis_fsm_matches_lockstep_bitwise():
         np.testing.assert_array_equal(actual_leaf, expected_leaf)
 
 
+def test_swig_covariance_basis_width_scaled_fsm_matches_lockstep_bitwise():
+    lockstep, fsm = _h2_builders()
+    keys = jax.random.split(jax.random.key(143), 8)
+    positions = jax.random.normal(jax.random.key(144), (8, _H2_N_DIMS)) * 0.2
+    thresholds = jnp.linspace(-40.0, -3.0, 8)
+    factors = _h2_covariance_factors()
+    block_widths = (0.5, 1.1, 0.9, 1.2, 0.8, 1.3)
+
+    def run(step):
+        return jax.jit(
+            jax.vmap(
+                lambda key, position, threshold: step(
+                    key,
+                    _h2_particle_state(position, threshold),
+                    threshold,
+                    block_covariance_factors=factors,
+                    block_widths=block_widths,
+                )
+            )
+        )(keys, positions, thresholds)
+
+    expected = run(lockstep)
+    actual = run(fsm)
+    for actual_leaf, expected_leaf in zip(
+        jax.tree.leaves(actual), jax.tree.leaves(expected), strict=True
+    ):
+        np.testing.assert_array_equal(actual_leaf, expected_leaf)
+
+
 def test_swig_explicit_block_budget_fsm_matches_lockstep_bitwise():
     lockstep, fsm = _h2_builders(
         direction_mode="covariance",
@@ -1613,3 +1645,211 @@ def test_replicated_update_can_fold_inner_steps_without_changing_info_shape():
     for leaf in jax.tree.leaves(info):
         assert leaf.shape == (1, n_inner_steps)
 
+
+def test_swig_width_scaled_fsm_matches_lockstep_bitwise():
+    # Identical setup to test_swig_fsm_constrained_step_matches_lockstep_bitwise,
+    # but pass block_widths=(0.5, 2.0, ...) (one scalar per block) to BOTH
+    # builders' constrained_step calls and assert bitwise-equal final
+    # positions, logdensities, loglikelihoods, and equal num_expansions /
+    # num_shrink totals.
+    lockstep, fsm = _swig_builders()
+    n_lanes = 64
+    keys = jax.random.split(jax.random.key(3), n_lanes)
+    positions = jax.random.normal(jax.random.key(4), (n_lanes, _N_DIMS)) * 0.5
+    thresholds = jnp.linspace(-30.0, -2.0, n_lanes)
+    covariance_factors = _block_covariance_factors()
+    block_widths = (0.5, 2.0, 1.5, 0.75)
+    assert len(block_widths) == len(_REBUILD_BY_BLOCK)
+
+    def run(step_fn):
+        def one(key, pos, l0):
+            return step_fn(
+                key,
+                _particle_state(pos, l0),
+                l0,
+                block_covariance_factors=covariance_factors,
+                block_widths=block_widths,
+            )
+
+        return jax.jit(jax.vmap(one))(keys, positions, thresholds)
+
+    ref_state, ref_info = run(lockstep)
+    new_state, new_info = run(fsm)
+    for a, b in zip(
+        jax.tree.leaves(new_state), jax.tree.leaves(ref_state), strict=True
+    ):
+        np.testing.assert_array_equal(a, b)
+    np.testing.assert_array_equal(new_info.is_accepted, ref_info.is_accepted)
+    np.testing.assert_array_equal(new_info.num_expansions, ref_info.num_expansions)
+    np.testing.assert_array_equal(new_info.num_shrink, ref_info.num_shrink)
+
+
+def test_swig_width_one_matches_no_width_bitwise():
+    # Same setup; run the FSM builder once with block_widths=None and once
+    # with block_widths=(1.0,)*n_blocks; assert bitwise-identical outputs.
+    _, fsm = _swig_builders()
+    n_lanes = 64
+    keys = jax.random.split(jax.random.key(3), n_lanes)
+    positions = jax.random.normal(jax.random.key(4), (n_lanes, _N_DIMS)) * 0.5
+    thresholds = jnp.linspace(-30.0, -2.0, n_lanes)
+    covariance_factors = _block_covariance_factors()
+    n_blocks = len(_REBUILD_BY_BLOCK)
+
+    def run(block_widths):
+        def one(key, pos, l0):
+            return fsm(
+                key,
+                _particle_state(pos, l0),
+                l0,
+                block_covariance_factors=covariance_factors,
+                block_widths=block_widths,
+            )
+
+        return jax.jit(jax.vmap(one))(keys, positions, thresholds)
+
+    no_width_state, no_width_info = run(None)
+    unit_width_state, unit_width_info = run((1.0,) * n_blocks)
+    for a, b in zip(
+        jax.tree.leaves(unit_width_state),
+        jax.tree.leaves(no_width_state),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(a, b)
+    np.testing.assert_array_equal(
+        unit_width_info.is_accepted, no_width_info.is_accepted
+    )
+    np.testing.assert_array_equal(
+        unit_width_info.num_expansions, no_width_info.num_expansions
+    )
+    np.testing.assert_array_equal(unit_width_info.num_shrink, no_width_info.num_shrink)
+
+
+def test_swig_width_changes_fsm_output():
+    # Guards against block_widths being silently ignored: the other width
+    # tests only prove the FSM matches lockstep under a shared non-unit width
+    # and that width=1.0 is a no-op, neither of which requires the scaling
+    # to actually do anything. A non-unit width must perturb the final
+    # positions relative to block_widths=None on identical inputs.
+    _, fsm = _swig_builders()
+    n_lanes = 64
+    keys = jax.random.split(jax.random.key(3), n_lanes)
+    positions = jax.random.normal(jax.random.key(4), (n_lanes, _N_DIMS)) * 0.5
+    thresholds = jnp.linspace(-30.0, -2.0, n_lanes)
+    covariance_factors = _block_covariance_factors()
+    n_blocks = len(_REBUILD_BY_BLOCK)
+
+    def run(block_widths):
+        def one(key, pos, l0):
+            return fsm(
+                key,
+                _particle_state(pos, l0),
+                l0,
+                block_covariance_factors=covariance_factors,
+                block_widths=block_widths,
+            )
+
+        return jax.jit(jax.vmap(one))(keys, positions, thresholds)
+
+    no_width_state, _ = run(None)
+    scaled_state, _ = run((0.5,) * n_blocks)
+
+    differs = any(
+        not np.array_equal(np.asarray(a), np.asarray(b))
+        for a, b in zip(
+            jax.tree.leaves(scaled_state),
+            jax.tree.leaves(no_width_state),
+            strict=True,
+        )
+    )
+    assert differs, "block_widths=(0.5,...) must change the FSM output"
+
+
+def test_swig_shrink_only_fsm_matches_lockstep_bitwise():
+    lockstep, fsm = _swig_builders(bracket_mode="shrink-only")
+    n_lanes = 64
+    keys = jax.random.split(jax.random.key(3), n_lanes)
+    positions = jax.random.normal(jax.random.key(4), (n_lanes, _N_DIMS)) * 0.5
+    thresholds = jnp.linspace(-30.0, -2.0, n_lanes)
+    covariance_factors = _block_covariance_factors()
+    block_widths = (0.7, 1.3, 0.9, 1.1)
+    assert len(block_widths) == len(_REBUILD_BY_BLOCK)
+
+    def run(step_fn):
+        def one(key, pos, l0):
+            return step_fn(
+                key,
+                _particle_state(pos, l0),
+                l0,
+                block_covariance_factors=covariance_factors,
+                block_widths=block_widths,
+            )
+
+        return jax.jit(jax.vmap(one))(keys, positions, thresholds)
+
+    ref_state, ref_info = run(lockstep)
+    new_state, new_info = run(fsm)
+    for a, b in zip(
+        jax.tree.leaves(new_state), jax.tree.leaves(ref_state), strict=True
+    ):
+        np.testing.assert_array_equal(a, b)
+    np.testing.assert_array_equal(new_info.is_accepted, ref_info.is_accepted)
+    np.testing.assert_array_equal(new_info.num_shrink, ref_info.num_shrink)
+    np.testing.assert_array_equal(
+        ref_info.num_expansions, jnp.zeros_like(ref_info.num_expansions)
+    )
+    np.testing.assert_array_equal(
+        new_info.num_expansions, jnp.zeros_like(new_info.num_expansions)
+    )
+
+
+def test_shrink_only_run_segment_never_evaluates_endpoints():
+    n_slices = 2
+    max_expansions = 10
+    max_shrinkage = 100
+    chain_key = jax.random.key(93)
+    position = jnp.zeros((N_DIMS,))
+    loglikelihood_0 = jnp.asarray(-5.0)
+
+    slice_keys = jax.random.split(chain_key, n_slices)
+    prop_keys, level_u, bracket_u, bracket_v, shrink_key_data = slice_randoms_from_keys(
+        slice_keys
+    )
+    schedule = SegmentSchedule(
+        directions=_make_directions(prop_keys),
+        level_u=level_u,
+        bracket_u=bracket_u,
+        bracket_v=bracket_v,
+        shrink_key_data=shrink_key_data,
+    )
+    state = CachedSliceState(
+        position=position,
+        logdensity=_log_prior(position),
+        loglikelihood=_log_likelihood(position),
+        loglikelihood_birth=loglikelihood_0,
+        cache=(),
+    )
+
+    evaluations = []
+
+    def eval_candidate(pos, cache):
+        jax.debug.callback(lambda value: evaluations.append(float(value)), pos[0])
+        return _log_prior(pos), _log_likelihood(pos), cache
+
+    _, info = jax.jit(
+        lambda: run_segment(
+            schedule,
+            state,
+            loglikelihood_0,
+            eval_candidate=eval_candidate,
+            wrap_position=lambda x: x,
+            max_expansions=max_expansions,
+            max_shrinkage=max_shrinkage,
+            shrink_only=True,
+        )
+    )()
+    jax.block_until_ready(info)
+
+    np.testing.assert_array_equal(
+        info.num_expansions, jnp.zeros((n_slices,), dtype=int)
+    )
+    assert len(evaluations) == int(info.num_shrink.sum())

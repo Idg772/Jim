@@ -796,3 +796,43 @@ def test_configure_jax_cache_noop_when_no_dir():
         assert getattr(jax.config, "jax_compilation_cache_dir", None) == original
     finally:
         jax.config.update("jax_compilation_cache_dir", original)
+
+
+def test_swig_adaptive_width_defaults():
+    config = BlackJAXSwiGConfig(blocks=[["x"]])
+    assert config.adaptive_slice_widths is False
+    assert config.width_adaptation_rate == 0.25
+    assert config.width_target_expansions == 1.0
+    assert config.width_target_shrinks == 3.0
+    assert config.bracket_mode == "stepping-out"
+
+
+def test_swig_adaptive_width_validation():
+    with pytest.raises(ValidationError):
+        BlackJAXSwiGConfig(blocks=[["x"]], width_adaptation_rate=0.0)
+    with pytest.raises(ValidationError):
+        BlackJAXSwiGConfig(blocks=[["x"]], width_target_shrinks=0.0)
+    # shrink-only requires adaptation on
+    with pytest.raises(ValidationError):
+        BlackJAXSwiGConfig(blocks=[["x"]], bracket_mode="shrink-only")
+    # widths require the covariance direction mode
+    with pytest.raises(ValidationError):
+        BlackJAXSwiGConfig(
+            blocks=[["x"]], adaptive_slice_widths=True, direction_mode="de-mix"
+        )
+    # widths require the FSM scheduler
+    with pytest.raises(ValidationError):
+        BlackJAXSwiGConfig(
+            blocks=[["x"]], adaptive_slice_widths=True, scheduler="pre-fsm-lockstep"
+        )
+    # widths exclude mixed block kernel modes
+    with pytest.raises(ValidationError):
+        BlackJAXSwiGConfig(
+            blocks=[["x"]],
+            adaptive_slice_widths=True,
+            block_kernel_modes=["periodic-uniform-independence"],
+        )
+    ok = BlackJAXSwiGConfig(
+        blocks=[["x"]], adaptive_slice_widths=True, bracket_mode="shrink-only"
+    )
+    assert ok.bracket_mode == "shrink-only"

@@ -422,6 +422,36 @@ def test_workloads_have_distinct_config_fingerprints() -> None:
     assert aligned["sha256"] != paper["sha256"]
 
 
+def test_config_fingerprint_omits_default_adaptive_slice_width_settings() -> None:
+    default = benchmark._config_report(seed=0, n_devices=4)
+
+    assert "adaptive_slice_widths" not in default
+    assert "bracket_mode" not in default
+    assert "width_adaptation_rate" not in default
+    assert "width_target_expansions" not in default
+    assert "width_target_shrinks" not in default
+
+
+def test_config_fingerprint_distinguishes_adaptive_slice_widths() -> None:
+    legacy = benchmark._config_report(seed=0, n_devices=4)
+    adaptive = benchmark._config_report(
+        seed=0,
+        n_devices=4,
+        adaptive_slice_widths=True,
+        bracket_mode="shrink-only",
+        width_adaptation_rate=0.5,
+        width_target_expansions=2.0,
+        width_target_shrinks=4.0,
+    )
+
+    assert adaptive["adaptive_slice_widths"] is True
+    assert adaptive["bracket_mode"] == "shrink-only"
+    assert adaptive["width_adaptation_rate"] == 0.5
+    assert adaptive["width_target_expansions"] == 2.0
+    assert adaptive["width_target_shrinks"] == 4.0
+    assert adaptive["sha256"] != legacy["sha256"]
+
+
 def test_cli_accepts_paper_workload(tmp_path: Path) -> None:
     args = benchmark._parse_args(
         [
@@ -451,6 +481,30 @@ def test_cli_accepts_an_independent_sampler_seed(tmp_path: Path) -> None:
     assert args.sampler_seed == 1_000_005
 
 
+def test_cli_accepts_adaptive_slice_width_flags(tmp_path: Path) -> None:
+    args = benchmark._parse_args(
+        [
+            "--data-file",
+            str(tmp_path / "data.npz"),
+            "--adaptive-slice-widths",
+            "--bracket-mode",
+            "shrink-only",
+            "--width-adaptation-rate",
+            "0.5",
+            "--width-target-expansions",
+            "2.0",
+            "--width-target-shrinks",
+            "4.0",
+        ]
+    )
+
+    assert args.adaptive_slice_widths is True
+    assert args.bracket_mode == "shrink-only"
+    assert args.width_adaptation_rate == pytest.approx(0.5)
+    assert args.width_target_expansions == pytest.approx(2.0)
+    assert args.width_target_shrinks == pytest.approx(4.0)
+
+
 def test_cli_accepts_candidate_gibbs_sweep_count(tmp_path: Path) -> None:
     args = benchmark._parse_args(
         [
@@ -462,6 +516,16 @@ def test_cli_accepts_candidate_gibbs_sweep_count(tmp_path: Path) -> None:
     )
 
     assert args.num_gibbs_sweeps == 3
+
+
+def test_cli_defaults_keep_adaptive_slice_widths_off(tmp_path: Path) -> None:
+    args = benchmark._parse_args(["--data-file", str(tmp_path / "data.npz")])
+
+    assert args.adaptive_slice_widths is False
+    assert args.bracket_mode == "stepping-out"
+    assert args.width_adaptation_rate == pytest.approx(0.25)
+    assert args.width_target_expansions == pytest.approx(1.0)
+    assert args.width_target_shrinks == pytest.approx(3.0)
 
 
 def test_cli_rejects_a_negative_independent_sampler_seed(tmp_path: Path) -> None:

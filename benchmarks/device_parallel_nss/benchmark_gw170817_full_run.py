@@ -499,6 +499,44 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--adaptive-slice-widths",
+        action="store_true",
+        help=(
+            "Adapt each block's slice-direction width online from its "
+            "stepping-out expansion / shrinkage history instead of using a "
+            "fixed unit width. Requires the fsm scheduler and covariance "
+            "direction mode."
+        ),
+    )
+    parser.add_argument(
+        "--bracket-mode",
+        choices=("stepping-out", "shrink-only"),
+        default="stepping-out",
+        help=(
+            "Slice-sampling bracket construction. shrink-only skips "
+            "stepping-out expansion entirely (Neal 2003 Sec. 4.1) and "
+            "requires --adaptive-slice-widths."
+        ),
+    )
+    parser.add_argument(
+        "--width-adaptation-rate",
+        type=float,
+        default=0.25,
+        help="Log-width step size per replacement for --adaptive-slice-widths.",
+    )
+    parser.add_argument(
+        "--width-target-expansions",
+        type=float,
+        default=1.0,
+        help="Target mean stepping-out expansions per slice for the width controller.",
+    )
+    parser.add_argument(
+        "--width-target-shrinks",
+        type=float,
+        default=3.0,
+        help="Target mean shrinkage steps per slice for the width controller.",
+    )
+    parser.add_argument(
         "--direction-mode",
         choices=("covariance", "de-mix", "covariance-basis-8d"),
         default="covariance",
@@ -1456,6 +1494,11 @@ def _config_report(
     de_fraction: float = 0.5,
     num_de_jumps: int = 0,
     de_jump_blocks: list[dict[str, Any]] | None = None,
+    adaptive_slice_widths: bool = False,
+    bracket_mode: str = "stepping-out",
+    width_adaptation_rate: float = 0.25,
+    width_target_expansions: float = 1.0,
+    width_target_shrinks: float = 3.0,
     sampler_seed: int | None = None,
 ) -> dict[str, Any]:
     spec = _workload_spec(workload, blocking_scheme)
@@ -1528,6 +1571,14 @@ def _config_report(
         config["de_fraction"] = de_fraction
         config["num_de_jumps"] = num_de_jumps
         config["de_jump_blocks"] = canonical_de_jump_blocks
+    if adaptive_slice_widths:
+        # Only non-default width-controller settings enter the config (and
+        # its hash) so historical fixed-width reports stay byte-identical.
+        config["adaptive_slice_widths"] = adaptive_slice_widths
+        config["bracket_mode"] = bracket_mode
+        config["width_adaptation_rate"] = width_adaptation_rate
+        config["width_target_expansions"] = width_target_expansions
+        config["width_target_shrinks"] = width_target_shrinks
     if blocking_scheme == FAST_RIDGE_INTRINSIC_5STEP_BLOCKING_SCHEME:
         config["num_slice_steps_by_block"] = list(FAST_RIDGE_INTRINSIC_5STEP_SCHEDULE)
     if blocking_scheme == FAST_RIDGE_INTRINSIC_PERIODIC_MH_BLOCKING_SCHEME:
@@ -2336,6 +2387,11 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         de_fraction=args.de_fraction,
         num_de_jumps=args.num_de_jumps,
         de_jump_blocks=args.de_jump_block,
+        adaptive_slice_widths=args.adaptive_slice_widths,
+        bracket_mode=args.bracket_mode,
+        width_adaptation_rate=args.width_adaptation_rate,
+        width_target_expansions=args.width_target_expansions,
+        width_target_shrinks=args.width_target_shrinks,
         **complementary_de_config,
     )
     sampler_seed = args.seed if args.sampler_seed is None else args.sampler_seed
@@ -2518,6 +2574,11 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 de_fraction=args.de_fraction,
                 num_de_jumps=args.num_de_jumps,
                 de_jump_blocks=args.de_jump_block,
+                adaptive_slice_widths=args.adaptive_slice_widths,
+                bracket_mode=args.bracket_mode,
+                width_adaptation_rate=args.width_adaptation_rate,
+                width_target_expansions=args.width_target_expansions,
+                width_target_shrinks=args.width_target_shrinks,
                 sampler_seed=args.sampler_seed,
             ),
             "initial_positions_sha256": initial_positions_sha256,

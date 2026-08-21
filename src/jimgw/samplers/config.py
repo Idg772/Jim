@@ -446,6 +446,11 @@ class BlackJAXSwiGConfig(
     num_de_jumps: int = Field(default=0, ge=0)
     de_jump_blocks: list[DEJumpBlockConfig] = Field(default_factory=list)
     complementary_de_jump_block: Optional[DEJumpBlockConfig] = None
+    adaptive_slice_widths: bool = False
+    width_adaptation_rate: float = Field(default=0.25, gt=0.0)
+    width_target_expansions: float = Field(default=1.0, ge=0.0)
+    width_target_shrinks: float = Field(default=3.0, gt=0.0)
+    bracket_mode: Literal["stepping-out", "shrink-only"] = "stepping-out"
 
     @field_validator("blocks")
     @classmethod
@@ -590,6 +595,29 @@ class BlackJAXSwiGConfig(
                 raise ValueError(
                     "covariance-basis-8d requires num_inner_steps_per_dim=1"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_adaptive_widths(self) -> Self:
+        wants_widths = self.adaptive_slice_widths or self.bracket_mode == "shrink-only"
+        if not wants_widths:
+            return self
+        if self.bracket_mode == "shrink-only" and not self.adaptive_slice_widths:
+            raise ValueError("shrink-only brackets require adaptive_slice_widths=True")
+        if self.direction_mode != "covariance":
+            raise ValueError(
+                "adaptive slice widths require the covariance direction mode"
+            )
+        if self.scheduler != "fsm":
+            raise ValueError("adaptive slice widths require the fsm scheduler")
+        if self.block_kernel_modes is not None:
+            raise ValueError(
+                "adaptive slice widths cannot combine with block_kernel_modes"
+            )
+        if self.complementary_de_jump_block is not None:
+            raise ValueError(
+                "adaptive slice widths cannot combine with complementary DE"
+            )
         return self
 
 
