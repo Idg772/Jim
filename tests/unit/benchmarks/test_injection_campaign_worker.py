@@ -297,7 +297,7 @@ def lightweight_science_path(monkeypatch: pytest.MonkeyPatch) -> None:
         run_injection_module, "_implementation_report", lambda *_: {"label": "test"}
     )
     monkeypatch.setattr(
-        run_injection_module, "_build_sampler_config", lambda *_: object()
+        run_injection_module, "_build_sampler_config", lambda *_, **__: object()
     )
     _FakeLikelihood.detector_groups.clear()
     _FakeJim.seeds.clear()
