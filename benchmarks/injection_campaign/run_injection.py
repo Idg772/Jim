@@ -1132,12 +1132,17 @@ def run_injection(
     try:
         paper_timing = _paper_convention_timing(sample_seconds, sample_phases)
     except (TypeError, RuntimeError):
-        if not _is_paper_baseline(manifest):
+        if not args.simulate_cpu and not _is_paper_baseline(manifest):
             raise
         paper_timing = None
         timing_unavailable_reason = (
-            "The pinned paper baseline predates split likelihood/sampler JIT "
-            "phase instrumentation; no post-JIT timing is inferred."
+            "The simulated CPU backend did not report every split JIT phase; "
+            "no post-JIT timing is inferred."
+            if args.simulate_cpu
+            else (
+                "The pinned paper baseline predates split likelihood/sampler JIT "
+                "phase instrumentation; no post-JIT timing is inferred."
+            )
         )
     quotient_fold_enabled = config.get("fold_symmetry") is not None
     fold_telemetry: dict[str, Any] | None = None

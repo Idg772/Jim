@@ -354,6 +354,32 @@ def test_one_shot_and_shared_runtime_use_the_same_event_science_path(
     assert one_shot_summary["execution"]["mode"] == "one-shot"
 
 
+def test_simulated_cpu_records_unavailable_paper_timing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lightweight_science_path: None,
+) -> None:
+    campaign = _prepared_campaign(tmp_path, n_injections=1)
+    runtime = _fake_runtime(campaign, [])
+    original = _FakeJim.get_diagnostics
+
+    def diagnostics_without_jit_phase(self: _FakeJim) -> dict[str, Any]:
+        diagnostics = original(self)
+        diagnostics["sample_phase_seconds"]["likelihood_jit"] = None
+        return diagnostics
+
+    monkeypatch.setattr(_FakeJim, "get_diagnostics", diagnostics_without_jit_phase)
+
+    summary = run_injection_module.run_injection(
+        _fake_injection_args(campaign, 0),
+        runtime=runtime,
+    )
+
+    timing = summary["timing_seconds"]
+    assert timing["paper_convention"] is None
+    assert "simulated CPU" in timing["paper_convention_unavailable_reason"]
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
