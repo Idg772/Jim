@@ -1,0 +1,53 @@
+{
+  "corrected_u1_log_likelihood": 531.631806824434,
+  "description": "Highest full-U16 point in a deterministic 129-coordinate cross-seed bank; used as the fixed 5000-bin relative-binning reference for the controlled D=4 likelihood A/B.",
+  "likelihood_parameters": {
+    "M_c": 1.1974081919666446,
+    "d_L": 23.941447232950846,
+    "dec": -0.35550617137152973,
+    "eta": 0.24744142858342658,
+    "iota": 2.0924573462964773,
+    "lambda_1": 121.31578035942813,
+    "lambda_2": 313.5421862015888,
+    "phase_c": 0.0,
+    "psi": 1.652227686220417,
+    "ra": 3.4128019199658297,
+    "s1_x": 0.01866201117743166,
+    "s1_y": -0.013626347151809704,
+    "s1_z": -0.004500952603973517,
+    "s2_x": -0.006486527337146942,
+    "s2_y": -0.016157863741702326,
+    "s2_z": 0.0003013729409246997,
+    "t_c": 0.0
+  },
+  "sampling_parameters": {
+    "M_c": 1.1974081919666446,
+    "d_L": 23.941447232950846,
+    "dec": -0.35550617137152973,
+    "iota": 2.0924573462964773,
+    "lambda_1": 121.31578035942813,
+    "lambda_2": 313.5421862015888,
+    "psi": 1.652227686220417,
+    "q": 0.816258818944718,
+    "ra": 3.4128019199658297,
+    "s1_mag": 0.023541592389458972,
+    "s1_phi": 5.652499927679759,
+    "s1_theta": 1.7631722336289708,
+    "s2_mag": 0.017413857218907442,
+    "s2_phi": 4.330635736991888,
+    "s2_theta": 1.5534889615483976
+  },
+  "selection_bank_size": 129,
+  "selection_method": "Top 32 stored-U1 coordinates from the corrected D1 seed-2 and old D4 seeds 0/1/2, reranked with an independent full-frequency U16 oracle.",
+  "selection_u16_log_likelihood": 531.570006525329,
+  "schema_version": 1,
+  "source_index": 15038,
+  "source_log_likelihood": 532.6212114906505,
+  "source_path": "campaign-results/gw170817-real-event-20260815/seed-0/nested/candidate-paper-15d-g4-seed0.npz",
+  "source_sha256": "9ec0751dec587bd190abdf88e1e274b547d6d9c776d3e55ef3c8b0a1a6ee54b4",
+  "waveform_contract": {
+    "f_ref_hz": 20.0,
+    "model": "IMRPhenomPv2_NRTidalv2",
+    "time_anchor": "imrphenomd"
+  }
+}
