@@ -11,6 +11,7 @@ from benchmarks.injection_campaign import common
 from benchmarks.injection_campaign.run_injection import (
     _build_sampler_config,
     _detector_plane_azimuth,
+    _fold_projection_accounting,
 )
 
 
@@ -94,3 +95,45 @@ def test_fold_config_requires_current_api_and_detector_geometry() -> None:
         _build_sampler_config(config, _PinnedConfig, ifos=_sites())
     with pytest.raises(ValueError, match="detector"):
         _build_sampler_config(config, _CurrentConfig)
+
+
+def test_fold_projection_accounting_separates_sampler_and_unfold_work() -> None:
+    accounting = _fold_projection_accounting(
+        {"group_order": 8, "folded_points": 11},
+        {"n_likelihood_evaluations_physical": 17},
+    )
+
+    assert accounting == {
+        "images_per_folded_target_callback": 8,
+        "sampler_folded_target_callbacks": 17,
+        "sampler_true_image_projections": 136,
+        "retained_folded_points_unfolded": 11,
+        "unfold_true_image_projections": 88,
+        "total_true_image_projections": 224,
+        "sampler_callback_counter": ("diagnostics.n_likelihood_evaluations_physical"),
+    }
+
+
+@pytest.mark.parametrize(
+    ("telemetry", "diagnostics"),
+    [
+        (
+            {"group_order": 7, "folded_points": 11},
+            {"n_likelihood_evaluations_physical": 17},
+        ),
+        (
+            {"group_order": 8, "folded_points": -1},
+            {"n_likelihood_evaluations_physical": 17},
+        ),
+        (
+            {"group_order": 8, "folded_points": 11},
+            {"n_likelihood_evaluations_physical": None},
+        ),
+    ],
+)
+def test_fold_projection_accounting_rejects_invalid_counters(
+    telemetry: dict[str, object],
+    diagnostics: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="projection accounting"):
+        _fold_projection_accounting(telemetry, diagnostics)

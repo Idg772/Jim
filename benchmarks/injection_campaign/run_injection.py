@@ -919,6 +919,37 @@ def _build_sampler_config(
     return config_type(**kwargs)
 
 
+def _fold_projection_accounting(
+    telemetry: Mapping[str, Any],
+    diagnostics: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Separate folded-target callbacks from their true-image projections."""
+
+    group_order = _safe_int(telemetry.get("group_order"))
+    folded_points = _safe_int(telemetry.get("folded_points"))
+    sampler_callbacks = _safe_int(diagnostics.get("n_likelihood_evaluations_physical"))
+    if (
+        group_order != 8
+        or folded_points is None
+        or folded_points < 0
+        or sampler_callbacks is None
+        or sampler_callbacks < 0
+    ):
+        raise ValueError("quotient-fold projection accounting is unavailable")
+
+    sampler_projections = group_order * sampler_callbacks
+    unfold_projections = group_order * folded_points
+    return {
+        "images_per_folded_target_callback": group_order,
+        "sampler_folded_target_callbacks": sampler_callbacks,
+        "sampler_true_image_projections": sampler_projections,
+        "retained_folded_points_unfolded": folded_points,
+        "unfold_true_image_projections": unfold_projections,
+        "total_true_image_projections": sampler_projections + unfold_projections,
+        "sampler_callback_counter": ("diagnostics.n_likelihood_evaluations_physical"),
+    }
+
+
 def _weighted_samples(jim: Any, jax: Any, jnp: Any) -> dict[str, np.ndarray]:
     """Return direct NS weights, including on the pinned pre-API baseline."""
 
@@ -1293,6 +1324,9 @@ def run_injection(
             "n_likelihood_evaluations": _safe_int(
                 diagnostics.get("n_likelihood_evaluations")
             ),
+            "n_likelihood_evaluations_physical": _safe_int(
+                diagnostics.get("n_likelihood_evaluations_physical")
+            ),
             "log_Z": _safe_float(diagnostics.get("log_Z")),
             "log_Z_error": _safe_float(diagnostics.get("log_Z_error")),
             "insertion_index": insertion_diagnostic,
@@ -1349,6 +1383,10 @@ def run_injection(
             "completed_config": fold_config.model_dump(),
             "model_limitation": _FOLD_MODEL_LIMITATION,
             **fold_telemetry,
+            "projection_accounting": _fold_projection_accounting(
+                fold_telemetry,
+                diagnostics,
+            ),
         }
         summary["timing_seconds"]["fold_unfold_postprocessing"] = (
             fold_postprocessing_seconds
