@@ -1039,9 +1039,14 @@ def test_prepare_campaign_accepts_opt_in_sampler_config_fields(
             "adaptive_slice_widths": True,
             "blocking_scheme": "fast-ridge",
             "bracket_mode": "shrink-only",
+            "bridge_blocks": [["zenith", "azimuth"]],
             "direction_mode": "covariance",
+            "fold_symmetry": {},
+            "fold_unfold_batch_size": 8,
             "num_de_jumps": 0,
             "num_gibbs_sweeps": 3,
+            "num_slice_steps_by_block": [4, 3, 3, 1, 4],
+            "periodic_wrapped_covariance": True,
             "width_adaptation_rate": 0.25,
             "width_target_expansions": 1.0,
             "width_target_shrinks": 3.0,
@@ -1053,8 +1058,13 @@ def test_prepare_campaign_accepts_opt_in_sampler_config_fields(
     assert config["num_gibbs_sweeps"] == 3
     assert config["adaptive_slice_widths"] is True
     assert config["bracket_mode"] == "shrink-only"
+    assert config["bridge_blocks"] == [["zenith", "azimuth"]]
     assert config["direction_mode"] == "covariance"
+    assert config["fold_symmetry"] == {}
+    assert config["fold_unfold_batch_size"] == 8
     assert config["num_de_jumps"] == 0
+    assert config["num_slice_steps_by_block"] == [4, 3, 3, 1, 4]
+    assert config["periodic_wrapped_covariance"] is True
 
 
 def test_candidate_implementation_pin_is_checked_before_sampling(

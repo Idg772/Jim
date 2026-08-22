@@ -58,8 +58,13 @@ _OPTIONAL_SAMPLER_CONFIG_FIELDS = frozenset(
         "adaptive_slice_widths",
         "blocking_scheme",
         "bracket_mode",
+        "bridge_blocks",
         "direction_mode",
+        "fold_symmetry",
+        "fold_unfold_batch_size",
         "num_de_jumps",
+        "num_slice_steps_by_block",
+        "periodic_wrapped_covariance",
         "width_adaptation_rate",
         "width_target_expansions",
         "width_target_shrinks",
@@ -255,9 +260,7 @@ def prepare_campaign(
     config = copy.deepcopy(DEFAULT_CONFIG)
     if config_overrides is not None:
         unknown = sorted(
-            set(config_overrides)
-            - set(config)
-            - _OPTIONAL_SAMPLER_CONFIG_FIELDS
+            set(config_overrides) - set(config) - _OPTIONAL_SAMPLER_CONFIG_FIELDS
         )
         if unknown:
             raise ValueError(
