@@ -1231,8 +1231,18 @@ def _resolve_folded_paths(
         if not isinstance(recorded, str) or not recorded:
             raise ValueError("netsky report has no folded diagnostic artifact path")
         candidate = Path(recorded).expanduser()
-        if not candidate.is_absolute():
-            candidate = report_path.expanduser().resolve().parent / candidate
+        report_directory = report_path.expanduser().resolve().parent
+        if candidate.is_absolute() and not candidate.is_file():
+            relocated_candidates = (
+                report_directory / candidate.name,
+                report_directory / candidate.parent.name / candidate.name,
+            )
+            candidate = next(
+                (path for path in relocated_candidates if path.is_file()),
+                candidate,
+            )
+        elif not candidate.is_absolute():
+            candidate = report_directory / candidate
         resolved.append(candidate.resolve())
     return resolved
 

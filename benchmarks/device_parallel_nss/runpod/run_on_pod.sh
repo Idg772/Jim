@@ -12,11 +12,13 @@ original_sharded_only=false
 no_hlo=false
 seed=0
 blocking_scheme="paper"
+num_gibbs_sweeps=""
+direction_mode=""
 paper_baseline="86335bdb1e7ef6191937dd17b2ca53edbb1d899f"
 
 usage() {
   cat <<'EOF'
-Usage: run_on_pod.sh [--output-dir PATH] [--workload aligned-11d|paper-15d] [--blocking-scheme paper|all-slow] [--seed N] [--candidate-only [--no-hlo]|--original-sharded-only]
+Usage: run_on_pod.sh [--output-dir PATH] [--workload aligned-11d|paper-15d] [--blocking-scheme paper|all-slow|netsky] [--num-gibbs-sweeps M] [--direction-mode MODE] [--seed N] [--candidate-only [--no-hlo]|--original-sharded-only]
 
 The legacy positional output directory remains supported. The workload defaults
 to aligned-11d so existing invocations retain their historical behaviour.
@@ -27,8 +29,9 @@ profiling, telemetry, diagnostics, and posterior artifacts.
 --original-sharded-only runs the same analysis against the pinned paper-style
 sharded-live-state revision, without running the candidate.
 --seed selects the non-negative candidate or original-sharded sampler seed.
---blocking-scheme selects the paper partition or requested four-block all-slow
-partition. all-slow requires paper-15d and --candidate-only.
+--blocking-scheme selects the paper partition, requested four-block all-slow
+partition, or NETSKY quotient fold. Non-paper schemes require paper-15d and
+--candidate-only. NETSKY fixes M=2 and covariance directions.
 EOF
 }
 
@@ -56,10 +59,26 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --blocking-scheme)
       if [[ "$#" -lt 2 ]]; then
-        echo "--blocking-scheme requires paper or all-slow" >&2
+        echo "--blocking-scheme requires paper, all-slow, or netsky" >&2
         exit 2
       fi
       blocking_scheme="$2"
+      shift 2
+      ;;
+    --num-gibbs-sweeps)
+      if [[ "$#" -lt 2 ]]; then
+        echo "--num-gibbs-sweeps requires a positive integer" >&2
+        exit 2
+      fi
+      num_gibbs_sweeps="$2"
+      shift 2
+      ;;
+    --direction-mode)
+      if [[ "$#" -lt 2 ]]; then
+        echo "--direction-mode requires covariance" >&2
+        exit 2
+      fi
+      direction_mode="$2"
       shift 2
       ;;
     --seed)
@@ -109,13 +128,34 @@ case "$workload" in
 esac
 
 case "$blocking_scheme" in
-  paper|all-slow) ;;
+  paper|all-slow|netsky) ;;
   *)
     echo "Unknown blocking scheme: $blocking_scheme" >&2
     usage >&2
     exit 2
     ;;
 esac
+
+if [[ -n "$num_gibbs_sweeps" ]] && ! [[ "$num_gibbs_sweeps" =~ ^[1-9][0-9]*$ ]]; then
+  echo "--num-gibbs-sweeps requires a positive integer" >&2
+  exit 2
+fi
+
+if [[ "$blocking_scheme" == "netsky" ]]; then
+  num_gibbs_sweeps="${num_gibbs_sweeps:-2}"
+  direction_mode="${direction_mode:-covariance}"
+  if [[ "$num_gibbs_sweeps" != "2" ]]; then
+    echo "NETSKY fixes --num-gibbs-sweeps at 2" >&2
+    exit 2
+  fi
+  if [[ "$direction_mode" != "covariance" ]]; then
+    echo "NETSKY requires --direction-mode covariance" >&2
+    exit 2
+  fi
+elif [[ -n "$num_gibbs_sweeps" || -n "$direction_mode" ]]; then
+  echo "--num-gibbs-sweeps and --direction-mode require --blocking-scheme netsky" >&2
+  exit 2
+fi
 
 if ! [[ "$seed" =~ ^[0-9]+$ ]]; then
   echo "--seed requires a non-negative integer" >&2
@@ -127,13 +167,13 @@ if [[ "$candidate_only" == true && "$original_sharded_only" == true ]]; then
   exit 2
 fi
 
-if [[ "$blocking_scheme" == "all-slow" && "$workload" != "paper-15d" ]]; then
-  echo "all-slow blocking requires --workload paper-15d" >&2
+if [[ "$blocking_scheme" != "paper" && "$workload" != "paper-15d" ]]; then
+  echo "non-paper blocking requires --workload paper-15d" >&2
   exit 2
 fi
 
-if [[ "$blocking_scheme" == "all-slow" && "$candidate_only" == false ]]; then
-  echo "all-slow blocking requires --candidate-only" >&2
+if [[ "$blocking_scheme" != "paper" && "$candidate_only" == false ]]; then
+  echo "non-paper blocking requires --candidate-only" >&2
   exit 2
 fi
 
@@ -286,10 +326,17 @@ if [[ "$candidate_only" == true || "$original_sharded_only" == true ]]; then
   slice_arguments=()
   nested_arguments=()
   blocking_arguments=()
+  sampler_arguments=()
   if [[ "$candidate_only" == true ]]; then
     slice_arguments=(--slice-data-output "$slice_file")
     nested_arguments=(--nested-output "$nested_file")
     blocking_arguments=(--blocking-scheme "$blocking_scheme")
+    if [[ "$blocking_scheme" == "netsky" ]]; then
+      sampler_arguments=(
+        --num-gibbs-sweeps "$num_gibbs_sweeps"
+        --direction-mode "$direction_mode"
+      )
+    fi
   fi
   profile_dir="$output_dir/profiles/${run_stem}"
   telemetry_file="$output_dir/telemetry/${run_stem}.dmon"
@@ -348,6 +395,7 @@ PY
     --data-file "$data_file" \
     --workload "$workload" \
     "${blocking_arguments[@]}" \
+    "${sampler_arguments[@]}" \
     --seed "$seed" \
     --n-devices 4 \
     --implementation-root "$implementation_root" \
@@ -432,6 +480,14 @@ if blocking_scheme == "all-slow":
     ]
     if report["config"]["blocks"] != expected_blocks:
         raise SystemExit("all-slow runner report recorded the wrong blocks")
+if blocking_scheme == "netsky":
+    from benchmarks.device_parallel_nss.runpod.upload_and_run import (
+        validate_netsky_result_artifacts,
+    )
+
+    netsky_verification = validate_netsky_result_artifacts(report)
+else:
+    netsky_verification = {}
 if report["implementation"]["label"] != implementation_label:
     raise SystemExit("runner report recorded the wrong implementation label")
 if report["implementation"]["revision"] != implementation_revision:
@@ -448,6 +504,7 @@ verification = {
     "implementation_label": implementation_label,
     "implementation_revision": implementation_revision,
 }
+verification.update(netsky_verification)
 if no_hlo:
     verification["hlo_capture"] = False
 else:
