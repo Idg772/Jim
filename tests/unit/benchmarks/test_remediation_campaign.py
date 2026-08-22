@@ -137,10 +137,22 @@ def _source_campaign(
     tmp_path: Path,
     *,
     config_overrides: dict[str, Any] | None = None,
+    campaign_name: str = "source",
+    rows: list[dict[str, Any]] | None = None,
+    source_ids: list[int] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
-    campaign = tmp_path / "source"
-    campaign.mkdir()
-    rows = common.generate_catalogue(2, 4815)
+    campaign = tmp_path / campaign_name
+    campaign.mkdir(parents=True)
+    rows = (
+        copy.deepcopy(rows) if rows is not None else common.generate_catalogue(2, 4815)
+    )
+    if source_ids is not None:
+        if len(source_ids) != len(rows):
+            raise ValueError("source_ids must match the supplied catalogue rows")
+        rows = [
+            {**row, "injection_id": injection_id}
+            for injection_id, row in enumerate(rows)
+        ]
     catalogue_path = campaign / "catalogue.csv"
     common.atomic_write_csv(catalogue_path, rows, common.CATALOGUE_FIELDS)
     psd_path = campaign / "inputs/psd/design.npz"
@@ -155,11 +167,31 @@ def _source_campaign(
         "master_seed": 4815,
         "n_injections": len(rows),
         "catalogue_size": len(rows),
-        "selection": {
-            "rule": "first catalogue entries",
-            "start_inclusive": 0,
-            "stop_exclusive": len(rows),
-        },
+        "selection": (
+            {
+                "rule": "original source IDs reindexed locally",
+                "start_inclusive": 0,
+                "stop_exclusive": len(rows),
+                "source_injection_ids": source_ids,
+                "mapping": [
+                    {
+                        "diagnostic_id": injection_id,
+                        "source_injection_id": source_id,
+                        "noise_seed": row["noise_seed"],
+                        "sampler_seed": row["sampler_seed"],
+                    }
+                    for injection_id, (source_id, row) in enumerate(
+                        zip(source_ids, rows, strict=True)
+                    )
+                ],
+            }
+            if source_ids is not None
+            else {
+                "rule": "first catalogue entries",
+                "start_inclusive": 0,
+                "stop_exclusive": len(rows),
+            }
+        ),
         "config": config,
         "catalogue": {
             "path": "catalogue.csv",
@@ -167,12 +199,15 @@ def _source_campaign(
             "bytes": catalogue_path.stat().st_size,
         },
         "psd": {
+            "detector_files": {
+                detector: "inputs/psd/design.npz" for detector in config["detectors"]
+            },
             "files": {
                 "inputs/psd/design.npz": {
                     "sha256": common.file_sha256(psd_path),
                     "bytes": psd_path.stat().st_size,
                 }
-            }
+            },
         },
         "reproduction_scope": {
             "iid_prior_predictive_catalogue": True,
@@ -194,6 +229,263 @@ def _source_campaign(
         _write_valid_result(campaign, manifest, row)
     common.refresh_status(campaign, len(rows))
     return campaign, manifest
+
+
+def _composed_source_campaign(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+    source_rows = common.generate_catalogue(4, 4815)
+    batch_specs = (("source0-1", [0, 1]), ("source2-3", [2, 3]))
+    entries: list[dict[str, Any]] = []
+    batch_manifests: list[tuple[str, Path, dict[str, Any], list[int]]] = []
+    for label, source_ids in batch_specs:
+        batch, manifest = _source_campaign(
+            tmp_path,
+            campaign_name=f"batches/{label}/results",
+            rows=[source_rows[source_id] for source_id in source_ids],
+            source_ids=source_ids,
+            config_overrides={
+                **_fast_ridge_config_overrides(),
+                "campaign": f"fast-ridge-{label}",
+                "timing": {
+                    **copy.deepcopy(common.DEFAULT_CONFIG["timing"]),
+                    "selected_events": f"source catalogue IDs {source_ids}",
+                },
+            },
+        )
+        batch_manifests.append((label, batch, manifest, source_ids))
+        for local_id, source_id in enumerate(source_ids):
+            directory = common.result_dir(batch, local_id)
+            summary = directory / "summary.json"
+            posterior = directory / "posterior.npz"
+            entries.append(
+                {
+                    "batch": label,
+                    "config_sha256": manifest["config_sha256"],
+                    "local_injection_id": local_id,
+                    "noise_seed": source_rows[source_id]["noise_seed"],
+                    "posterior": str(posterior.relative_to(tmp_path)),
+                    "posterior_sha256": common.file_sha256(posterior),
+                    "sampler_seed": source_rows[source_id]["sampler_seed"],
+                    "source_injection_id": source_id,
+                    "summary": str(summary.relative_to(tmp_path)),
+                    "summary_sha256": common.file_sha256(summary),
+                }
+            )
+
+    combined = tmp_path / "combined-100"
+    combined.mkdir()
+    catalogue_path = combined / "catalogue.csv"
+    common.atomic_write_csv(catalogue_path, source_rows, common.CATALOGUE_FIELDS)
+    reference_manifest = batch_manifests[0][2]
+    config = copy.deepcopy(reference_manifest["config"])
+    config["campaign"] = "fast-ridge-source0-3-combined"
+    config["timing"]["selected_events"] = "source catalogue IDs 0-3"
+    manifest: dict[str, Any] = {
+        key: copy.deepcopy(reference_manifest[key])
+        for key in (
+            "schema_version",
+            "created_at_utc",
+            "master_seed",
+            "reproduction_scope",
+            "storage_policy",
+            "psd",
+        )
+    }
+    manifest.update(
+        {
+            "n_injections": len(source_rows),
+            "catalogue_size": len(source_rows),
+            "selection": {
+                "rule": "validated disjoint batches pooled by original source ID",
+                "start_inclusive": 0,
+                "stop_exclusive": len(source_rows),
+                "source_injection_ids": list(range(len(source_rows))),
+                "batches": [
+                    {"label": label, "source_injection_ids": source_ids}
+                    for label, _batch, _manifest, source_ids in batch_manifests
+                ],
+            },
+            "config": config,
+            "catalogue": {
+                "path": "catalogue.csv",
+                "sha256": common.file_sha256(catalogue_path),
+                "bytes": catalogue_path.stat().st_size,
+                "provenance": {
+                    "pooling": "exact original source IDs",
+                    "source_ids": list(range(len(source_rows))),
+                },
+            },
+            "sampling_parameterization": copy.deepcopy(
+                reference_manifest["sampling_parameterization"]
+            ),
+            "implementation_diagnostic": copy.deepcopy(
+                reference_manifest.get("implementation_diagnostic")
+            ),
+        }
+    )
+    manifest["config_sha256"] = common.canonical_sha256(manifest)
+    common.atomic_write_json(combined / "manifest.json", manifest)
+    index = {
+        "schema_version": 1,
+        "complete_first_attempt": len(source_rows),
+        "configuration_semantics_identical": True,
+        "entries": entries,
+        "source_id_count": len(source_rows),
+        "source_ids": list(range(len(source_rows))),
+        "unique_noise_seeds": len(source_rows),
+        "unique_sampler_seeds": len(source_rows),
+        "unique_seed_pairs": len(source_rows),
+        "unique_source_ids": len(source_rows),
+        "weighted_ranks_recomputed": len(source_rows) * len(common.PARAMETERS),
+    }
+    common.atomic_write_json(combined / "index.json", index)
+    return combined, manifest
+
+
+def test_preparer_builds_one_netsky_arm_from_composed_batch_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(remediation, "PAPER_PP_RECOVERIES", 4)
+    source, source_manifest = _composed_source_campaign(tmp_path)
+    output = tmp_path / "netsky"
+
+    manifest = remediation.prepare_remediation_campaign(
+        source,
+        output,
+        scheme="netsky",
+        implementation_revision=REVISION,
+        implementation_tree_sha256=TREE_SHA256,
+    )
+
+    assert manifest["n_injections"] == 4
+    assert manifest["catalogue_size"] == 4
+    assert manifest["selection"]["source_injection_ids"] == [0, 1, 2, 3]
+    assert common.read_catalogue(output / "catalogue.csv") == common.read_catalogue(
+        source / "catalogue.csv"
+    )
+    assert (output / "inputs/psd/design.npz").read_bytes() == b"fixed test PSD\n"
+    provenance = manifest["blocking_remediation"]["composed_source"]
+    assert provenance["index"] == {
+        "path": "source-index.json",
+        "sha256": common.file_sha256(source / "index.json"),
+        "entries": 4,
+    }
+    assert [batch["label"] for batch in provenance["batches"]] == [
+        "source0-1",
+        "source2-3",
+    ]
+    assert (output / "source-index.json").read_bytes() == (
+        source / "index.json"
+    ).read_bytes()
+    assert (
+        manifest["implementation_diagnostic"]["source_campaign_config_sha256"]
+        == source_manifest["config_sha256"]
+    )
+    assert [row["status"] for row in common.status_rows(output, 4)] == [
+        "pending",
+        "pending",
+        "pending",
+        "pending",
+    ]
+
+
+def test_composed_preparer_rejects_an_indexed_artifact_hash_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(remediation, "PAPER_PP_RECOVERIES", 4)
+    source, _ = _composed_source_campaign(tmp_path)
+    index_path = source / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["entries"][2]["summary_sha256"] = "0" * 64
+    common.atomic_write_json(index_path, index)
+
+    with pytest.raises(ValueError, match="entry 2 summary hash mismatch"):
+        remediation.prepare_remediation_campaign(
+            source,
+            tmp_path / "netsky",
+            scheme="netsky",
+            implementation_revision=REVISION,
+            implementation_tree_sha256=TREE_SHA256,
+        )
+
+
+def test_composed_preparer_runs_strict_validation_on_each_batch_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(remediation, "PAPER_PP_RECOVERIES", 4)
+    source, _ = _composed_source_campaign(tmp_path)
+    index_path = source / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    entry = index["entries"][1]
+    summary_path = tmp_path / entry["summary"]
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["injection_id"] = 0
+    common.atomic_write_json(summary_path, summary)
+    entry["summary_sha256"] = common.file_sha256(summary_path)
+    common.atomic_write_json(index_path, index)
+
+    with pytest.raises(ValueError, match="summary has the wrong injection ID"):
+        remediation.prepare_remediation_campaign(
+            source,
+            tmp_path / "netsky",
+            scheme="netsky",
+            implementation_revision=REVISION,
+            implementation_tree_sha256=TREE_SHA256,
+        )
+
+
+def test_composed_preparer_rejects_batch_science_configuration_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(remediation, "PAPER_PP_RECOVERIES", 4)
+    source, _ = _composed_source_campaign(tmp_path)
+    batch = tmp_path / "batches/source2-3/results"
+    manifest_path = batch / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["config"]["n_live"] += 1
+    manifest.pop("config_sha256")
+    manifest["config_sha256"] = common.canonical_sha256(manifest)
+    common.atomic_write_json(manifest_path, manifest)
+
+    with pytest.raises(ValueError, match="science configuration mismatch"):
+        remediation.prepare_remediation_campaign(
+            source,
+            tmp_path / "netsky",
+            scheme="netsky",
+            implementation_revision=REVISION,
+            implementation_tree_sha256=TREE_SHA256,
+        )
+
+
+def test_composed_preparer_rejects_a_non_common_verified_psd_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(remediation, "PAPER_PP_RECOVERIES", 4)
+    source, _ = _composed_source_campaign(tmp_path)
+    batch = tmp_path / "batches/source2-3/results"
+    psd_path = batch / "inputs/psd/design.npz"
+    psd_path.write_bytes(b"different PSD\n")
+    manifest_path = batch / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    metadata = manifest["psd"]["files"]["inputs/psd/design.npz"]
+    metadata["sha256"] = common.file_sha256(psd_path)
+    metadata["bytes"] = psd_path.stat().st_size
+    manifest.pop("config_sha256")
+    manifest["config_sha256"] = common.canonical_sha256(manifest)
+    common.atomic_write_json(manifest_path, manifest)
+
+    with pytest.raises(ValueError, match="PSD inventory mismatch"):
+        remediation.prepare_remediation_campaign(
+            source,
+            tmp_path / "netsky",
+            scheme="netsky",
+            implementation_revision=REVISION,
+            implementation_tree_sha256=TREE_SHA256,
+        )
 
 
 def test_preparer_builds_netsky_arm_from_fast_ridge_m2_source(
