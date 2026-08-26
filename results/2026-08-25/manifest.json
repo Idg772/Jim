@@ -1,0 +1,628 @@
+{
+  "catalogue": {
+    "bytes": 35045,
+    "path": "catalogue.csv",
+    "provenance": {
+      "pooling": "exact original source IDs; no redraws, substitutions, or repeats",
+      "source_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97,
+        98,
+        99
+      ],
+      "t_c_quantile_map": "target_t_c = 0.3 * source_t_c"
+    },
+    "sha256": "015f3f153c9fbdcc81e8fec0f4d3540a9829c3b379d5eb7faebbf09e6819a956"
+  },
+  "catalogue_size": 100,
+  "config": {
+    "adaptive_slice_widths": true,
+    "blocking_scheme": "fast-ridge",
+    "blocks": [
+      [
+        "M_c",
+        "q",
+        "lambda_1",
+        "lambda_2"
+      ],
+      [
+        "s1_mag",
+        "s1_theta",
+        "s1_phi"
+      ],
+      [
+        "s2_mag",
+        "s2_theta",
+        "s2_phi"
+      ],
+      [
+        "zenith",
+        "azimuth"
+      ],
+      [
+        "psi"
+      ],
+      [
+        "cos_iota",
+        "d_hat"
+      ]
+    ],
+    "bracket_mode": "shrink-only",
+    "campaign": "pp-fast-ridge-cosiota-dhat-m2-time-marg-source0-99-combined",
+    "carrier_time_anchor": "imrphenomd",
+    "credible_levels": {
+      "comparison": "strictly less than truth",
+      "resampling": false,
+      "weighting": "original nested-sampling weights"
+    },
+    "detectors": [
+      "H1",
+      "L1",
+      "V1"
+    ],
+    "direction_mode": "covariance",
+    "distance_marginalization": false,
+    "duration_seconds": 128.0,
+    "f_max_hz": 2048.0,
+    "f_min_hz": 20.0,
+    "likelihood_f_max_hz": 2047.9921875,
+    "n_delete": 64,
+    "n_delete_frac": 0.125,
+    "n_devices": 4,
+    "n_live": 512,
+    "num_de_jumps": 0,
+    "num_gibbs_sweeps": 2,
+    "num_inner_steps_per_dim": 1,
+    "paper_configuration": "Sharded real-PE fast-ridge M2 with joint (cos_iota, d_hat) block",
+    "paper_reference": "arXiv:2607.28265v1",
+    "phase_marginalization": true,
+    "prior": {
+      "M_c": {
+        "distribution": "uniform",
+        "range": [
+          1.5,
+          2.5
+        ]
+      },
+      "d_L": {
+        "alpha": 2.0,
+        "distribution": "power-law",
+        "range_mpc": [
+          30.0,
+          150.0
+        ]
+      },
+      "iota": "isotropic",
+      "lambda_1": {
+        "distribution": "uniform",
+        "range": [
+          0.0,
+          5000.0
+        ]
+      },
+      "lambda_2": {
+        "distribution": "uniform",
+        "range": [
+          0.0,
+          5000.0
+        ]
+      },
+      "phase_c": {
+        "distribution": "uniform",
+        "range_radians": [
+          0.0,
+          "2pi"
+        ]
+      },
+      "psi": {
+        "distribution": "uniform",
+        "range_radians": [
+          0.0,
+          "pi"
+        ]
+      },
+      "q": {
+        "distribution": "uniform",
+        "range": [
+          0.5,
+          1.0
+        ]
+      },
+      "sky": "isotropic",
+      "spin_directions": "isotropic",
+      "spin_magnitudes": {
+        "distribution": "uniform",
+        "range": [
+          0.0,
+          0.05
+        ]
+      },
+      "t_c": {
+        "distribution": "uniform",
+        "range_seconds": [
+          -0.03,
+          0.03
+        ]
+      }
+    },
+    "psd": {
+      "H1": {
+        "source": "aLIGO_O4_high_asd.txt",
+        "source_quantity": "ASD"
+      },
+      "L1": {
+        "source": "aLIGO_O4_high_asd.txt",
+        "source_quantity": "ASD"
+      },
+      "V1": {
+        "source": "AdV_psd.txt",
+        "source_quantity": "PSD"
+      },
+      "family": "paper-design-sensitivity",
+      "interpolation": "linear in PSD, matching Bilby"
+    },
+    "sampler_scheduler": "fsm",
+    "sampling_frequency_hz": 4096.0,
+    "segment_center_offset_seconds": -2.0,
+    "segment_start_offset_seconds": -66.0,
+    "termination_dlogz": 0.04858735157374206,
+    "termination_log_z_live_minus_dead": -3.0,
+    "time_marginalization": {
+      "tc_range_seconds": [
+        -0.03,
+        0.03
+      ],
+      "upsample_factor": 8
+    },
+    "timing": {
+      "excluded_one_off_phases": [
+        "likelihood_jit",
+        "sampler_kernel_jit"
+      ],
+      "measurement": "wall time around jim.sample",
+      "paper_reference": "arXiv:2607.28265v1 Figure 3 and Table III",
+      "post_jit_formula": "sample_call - likelihood_jit - sampler_kernel_jit",
+      "selected_events": "source catalogue IDs 0-99 pooled from 3 disjoint validated batches"
+    },
+    "trigger_time_gps": 1187008882.0,
+    "waveform": "IMRPhenomPv2_NRTidalv2",
+    "waveform_f_ref_hz": 20.0,
+    "width_adaptation_rate": 0.25,
+    "width_target_expansions": 1.0,
+    "width_target_shrinks": 3.0,
+    "workload": "paper-bns-injection-15d"
+  },
+  "config_sha256": "a8ca03bf999a21d56d6717806758d49030834d857d8b273e0ffa821bb42dafb6",
+  "created_at_utc": "2026-08-25T21:04:13.527245+00:00",
+  "implementation_diagnostic": {
+    "configuration_semantics": "Four-device covariance SwiG with M=2, adaptive slice widths, shrink-only brackets, zero DE jumps, phase and geocentric time marginalized with the reviewed local U=8 ZoomFFT, luminosity distance sampled through d_hat, and the joint real-event (cos_iota, d_hat) fast-ridge block.",
+    "implementation_label": "candidate",
+    "implementation_revision": "7ab36c349f60458910aa6e81ad4cd511bc24599a",
+    "implementation_tree_sha256": "6c4034e44e51d897c79fc62b21a606b4bd8ada527e05d9c51d3ac1f4b1bffd12",
+    "sampler_scheduler": "fsm"
+  },
+  "master_seed": 2400965520,
+  "n_injections": 100,
+  "nuisance_treatment": {
+    "marginalized_parameters": [
+      "phase_c",
+      "t_c"
+    ],
+    "real_signal_pe_match": {
+      "fft_sample_rate_hz": 4096,
+      "likelihood_f_max_hz": 2047.9921875,
+      "tc_range_seconds": [
+        -0.03,
+        0.03
+      ],
+      "upsample_factor": 8
+    },
+    "sampled_parameters": [
+      "M_c",
+      "q",
+      "s1_mag",
+      "s1_theta",
+      "s1_phi",
+      "s2_mag",
+      "s2_theta",
+      "s2_phi",
+      "iota",
+      "lambda_1",
+      "lambda_2",
+      "ra",
+      "dec",
+      "psi",
+      "d_L"
+    ]
+  },
+  "psd": {
+    "detector_files": {
+      "H1": "inputs/psd/aLIGO-O4-high.npz",
+      "L1": "inputs/psd/aLIGO-O4-high.npz",
+      "V1": "inputs/psd/AdV-design.npz"
+    },
+    "files": {
+      "inputs/psd/AdV-design.npz": {
+        "bytes": 1897697,
+        "sha256": "810f513937f5b2890c6aa3baa9037fa2599392a1d3451e4d4a87f537722258a9",
+        "source_name": "AdV_psd.txt",
+        "source_quantity": "PSD",
+        "source_sha256": "c2532150f63dbaa76d451e2c074390272e259e4e2eedc3e684d2205582aa0764"
+      },
+      "inputs/psd/aLIGO-O4-high.npz": {
+        "bytes": 1884945,
+        "sha256": "e1827b940c0a41bd46e1d2c13d96cbc2edf25525a1f27d59c81820faf2f30cd2",
+        "source_name": "aLIGO_O4_high_asd.txt",
+        "source_quantity": "ASD",
+        "source_sha256": "eb5ec9b081c3d86d2f4257b9aff6a57566d168b8a95e5e57b7909eebad021780"
+      }
+    }
+  },
+  "reproduction_scope": {
+    "iid_prior_predictive_catalogue": true,
+    "methodology": "iid prior-predictive P-P calibration",
+    "pp_calibration_eligible": true,
+    "statement": "100 unique frozen IID source catalogue injections, IDs 0-99."
+  },
+  "sampling_parameterization": {
+    "distance_transform": "d_hat=d_L/(M_c^(5/6)*R_net(ra,dec,psi,iota))",
+    "joint_block": [
+      "cos_iota",
+      "d_hat"
+    ],
+    "match": "GW170817 real-event fast-ridge parameterization",
+    "physical_output_parameters": [
+      "iota",
+      "d_L"
+    ],
+    "sampling_space_parameters": [
+      "cos_iota",
+      "d_hat"
+    ]
+  },
+  "schema_version": 2,
+  "selection": {
+    "batches": [
+      {
+        "label": "source0-49",
+        "source_injection_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49
+        ]
+      },
+      {
+        "label": "source50-74",
+        "source_injection_ids": [
+          50,
+          51,
+          52,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          60,
+          61,
+          62,
+          63,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          73,
+          74
+        ]
+      },
+      {
+        "label": "source75-99",
+        "source_injection_ids": [
+          75,
+          76,
+          77,
+          78,
+          79,
+          80,
+          81,
+          82,
+          83,
+          84,
+          85,
+          86,
+          87,
+          88,
+          89,
+          90,
+          91,
+          92,
+          93,
+          94,
+          95,
+          96,
+          97,
+          98,
+          99
+        ]
+      }
+    ],
+    "rule": "3 validated disjoint batches pooled by original source ID",
+    "source_injection_ids": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      83,
+      84,
+      85,
+      86,
+      87,
+      88,
+      89,
+      90,
+      91,
+      92,
+      93,
+      94,
+      95,
+      96,
+      97,
+      98,
+      99
+    ],
+    "start_inclusive": 0,
+    "stop_exclusive": 100
+  },
+  "storage_policy": {
+    "discard": [
+      "successful run logs",
+      "JAX profiles",
+      "HLO dumps",
+      "per-slice traces",
+      "uncompressed strain arrays"
+    ],
+    "keep": [
+      "manifest.json",
+      "catalogue.csv",
+      "status.csv",
+      "inputs/psd/*.npz",
+      "results/*/summary.json",
+      "results/*/posterior.npz",
+      "failed attempt logs",
+      "pp/*.csv",
+      "pp/*.json",
+      "pp/*.png",
+      "timing/*.csv",
+      "timing/*.json",
+      "timing/*.png"
+    ]
+  }
+}
