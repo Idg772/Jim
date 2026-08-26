@@ -1,7 +1,7 @@
 import logging
 from abc import abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Optional, Union
 
 import jax
@@ -11,6 +11,8 @@ from evosax.algorithms import CMA_ES
 from jax.scipy.special import logsumexp
 from jaxtyping import Array, Complex, Float
 from ripplegw.interfaces import DistanceScaledWaveform, Waveform
+from scipy.fft import fft as scipy_fft
+from scipy.fft import next_fast_len
 from scipy.interpolate import interp1d
 
 from jimgw.core.base import LikelihoodBase
@@ -40,6 +42,18 @@ logger = logging.getLogger(__name__)
 _LIKELIHOOD_OPTIMIZATION_AXES = frozenset(
     {"shared_frequency_grid", "detector_phasor", "real_inner_product"}
 )
+
+
+@dataclass(frozen=True)
+class _ZoomFFTPlan:
+    """Static Bluestein factors for a local section of a zero-padded FFT."""
+
+    input_chirp: np.ndarray
+    kernel_fft: np.ndarray
+    output_chirp: np.ndarray
+    gather_indices: np.ndarray
+    fft_size: int
+    output_start: int
 
 
 def _build_time_marginalization_fine_window(
@@ -86,6 +100,67 @@ def _build_time_marginalization_fine_window(
     fine_tc = q_grid * fine_step
     fine_mask = (fine_tc > tc_range[0]) & (fine_tc < tc_range[1])
     return fine_candidates, fine_mask, fine_step
+
+
+def _build_time_marginalization_zoom_plan(
+    n_total: int,
+    upsample_factor: int,
+    fine_candidates: np.ndarray,
+) -> _ZoomFFTPlan:
+    """Plan a ZoomFFT for the fine bins represented by the candidate grid.
+
+    The phase-ramped implementation stores fine bin ``m`` at
+    ``(m % upsample_factor, m // upsample_factor)``.  The requested bins form a
+    local circular arc on the fine DFT grid.  Cutting that arc at its largest
+    gap makes it one uniformly spaced section, which a Bluestein convolution
+    can evaluate with two FFTs independent of the upsample factor.
+    """
+
+    if upsample_factor <= 1:
+        raise ValueError("ZoomFFT planning requires upsample_factor > 1")
+    if fine_candidates.size == 0:
+        raise ValueError("ZoomFFT planning requires at least one candidate bin")
+
+    n_fine = n_total * upsample_factor
+    storage_grid = (
+        fine_candidates[None, :] * upsample_factor + np.arange(upsample_factor)[:, None]
+    )
+    unique_storage = np.unique(storage_grid)
+    # Cut the circular grid at its largest unused gap, including windows that
+    # cross either the zero-time or signed-Nyquist storage seam.
+    circular_gaps = np.diff(
+        np.concatenate((unique_storage, unique_storage[:1] + n_fine))
+    )
+    cut_after = int(np.argmax(circular_gaps))
+    q_start = int(unique_storage[(cut_after + 1) % unique_storage.size])
+    relative_grid = np.remainder(storage_grid - q_start, n_fine)
+    output_size = int(relative_grid.max()) + 1
+
+    k = np.arange(max(n_total, output_size), dtype=np.int64)
+    phase_period = 2 * n_fine
+    # The quadratic Bluestein phases have this exact integer period.  Reducing
+    # before exponentiation avoids precision loss from unnecessarily large angles.
+    chirp = np.exp((-1j * np.pi / n_fine) * np.remainder(k**2, phase_period))
+    input_k = k[:n_total]
+    input_chirp = np.exp(
+        (-1j * np.pi / n_fine)
+        * np.remainder(input_k**2 + 2 * q_start * input_k, phase_period)
+    )
+    convolution_kernel = 1.0 / np.concatenate(
+        (chirp[n_total - 1 : 0 : -1], chirp[:output_size])
+    )
+    fft_size = next_fast_len(n_total + output_size - 1)
+    if fft_size is None:
+        raise RuntimeError("Could not find a supported ZoomFFT convolution size")
+
+    return _ZoomFFTPlan(
+        input_chirp=input_chirp,
+        kernel_fft=np.asarray(scipy_fft(convolution_kernel, n=fft_size)),
+        output_chirp=chirp[:output_size],
+        gather_indices=relative_grid.astype(np.int64),
+        fft_size=fft_size,
+        output_start=n_total - 1,
+    )
 
 
 class SingleEventLikelihood(LikelihoodBase):
@@ -743,7 +818,7 @@ class TransientLikelihoodFD(SingleEventLikelihood):
             raise ValueError("Cannot have t_c fixed while marginalizing over t_c")
         self.tc_range = config.tc_range
         fs = self.detectors[0].data.sampling_frequency
-        duration = self.detectors[0].data.duration
+        duration = float(self.detectors[0].data.duration)
         self.tc_array = jnp.fft.fftfreq(int(duration * fs / 2), 1.0 / duration)
         tc_array = np.asarray(self.tc_array)
         tc_window = np.flatnonzero(
@@ -751,6 +826,7 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         )
         self._tc_window_indices = jnp.asarray(tc_window)
         self.tc_upsample = int(config.upsample_factor)
+        fine_candidates: np.ndarray | None = None
         if self.tc_upsample == 1 and tc_window.size == 0:
             raise ValueError(
                 f"time_marginalization tc_range {self.tc_range} contains no FFT "
@@ -758,16 +834,12 @@ class TransientLikelihoodFD(SingleEventLikelihood):
             )
         if self.tc_upsample > 1:
             n_total = len(self.tc_array)
-            self._marg_frequencies = jnp.arange(n_total) / duration
-            fine_candidates, fine_mask, fine_step = (
-                _build_time_marginalization_fine_window(
-                    n_total,
-                    self.tc_upsample,
-                    duration,
-                    self.tc_range,
-                )
+            fine_candidates, fine_mask, _ = _build_time_marginalization_fine_window(
+                n_total,
+                self.tc_upsample,
+                duration,
+                self.tc_range,
             )
-            self._tc_fine_offsets = fine_step * jnp.arange(self.tc_upsample)
             self._tc_fine_candidate_indices = jnp.asarray(fine_candidates)
             if not fine_mask.any():
                 raise ValueError(
@@ -786,15 +858,28 @@ class TransientLikelihoodFD(SingleEventLikelihood):
                 "time_marginalization requires a one-sided frequency grid that "
                 "excludes the Nyquist endpoint; lower f_max by one frequency bin"
             )
+        if self.tc_upsample > 1:
+            assert fine_candidates is not None
+            zoom_plan = _build_time_marginalization_zoom_plan(
+                padded_size,
+                self.tc_upsample,
+                fine_candidates,
+            )
+            self._tc_zoom_input_chirp = jnp.asarray(zoom_plan.input_chirp)
+            self._tc_zoom_kernel_fft = jnp.asarray(zoom_plan.kernel_fft)
+            self._tc_zoom_output_chirp = jnp.asarray(zoom_plan.output_chirp)
+            self._tc_zoom_gather_indices = jnp.asarray(zoom_plan.gather_indices)
+            self._tc_zoom_fft_size = zoom_plan.fft_size
+            self._tc_zoom_output_start = zoom_plan.output_start
 
     def _windowed_fft(
         self, complex_d_inner_h: Float[Array, " n_freq"]
     ) -> Complex[Array, "upsample n_window"]:
-        """Evaluate the tc-window matched filter on a sub-grid.
+        """Evaluate the tc-window matched filter on a fine sub-grid.
 
-        For an upsample factor ``U``, ``U`` phase-ramped FFTs reproduce the
-        same band-limited samples as a ``U``-times zero-padded FFT while
-        keeping the live FFT workspace linear in the original grid size.
+        For ``U > 1``, a local Bluestein/ZoomFFT returns the same band-limited
+        samples as a ``U``-times zero-padded FFT without computing the unused
+        remainder of that fine grid.
         """
 
         padded = jnp.concatenate((self.pad_low, complex_d_inner_h, self.pad_high))
@@ -802,14 +887,24 @@ class TransientLikelihoodFD(SingleEventLikelihood):
             fft_d_inner_h = jnp.fft.fft(padded, norm="backward")
             return fft_d_inner_h[self._tc_window_indices][None, :]
 
-        def one_offset(delta: FloatScalar) -> Complex[Array, " n_window"]:
-            angle = (-2.0 * jnp.pi) * self._marg_frequencies * delta
-            shifted = padded * jax.lax.complex(jnp.cos(angle), jnp.sin(angle))
-            return jnp.fft.fft(shifted, norm="backward")[
-                self._tc_fine_candidate_indices
-            ]
-
-        return jax.lax.map(one_offset, self._tc_fine_offsets)
+        transformed = jnp.fft.fft(
+            padded * self._tc_zoom_input_chirp,
+            n=self._tc_zoom_fft_size,
+            norm="backward",
+        )
+        convolved = jnp.fft.ifft(
+            transformed * self._tc_zoom_kernel_fft,
+            n=self._tc_zoom_fft_size,
+            norm="backward",
+        )
+        output_size = len(self._tc_zoom_output_chirp)
+        local_window = jax.lax.dynamic_slice_in_dim(
+            convolved,
+            self._tc_zoom_output_start,
+            output_size,
+        )
+        local_window *= self._tc_zoom_output_chirp
+        return local_window[self._tc_zoom_gather_indices]
 
     def _reduce_time(self, complex_d_inner_h: Float[Array, " n_freq"]) -> FloatScalar:
         """FFT-based time marginalization (real part)."""
