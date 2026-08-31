@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import tempfile
 import time
@@ -19,6 +20,7 @@ from jimgw.core.constants import (
 )
 from jimgw.core.single_event.data import Data, PowerSpectrum
 from jimgw.core.single_event.polarization import Polarization
+from jimgw.core.single_event.time_dependent_response import emission_gmst
 from jimgw.core.single_event.time_utils import (
     greenwich_mean_sidereal_time as compute_gmst,
 )
@@ -33,6 +35,49 @@ asd_file_dict = {
     "L1": "https://dcc.ligo.org/public/0169/P2000251/001/O3-L1-C01_CLEAN_SUB60HZ-1240573680.0_sensitivity_strain_asd.txt",
     "V1": "https://dcc.ligo.org/public/0169/P2000251/001/O3-V1_sensitivity_strain_asd.txt",
 }
+
+
+def finite_arm_transfer(
+    frequency: FloatLike,
+    direction_cosine: FloatLike,
+    arm_length_m: Optional[float],
+) -> Complex:
+    """Return the round-trip transfer function of one interferometer arm.
+
+    ``direction_cosine`` is the cosine between the GW propagation direction
+    and the arm, i.e. ``-omega . arm`` when ``omega`` points from the
+    geocenter towards the source. Inputs follow JAX broadcasting rules, so a
+    scalar or per-frequency direction cosine is supported. The normalized
+    :func:`jax.numpy.sinc` convention makes the transfer tend to one as
+    ``frequency * arm_length_m / C_SI`` tends to zero.
+
+    Args:
+        frequency: Frequency in Hz.
+        direction_cosine: Cosine between the propagation direction and arm.
+        arm_length_m: Physical arm length in metres.
+
+    Returns:
+        The complex, frequency-dependent arm transfer function.
+
+    Raises:
+        ValueError: If the arm length is absent, non-finite, or non-positive.
+    """
+    if arm_length_m is None:
+        raise ValueError("finite-arm response requires arm_length_m metadata")
+    if not math.isfinite(arm_length_m) or arm_length_m <= 0:
+        raise ValueError("arm_length_m must be finite and positive")
+
+    x = jnp.asarray(frequency) * arm_length_m / C_SI
+    mu = jnp.asarray(direction_cosine)
+
+    phase_out = -jnp.pi * x * (1.0 + mu)
+    phase_back = jnp.pi * x * (1.0 - mu)
+    phasor_out = jax.lax.complex(jnp.cos(phase_out), jnp.sin(phase_out))
+    phasor_back = jax.lax.complex(jnp.cos(phase_back), jnp.sin(phase_back))
+    return 0.5 * (
+        phasor_out * jnp.sinc(x * (1.0 - mu))
+        + phasor_back * jnp.sinc(x * (1.0 + mu))
+    )
 
 
 class Detector(ABC):
@@ -88,6 +133,7 @@ class Detector(ABC):
         params: dict,
         *,
         optimize: bool = True,
+        finite_arm: Optional[bool] = None,
     ) -> Complex[Array, " n_sample"]:
         """Modulate the waveform in the sky frame by the detector response in the frequency domain.
 
@@ -103,6 +149,9 @@ class Detector(ABC):
                 - trigger_time (Float): The trigger time in sec
                 - t_c (Float): The difference between peak time and trigger time in sec
                 - gmst (Float): The greenwich mean sidereal time at the trigger time in radian
+            optimize: Use the real-angle phasor implementation.
+            finite_arm: Override the detector's configured finite-arm response
+                for this call. None uses the detector default.
 
         Returns:
             Complex[Array, "n_sample"]: Complex strain measured by the detector in frequency domain.
@@ -239,6 +288,9 @@ class GroundBased2G(Detector):
     xarm_tilt: float = 0
     yarm_tilt: float = 0
     elevation: float = 0
+    arm_length_m: Optional[float] = None
+    finite_arm_response: bool = False
+    time_dependent_response: bool = False
 
     optimal_snr: Optional[FloatScalar] = None
     match_filtered_snr: Optional[Complex] = None
@@ -257,6 +309,10 @@ class GroundBased2G(Detector):
         xarm_tilt: float = 0,
         yarm_tilt: float = 0,
         modes: str = "pc",
+        *,
+        arm_length_m: Optional[float] = None,
+        finite_arm_response: bool = False,
+        time_dependent_response: bool = False,
     ):
         """Initialize a ground-based detector.
 
@@ -270,6 +326,15 @@ class GroundBased2G(Detector):
             xarm_tilt (float, optional): Tilt of the x-arm in radians. Defaults to 0.
             yarm_tilt (float, optional): Tilt of the y-arm in radians. Defaults to 0.
             modes (str, optional): Polarization modes. Defaults to "pc".
+            arm_length_m (float, optional): Physical arm length in metres. Required
+                when using the finite-arm response. Defaults to None.
+            finite_arm_response (bool, optional): Use the frequency-dependent
+                finite-arm response by default in :meth:`fd_response`. Defaults
+                to False, preserving the long-wavelength response.
+            time_dependent_response (bool, optional): Evaluate the detector
+                orientation and delay at the waveform's frequency-dependent
+                emission time. The waveform must provide a ``__tau__`` leaf.
+                Defaults to False.
         """
         super().__init__()
 
@@ -282,6 +347,17 @@ class GroundBased2G(Detector):
         self.yarm_azimuth = yarm_azimuth
         self.xarm_tilt = xarm_tilt
         self.yarm_tilt = yarm_tilt
+        if arm_length_m is not None and (
+            not math.isfinite(arm_length_m) or arm_length_m <= 0
+        ):
+            raise ValueError("arm_length_m must be finite and positive")
+        if finite_arm_response and arm_length_m is None:
+            raise ValueError(
+                "finite_arm_response=True requires arm_length_m metadata"
+            )
+        self.arm_length_m = arm_length_m
+        self.finite_arm_response = finite_arm_response
+        self.time_dependent_response = time_dependent_response
 
         self.polarization_mode = [Polarization(m) for m in modes]
         self.data = Data()
@@ -387,6 +463,7 @@ class GroundBased2G(Detector):
         params: dict[str, Float],
         *,
         optimize: bool = True,
+        finite_arm: Optional[bool] = None,
     ) -> Complex[Array, " n_sample"]:
         """Modulate the waveform in the sky frame by the detector response in the frequency domain.
 
@@ -402,14 +479,55 @@ class GroundBased2G(Detector):
                 - trigger_time (Float): The trigger time in sec
                 - t_c (Float): The difference between peak time and trigger time in sec
                 - gmst (Float): The greenwich mean sidereal time at the trigger time in radian
+            optimize: Use the real-angle phasor implementation.
+            finite_arm: Override :attr:`finite_arm_response` for this call. None
+                uses the detector default.
 
         Returns:
             Array: Complex strain measured by the detector in frequency domain, obtained by
                   combining the antenna patterns for each polarization mode.
         """
         ra, dec, psi, gmst = params["ra"], params["dec"], params["psi"], params["gmst"]
-        antenna_pattern = self.antenna_pattern(ra, dec, psi, gmst)
-        time_shift = self.delay_from_geocenter(ra, dec, gmst)
+        tau = h_sky.get("__tau__")
+        if self.time_dependent_response:
+            if tau is None:
+                raise ValueError(
+                    "time-dependent detector response requires a waveform "
+                    "with a __tau__ emission-time leaf"
+                )
+            gmst = emission_gmst(gmst, params["t_c"], tau)
+            h_sky = {
+                polarization: strain
+                for polarization, strain in h_sky.items()
+                if polarization != "__tau__"
+            }
+        elif tau is not None:
+            raise ValueError(
+                "a waveform with a __tau__ emission-time leaf requires "
+                "time_dependent_response=True"
+            )
+
+        use_finite_arm = (
+            self.finite_arm_response if finite_arm is None else finite_arm
+        )
+        if use_finite_arm:
+            antenna_pattern = self.frequency_dependent_antenna_pattern(
+                ra, dec, psi, gmst, frequency
+            )
+            _, _, omega = self._wave_frame(ra, dec, psi, gmst)
+            time_shift = -jnp.einsum("i...,i->...", omega, self.vertex) / C_SI
+        elif self.time_dependent_response:
+            m, n, omega = self._wave_frame(ra, dec, psi, gmst)
+            antenna_pattern = {}
+            for polarization in self.polarization_mode:
+                wave_tensor = polarization.tensor_from_basis(m, n)
+                antenna_pattern[polarization.name] = jnp.einsum(
+                    "ij,ij...->...", self.tensor, wave_tensor
+                )
+            time_shift = -jnp.einsum("i...,i->...", omega, self.vertex) / C_SI
+        else:
+            antenna_pattern = self.antenna_pattern(ra, dec, psi, gmst)
+            time_shift = self.delay_from_geocenter(ra, dec, gmst)
         time_shift += params["trigger_time"] - self.start_time + params["t_c"]
 
         h_detector = jax.tree_util.tree_map(
@@ -431,6 +549,86 @@ class GroundBased2G(Detector):
             # Diagnostic reference matching the pre-optimization formula.
             phase_shift = jnp.exp(1j * phase_angle)
         return projected_strain * phase_shift
+
+    @staticmethod
+    def _wave_frame(
+        ra: FloatLike,
+        dec: FloatLike,
+        psi: FloatLike,
+        gmst: FloatLike,
+    ) -> tuple[Array, Array, Array]:
+        """Construct vector-safe wave-frame basis vectors and source direction."""
+        phi = jnp.asarray(ra) - jnp.mod(jnp.asarray(gmst), 2 * jnp.pi)
+        theta = jnp.pi / 2 - jnp.asarray(dec)
+        phi, theta, psi = jnp.broadcast_arrays(phi, theta, jnp.asarray(psi))
+
+        u = jnp.stack(
+            [
+                jnp.cos(phi) * jnp.cos(theta),
+                jnp.cos(theta) * jnp.sin(phi),
+                -jnp.sin(theta),
+            ]
+        )
+        v = jnp.stack([-jnp.sin(phi), jnp.cos(phi), jnp.zeros_like(phi)])
+        m = -u * jnp.sin(psi) - v * jnp.cos(psi)
+        n = -u * jnp.cos(psi) + v * jnp.sin(psi)
+        omega = jnp.stack(
+            [
+                jnp.sin(theta) * jnp.cos(phi),
+                jnp.sin(theta) * jnp.sin(phi),
+                jnp.cos(theta),
+            ]
+        )
+        return m, n, omega
+
+    def frequency_dependent_antenna_pattern(
+        self,
+        ra: FloatLike,
+        dec: FloatLike,
+        psi: FloatLike,
+        gmst: FloatLike,
+        frequency: FloatLike,
+    ) -> dict[str, Complex]:
+        """Compute antenna patterns including the finite-arm transfer.
+
+        ``frequency`` and sky coordinates may be scalars or broadcast-compatible
+        arrays. At zero frequency this reduces to :meth:`antenna_pattern`.
+        Arm-length metadata is deliberately mandatory so an XG calculation
+        cannot silently fall back to the long-wavelength approximation.
+
+        Raises:
+            ValueError: If this detector has no valid arm-length metadata.
+        """
+        if self.arm_length_m is None:
+            raise ValueError(
+                f"finite-arm response for detector {self.name!r} requires "
+                "arm_length_m metadata"
+            )
+
+        m, n, omega = self._wave_frame(ra, dec, psi, gmst)
+        xarm, yarm = self.arms
+        x_transfer = finite_arm_transfer(
+            frequency,
+            -jnp.einsum("i...,i->...", omega, xarm),
+            self.arm_length_m,
+        )
+        y_transfer = finite_arm_transfer(
+            frequency,
+            -jnp.einsum("i...,i->...", omega, yarm),
+            self.arm_length_m,
+        )
+        xx = 0.5 * jnp.einsum("i,j->ij", xarm, xarm)
+        yy = 0.5 * jnp.einsum("i,j->ij", yarm, yarm)
+
+        antenna_patterns = {}
+        for polarization in self.polarization_mode:
+            wave_tensor = polarization.tensor_from_basis(m, n)
+            x_projection = jnp.einsum("ij,ij...->...", xx, wave_tensor)
+            y_projection = jnp.einsum("ij,ij...->...", yy, wave_tensor)
+            antenna_patterns[polarization.name] = (
+                x_projection * x_transfer - y_projection * y_transfer
+            )
+        return antenna_patterns
 
     def td_response(
         self,
@@ -785,6 +983,7 @@ def get_H1() -> GroundBased2G:
         xarm_tilt=-6.195e-4,
         yarm_tilt=1.25e-5,
         elevation=142.554,
+        arm_length_m=4_000.0,
         modes="pc",
     )
 
@@ -800,6 +999,7 @@ def get_L1() -> GroundBased2G:
         xarm_tilt=-3.121e-4,
         yarm_tilt=-6.107e-4,
         elevation=-6.574,
+        arm_length_m=4_000.0,
         modes="pc",
     )
 
@@ -815,6 +1015,7 @@ def get_V1() -> GroundBased2G:
         xarm_tilt=0,
         yarm_tilt=0,
         elevation=51.884,
+        arm_length_m=3_000.0,
         modes="pc",
     )
 
@@ -863,6 +1064,7 @@ def get_ET() -> list[GroundBased2G]:
                 elevation=elevation,
                 xarm_tilt=xarm_tilt,
                 yarm_tilt=yarm_tilt,
+                arm_length_m=length,
             )
         )
         # Propagate to next vertex using the spherical forward-azimuth formula.
@@ -898,6 +1100,7 @@ def get_CE() -> GroundBased2G:
         xarm_tilt=-6.195e-4,
         yarm_tilt=1.25e-5,
         elevation=142.554,
+        arm_length_m=40_000.0,
         modes="pc",
     )
 
