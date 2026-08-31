@@ -8,6 +8,7 @@ from typing import Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import requests
 from beartype import beartype as typechecker
 from jaxtyping import Array, Bool, Complex, Float, Key, jaxtyped
@@ -70,13 +71,12 @@ def finite_arm_transfer(
     x = jnp.asarray(frequency) * arm_length_m / C_SI
     mu = jnp.asarray(direction_cosine)
 
-    phase_out = -jnp.pi * x * (1.0 + mu)
-    phase_back = jnp.pi * x * (1.0 - mu)
+    phase_out = -jnp.pi * x * (1.0 - mu)
+    phase_back = -jnp.pi * x * (3.0 - mu)
     phasor_out = jax.lax.complex(jnp.cos(phase_out), jnp.sin(phase_out))
     phasor_back = jax.lax.complex(jnp.cos(phase_back), jnp.sin(phase_back))
     return 0.5 * (
-        phasor_out * jnp.sinc(x * (1.0 - mu))
-        + phasor_back * jnp.sinc(x * (1.0 + mu))
+        phasor_out * jnp.sinc(x * (1.0 - mu)) + phasor_back * jnp.sinc(x * (1.0 + mu))
     )
 
 
@@ -96,6 +96,7 @@ class Detector(ABC):
     # objects so this might be worth revisiting
     data: Data
     psd: PowerSpectrum
+    input_provenance_sha256: Optional[tuple[tuple[str, str], ...]] = None
 
     frequency_bounds: tuple[float, float] = (0.0, jnp.inf)
 
@@ -214,6 +215,7 @@ class Detector(ABC):
         self._sliced_psd = jnp.array([])
         self.optimal_snr = None
         self.match_filtered_snr = None
+        self.input_provenance_sha256 = None
 
     @property
     def sliced_frequencies(self) -> Float[Array, " n_freq"]:
@@ -291,7 +293,6 @@ class GroundBased2G(Detector):
     arm_length_m: Optional[float] = None
     finite_arm_response: bool = False
     time_dependent_response: bool = False
-
     optimal_snr: Optional[FloatScalar] = None
     match_filtered_snr: Optional[Complex] = None
 
@@ -352,12 +353,11 @@ class GroundBased2G(Detector):
         ):
             raise ValueError("arm_length_m must be finite and positive")
         if finite_arm_response and arm_length_m is None:
-            raise ValueError(
-                "finite_arm_response=True requires arm_length_m metadata"
-            )
+            raise ValueError("finite_arm_response=True requires arm_length_m metadata")
         self.arm_length_m = arm_length_m
         self.finite_arm_response = finite_arm_response
         self.time_dependent_response = time_dependent_response
+        self.input_provenance_sha256 = None
 
         self.polarization_mode = [Polarization(m) for m in modes]
         self.data = Data()
@@ -507,9 +507,7 @@ class GroundBased2G(Detector):
                 "time_dependent_response=True"
             )
 
-        use_finite_arm = (
-            self.finite_arm_response if finite_arm is None else finite_arm
-        )
+        use_finite_arm = self.finite_arm_response if finite_arm is None else finite_arm
         if use_finite_arm:
             antenna_pattern = self.frequency_dependent_antenna_pattern(
                 ra, dec, psi, gmst, frequency
@@ -775,6 +773,7 @@ class GroundBased2G(Detector):
         Returns:
             None
         """
+        self.input_provenance_sha256 = None
         if isinstance(data, Data):
             self.data = data
         else:
@@ -794,6 +793,7 @@ class GroundBased2G(Detector):
         Returns:
             None
         """
+        self.input_provenance_sha256 = None
         if isinstance(psd, PowerSpectrum):
             self.psd = psd
         else:
@@ -815,6 +815,7 @@ class GroundBased2G(Detector):
         start_time: Optional[float] = None,
         zero_noise: bool = False,
         rng_key: Optional[Key] = None,
+        waveform_chunk_size: int = 262_144,
     ) -> None:
         """Inject a signal into the detector data.
 
@@ -836,6 +837,9 @@ class GroundBased2G(Detector):
                 data buffer in seconds. If None, defaults to
                 ``trigger_time - duration + 2.0`` (2 s of data after the trigger).
                 Defaults to None.
+            waveform_chunk_size: Maximum number of in-band frequency samples
+                projected at once. This bounds temporary waveform and response
+                arrays for long XG injections.
 
         Returns:
             None
@@ -850,6 +854,12 @@ class GroundBased2G(Detector):
 
         # Make a copy of the parameters to avoid modifying the original dictionary
         params = parameters.copy()
+        if (
+            isinstance(waveform_chunk_size, bool)
+            or not isinstance(waveform_chunk_size, int)
+            or waveform_chunk_size <= 0
+        ):
+            raise ValueError("waveform_chunk_size must be a positive integer")
 
         # Stamp trigger_time and gmst — mirrors TransientLikelihoodFD.evaluate()
         params["trigger_time"] = float(trigger_time)
@@ -869,12 +879,34 @@ class GroundBased2G(Detector):
         # Set frequency bounds before evaluating the waveform
         self.set_frequency_bounds(f_min, f_max)
 
-        # 2. Compute the projected strain from parameters
-        polarisations = waveform_model(self.frequencies, params)
-        projected_strain = self.fd_response(self.frequencies, polarisations, params)
+        # 2. Compute the projected in-band strain in bounded chunks. The full
+        # output array is required by Data.from_fd, but waveform polarizations,
+        # emission clocks, and response intermediates never scale beyond one
+        # configured chunk.
+        projected_host = np.zeros(self.data.n_freq, dtype=np.complex128)
+        if len(self.sliced_frequencies) == 0:
+            raise ValueError(
+                f"injection band [{f_min}, {f_max}] contains no frequency samples"
+            )
+        first_frequency_index = round(
+            float(self.sliced_frequencies[0]) * float(self.duration)
+        )
+        for start in range(0, len(self.sliced_frequencies), waveform_chunk_size):
+            stop = min(start + waveform_chunk_size, len(self.sliced_frequencies))
+            chunk_frequencies = self.sliced_frequencies[start:stop]
+            polarisations = waveform_model(chunk_frequencies, params)
+            projected_chunk = self.fd_response(
+                chunk_frequencies,
+                polarisations,
+                params,
+            )
+            projected_host[
+                first_frequency_index + start : first_frequency_index + stop
+            ] = np.asarray(jax.device_get(projected_chunk))
+        projected_strain = jnp.asarray(projected_host)
 
         # 3. Set the new data
-        strain_data = jnp.where(self.frequency_mask, projected_strain, 0.0 + 0.0j)
+        strain_data = projected_strain
         if not zero_noise:
             if rng_key is None:
                 seed = int(time.time())

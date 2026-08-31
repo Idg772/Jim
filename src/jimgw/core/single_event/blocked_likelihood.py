@@ -98,7 +98,14 @@ def _infer_waveform_sampling_dependencies(
     sample_transforms: Sequence[BijectiveTransform],
     likelihood_transforms: Sequence[NtoMTransform],
 ) -> set[str]:
-    """Map waveform inputs back to sampling-space parameters."""
+    """Map source-cache inputs back to sampling-space parameters.
+
+    A likelihood may publish ``waveform_cache_dependency_parameter_names``
+    when its reusable payload contains more than the waveform carrier.  The
+    XG response path uses this contract for the intrinsic emission-time map.
+    Older likelihoods and lightweight test doubles retain the waveform-only
+    inference below.
+    """
     all_sampling_parameters = set(parameter_names)
     dependencies = {name: {name} for name in parameter_names}
 
@@ -126,32 +133,45 @@ def _infer_waveform_sampling_dependencies(
             for name in produced_names:
                 dependencies[name] = input_dependencies.copy()
 
-    declared_cacheable_names = getattr(
-        likelihood, "waveform_cacheable_parameter_names", None
+    declared_dependency_names = getattr(
+        likelihood, "waveform_cache_dependency_parameter_names", None
     )
-    if declared_cacheable_names is None:
-        # Lightweight test doubles and third-party likelihoods may expose the
-        # pre-validation duck-typed surface only. Real SingleEventLikelihood
-        # instances use the validated property above.
-        cacheable_parameter_names = set(
-            getattr(likelihood.waveform, "cacheable_parameter_names", ())
+    dependencies_are_explicit = declared_dependency_names is not None
+    if declared_dependency_names is None:
+        declared_cacheable_names = getattr(
+            likelihood, "waveform_cacheable_parameter_names", None
         )
-        if likelihood.waveform_caches_distance:
-            cacheable_parameter_names.add("d_L")
+        if declared_cacheable_names is None:
+            # Lightweight test doubles and third-party likelihoods may expose
+            # the pre-validation duck-typed surface only. Real
+            # SingleEventLikelihood instances use the validated property.
+            cacheable_parameter_names: set[str] = set(
+                getattr(likelihood.waveform, "cacheable_parameter_names", ())
+            )
+            if likelihood.waveform_caches_distance:
+                cacheable_parameter_names.add("d_L")
+        else:
+            cacheable_parameter_names = set(declared_cacheable_names)
+        cache_dependency_parameter_names = (
+            set(likelihood.waveform.parameter_names) - cacheable_parameter_names
+        )
     else:
-        cacheable_parameter_names = set(declared_cacheable_names)
+        cache_dependency_parameter_names = set(declared_dependency_names)
 
     waveform_sampling_dependencies: set[str] = set()
-    for parameter_name in likelihood.waveform.parameter_names:
-        if parameter_name in cacheable_parameter_names:
-            # The waveform reconstructs this parameter from its reusable
-            # carrier/polarization cache.
-            continue
+    for parameter_name in cache_dependency_parameter_names:
         if parameter_name in likelihood.fixed_parameters:
             if callable(likelihood.fixed_parameters[parameter_name]):
                 waveform_sampling_dependencies.update(all_sampling_parameters)
             continue
         sampling_dependencies = dependencies.get(parameter_name)
-        if sampling_dependencies is not None:
-            waveform_sampling_dependencies.update(sampling_dependencies)
+        if sampling_dependencies is None:
+            if dependencies_are_explicit:
+                raise ValueError(
+                    "declared source-cache dependency "
+                    f"{parameter_name!r} is not fixed, sampled, or produced by a "
+                    "configured transform"
+                )
+            continue
+        waveform_sampling_dependencies.update(sampling_dependencies)
     return waveform_sampling_dependencies

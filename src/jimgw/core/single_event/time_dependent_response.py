@@ -80,7 +80,7 @@ def time_to_coalescence_2pn(
     *,
     mode: int = 2,
 ) -> Float[Array, "..."]:
-    """Return the positive 2PN time to coalescence for a waveform mode.
+    """Return the non-negative 2PN time to coalescence for a waveform mode.
 
     The formula is Eq. (3.3) of Blanchet et al. (1995), including the aligned
     spin-orbit and spin-spin terms used by the Bilby-XG reference
@@ -89,8 +89,12 @@ def time_to_coalescence_2pn(
     momentum.  ``mode`` can be positive or negative; only ``abs(mode)`` sets
     the clock, and zero is invalid.
 
-    The inspiral expression assumes positive masses and frequencies.  It is a
-    source-clock primitive rather than a near-merger cutoff prescription.
+    The inspiral expression assumes positive masses and frequencies. Its
+    post-inspiral continuation can become negative or turn upward near merger.
+    The clock is therefore fixed at coalescence at and above the Schwarzschild
+    ISCO frequency, and any earlier negative continuation is also fixed at
+    zero. This prevents the response from moving after coalescence or rebounding
+    at frequencies where the PN clock is outside its declared domain.
     """
 
     mode_number = abs(mode)
@@ -135,7 +139,13 @@ def time_to_coalescence_2pn(
         * x ** (4.0 / 3.0)
         * tau_zero
     )
-    return tau_zero + tau_two + tau_three + tau_four
+    inspiral_tau = tau_zero + tau_two + tau_three + tau_four
+    isco_frequency_22 = 1.0 / (6.0 ** (3.0 / 2.0) * jnp.pi * total_mass_seconds)
+    return jnp.where(
+        frequency_22 < isco_frequency_22,
+        jnp.maximum(inspiral_tau, 0.0),
+        0.0,
+    )
 
 
 def emission_time(

@@ -280,6 +280,15 @@ class TestPowerSpectrumFromFile:
         assert jnp.allclose(psd.frequencies, jnp.array(self._FREQS))
         assert psd.name == "H1"
 
+    def test_npz_asd_file_squared(self, tmp_path: Path):
+        """NPZ ASD values are squared when is_asd=True."""
+        path = str(tmp_path / "asd.npz")
+        np.savez(path, values=self._ASD, frequencies=self._FREQS)
+
+        psd = PowerSpectrum.from_file(path, is_asd=True)
+
+        assert jnp.allclose(psd.values, jnp.array(self._PSD), rtol=1e-6)
+
     def test_npz_missing_keys_raises(self, tmp_path: Path):
         path = str(tmp_path / "bad.npz")
         np.savez(path, values=self._PSD)  # missing 'frequencies'

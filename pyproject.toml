@@ -44,6 +44,7 @@ dependencies = [
 
 [project.scripts]
 jim-run = "jimgw.cli:app"
+jim-xg-qualify = "jimgw.cli.xg_qualification:app"
 
 [project.optional-dependencies]
 cuda = [

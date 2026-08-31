@@ -18,7 +18,7 @@ from jimgw.core.single_event.transform_utils import Mc_eta_to_m1_m2
 from jimgw.typing import FloatLike
 
 TIME_TO_COALESCENCE_KEY = "__tau__"
-"""Reserved waveform-output leaf containing the positive emission clock."""
+"""Reserved waveform-output leaf containing the non-negative emission clock."""
 
 _SOURCE_CACHE_KEY = "__source_cache__"
 _REQUIRED_TIMING_PARAMETERS = frozenset(("M_c", "eta", "s1_z", "s2_z"))
@@ -35,6 +35,15 @@ _KNOWN_PRECESSING_CLASSES = frozenset(
         "IMRPhenomXP",
         "IMRPhenomXPHM",
         "RippleIMRPhenomPv2NRTidalv2",
+    )
+)
+_KNOWN_DOMINANT_MODE_CLASSES = frozenset(
+    (
+        "TaylorF2",
+        "IMRPhenomD",
+        "IMRPhenomD_NRTidalv2",
+        "IMRPhenomXAS",
+        "IMRPhenomXAS_NRTidalv3",
     )
 )
 
@@ -75,7 +84,7 @@ class DominantModeTimeCachedWaveform(
             raise ValueError("the wrapped frequency-domain waveform must define f_ref")
 
         parameter_names = set(source.parameter_names)
-        required_parameters = _REQUIRED_TIMING_PARAMETERS | {"d_L"}
+        required_parameters = _REQUIRED_TIMING_PARAMETERS | {"d_L", "iota"}
         missing_parameters = required_parameters - parameter_names
         if missing_parameters:
             raise ValueError(
@@ -91,6 +100,15 @@ class DominantModeTimeCachedWaveform(
             raise ValueError(
                 f"{class_name} does not expose a dominant-mode response-time "
                 "decomposition"
+            )
+        if not (
+            metadata.get("dominant_mode_only", False)
+            or class_name in _KNOWN_DOMINANT_MODE_CLASSES
+        ):
+            raise ValueError(
+                f"{class_name} does not explicitly declare dominant-mode-only "
+                "output; set waveform_metadata['dominant_mode_only'] = True only "
+                "for a verified p/c dominant-mode backend"
             )
 
         builder = getattr(source, "build_waveform_cache", None)
@@ -112,9 +130,11 @@ class DominantModeTimeCachedWaveform(
                 "wrapped cacheable parameters are not waveform parameters: "
                 f"{sorted(unknown_cacheable)}"
             )
-        if not isinstance(source, DistanceScaledWaveform) and (
-            not callable(builder) or "d_L" not in declared_cacheable
-        ):
+        if callable(builder) and "d_L" not in declared_cacheable:
+            raise TypeError(
+                "a wrapped custom waveform cache must explicitly declare d_L cacheable"
+            )
+        if not callable(builder) and not isinstance(source, DistanceScaledWaveform):
             raise TypeError(
                 "the wrapped waveform must implement DistanceScaledWaveform or "
                 "a custom cache that reconstructs d_L"
@@ -124,7 +144,10 @@ class DominantModeTimeCachedWaveform(
         self.mode = mode
         self._f_ref = cast(Any, source).f_ref
         self._has_custom_source_cache = callable(builder)
-        self._cacheable_parameter_names = frozenset(declared_cacheable | {"d_L"})
+        fallback_cacheable = {"d_L", "iota"} if not callable(builder) else {"d_L"}
+        self._cacheable_parameter_names = frozenset(
+            declared_cacheable | fallback_cacheable
+        )
 
     @property
     def parameter_names(self) -> tuple[str, ...]:
@@ -201,12 +224,17 @@ class DominantModeTimeCachedWaveform(
         if self._has_custom_source_cache:
             builder = cast(
                 Callable[[Float[Array, " n_freq"], Mapping[str, FloatLike]], Any],
-                getattr(self.source, "build_waveform_cache"),
+                cast(Any, self.source).build_waveform_cache,
             )
             source_cache = builder(frequency, params)
         else:
             distance_scaled_source = cast(DistanceScaledWaveform, self.source)
-            source_cache = distance_scaled_source.at_unit_distance(frequency, params)
+            face_on_params = dict(params)
+            face_on_params["iota"] = 0.0
+            source_cache = distance_scaled_source.at_unit_distance(
+                frequency,
+                face_on_params,
+            )
             self._validate_polarizations(source_cache)
         return {
             _SOURCE_CACHE_KEY: source_cache,
@@ -234,14 +262,15 @@ class DominantModeTimeCachedWaveform(
                     [Float[Array, " n_freq"], Mapping[str, FloatLike], Any],
                     Mapping[str, Any],
                 ],
-                getattr(self.source, "waveform_from_cache"),
+                cast(Any, self.source).waveform_from_cache,
             )
             polarizations = reconstructor(frequency, params, source_cache)
         else:
             distance_scale = 1.0 / params["d_L"]
+            cos_iota = jnp.cos(params["iota"])
             polarizations = {
-                "p": source_cache["p"] * distance_scale,
-                "c": source_cache["c"] * distance_scale,
+                "p": source_cache["p"] * (0.5 * (1.0 + cos_iota**2) * distance_scale),
+                "c": source_cache["c"] * (cos_iota * distance_scale),
             }
         self._validate_polarizations(polarizations)
         return {

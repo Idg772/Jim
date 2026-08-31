@@ -14,13 +14,16 @@ from jimgw.core.jim import Jim
 from jimgw.core.prior import CombinePrior, GaussianPrior, PowerLawPrior, UniformPrior
 from jimgw.core.single_event.data import Data, PowerSpectrum
 from jimgw.core.single_event.detector import get_H1, get_L1
+from jimgw.core.single_event.dominant_mode import DominantModeTimeCachedWaveform
 from jimgw.core.single_event.likelihood import (
+    _XG_PLAN_AUTHORITY,
     HeterodynedTransientLikelihoodFD,
     MultibandedTransientLikelihoodFD,
     TransientLikelihoodFD,
     ZeroLikelihood,
     _build_time_marginalization_fine_window,
     _build_time_marginalization_zoom_plan,
+    _VerifiedXGPlan,
 )
 from jimgw.core.single_event.time_utils import (
     greenwich_mean_sidereal_time as compute_gmst,
@@ -61,6 +64,47 @@ def test_custom_waveform_cache_rejects_unknown_parameter_names() -> None:
 
     with pytest.raises(ValueError, match="not waveform parameters"):
         _ = likelihood.waveform_cacheable_parameter_names
+
+
+def test_source_cache_dependencies_include_emission_time_inputs() -> None:
+    likelihood = object.__new__(TransientLikelihoodFD)
+    likelihood.waveform = SimpleNamespace(
+        parameter_names=("M_c", "iota"),
+        cacheable_parameter_names=frozenset({"iota"}),
+        emission_time_parameter_names=frozenset({"M_c", "chi_eff"}),
+        build_waveform_cache=lambda frequencies, params: None,
+        waveform_from_cache=lambda frequencies, params, cache: None,
+    )
+
+    assert likelihood.waveform_cache_dependency_parameter_names == frozenset(
+        {"M_c", "chi_eff"}
+    )
+
+
+def test_reference_support_ignores_reserved_timing_metadata() -> None:
+    likelihood = object.__new__(HeterodynedTransientLikelihoodFD)
+    likelihood.reference_chunk_size = 3
+    likelihood.frequencies = jnp.arange(1.0, 9.0)
+    likelihood.reference_parameters = {}
+
+    def reference(frequencies, params):
+        del params
+        physical = jnp.where(
+            (frequencies >= 3.0) & (frequencies <= 6.0),
+            jnp.ones_like(frequencies, dtype=jnp.complex128),
+            jnp.zeros_like(frequencies, dtype=jnp.complex128),
+        )
+        return {"p": physical, "c": 1j * physical, "__tau__": frequencies**-1}
+
+    support = likelihood._find_reference_frequency_support(reference)
+    assert support == (3.0, 6.0)
+
+    waveform = reference(likelihood.frequencies, {})
+    masked = likelihood._mask_and_set_frequency_arrays(
+        waveform,
+        likelihood.frequencies,
+    )
+    np.testing.assert_array_equal(masked, jnp.arange(3.0, 7.0))
 
 
 def test_upsampled_fine_window_handles_signed_wrap_and_strict_bounds():
@@ -186,6 +230,19 @@ def example_params():
     }
 
 
+def _fixture_xg_plan(ifos, waveform, fmin, fmax, gps, *, n_bins):
+    baseline = HeterodynedTransientLikelihoodFD(
+        detectors=ifos,
+        waveform=waveform,
+        f_min=fmin,
+        f_max=fmax,
+        trigger_time=gps,
+        n_bins=n_bins,
+        reference_parameters=example_params(),
+    )
+    return _VerifiedXGPlan(baseline.bin_edges_sha256, _XG_PLAN_AUTHORITY)
+
+
 def _waveform_cache_prior() -> CombinePrior:
     bounds = {
         "M_c": (20.0, 40.0),
@@ -261,6 +318,48 @@ class TestTransientLikelihoodFD:
         assert likelihood.frequencies[-1] == fmax
         assert likelihood.trigger_time == gps
         assert hasattr(likelihood, "gmst")
+
+    def test_dynamic_response_rejects_dense_time_marginalization(
+        self,
+        detectors_and_waveform,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        timed_waveform = DominantModeTimeCachedWaveform(waveform)
+        for detector in ifos:
+            detector.time_dependent_response = True
+
+        with pytest.raises(ValueError, match="sample t_c explicitly"):
+            TransientLikelihoodFD(
+                detectors=ifos,
+                waveform=timed_waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                time_marginalization={"tc_range": (-0.03, 0.03)},
+            )
+
+    def test_dynamic_response_alias_rejects_dense_time_marginalization(
+        self,
+        detectors_and_waveform,
+        monkeypatch,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        monkeypatch.setattr(
+            waveform,
+            "response_is_time_dependent",
+            True,
+            raising=False,
+        )
+
+        with pytest.raises(ValueError, match="sample t_c explicitly"):
+            TransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                time_marginalization={"tc_range": (-0.03, 0.03)},
+            )
 
     def test_identical_masks_detected_for_shared_grid(self, detectors_and_waveform):
         ifos, waveform, fmin, fmax, gps = detectors_and_waveform
@@ -393,9 +492,7 @@ class TestTransientLikelihoodFD:
             # Uses the same prepared params (trigger_time/gmst injected,
             # t_c zeroed for marginalization) that `evaluate` uses internally.
             prepared_params = likelihood._prepare_parameters(params)
-            waveform_sky = likelihood.waveform(
-                likelihood.frequencies, prepared_params
-            )
+            waveform_sky = likelihood.waveform(likelihood.frequencies, prepared_params)
             n_freq = len(likelihood.frequencies)
             complex_d_inner_h = jnp.zeros(n_freq, dtype=jnp.complex128)
             hh_over_psd = jnp.zeros(n_freq)
@@ -404,21 +501,20 @@ class TestTransientLikelihoodFD:
                     ifo.sliced_frequencies,
                     likelihood._sliced_waveform_sky(waveform_sky, i),
                     prepared_params,
-                    optimize=likelihood.likelihood_optimization_axes[
-                        "detector_phasor"
-                    ],
+                    optimize=likelihood.likelihood_optimization_axes["detector_phasor"],
                 )
                 complex_d_inner_h = complex_d_inner_h + (
-                    4 * h_dec * jnp.conj(ifo.sliced_fd_data) / ifo.sliced_psd
+                    4
+                    * h_dec
+                    * jnp.conj(ifo.sliced_fd_data)
+                    / ifo.sliced_psd
                     * likelihood.df
                 )
                 hh_over_psd = hh_over_psd + (
                     (h_dec.real**2 + h_dec.imag**2) / ifo.sliced_psd
                 )
             reference_logl = -(2.0 * likelihood.df) * jnp.sum(hh_over_psd)
-            reference_logl = reference_logl + likelihood._reduce_time(
-                complex_d_inner_h
-            )
+            reference_logl = reference_logl + likelihood._reduce_time(complex_d_inner_h)
             reference = float(reference_logl)
 
             assert abs(result - reference) < 1e-9
@@ -1921,6 +2017,484 @@ class TestHeterodynedTransientLikelihoodFD:
                 assert det.name in obj
                 assert jnp.isfinite(obj[det.name]).all()
 
+    @pytest.mark.parametrize("phase_marginalization", [False, True])
+    def test_direct_sum_time_marginalization_is_cached_and_jittable(
+        self,
+        detectors_and_waveform,
+        phase_marginalization,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = HeterodynedTransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            n_bins=128,
+            reference_parameters=example_params(),
+            phase_marginalization=phase_marginalization,
+            time_marginalization={
+                "tc_range": (-0.03, 0.03),
+                "upsample_factor": 4,
+                "phasor_block_size": 17,
+            },
+        )
+        params = example_params()
+        cache = likelihood.generate_waveform(params)
+        direct = likelihood.evaluate(params)
+
+        np.testing.assert_allclose(
+            likelihood.evaluate_from_waveform(params, cache),
+            direct,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            jax.jit(likelihood.evaluate)(params),
+            direct,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        np.testing.assert_array_equal(
+            likelihood.evaluate({**params, "t_c": 0.02}),
+            direct,
+        )
+
+    def test_direct_sum_generates_bounded_phasor_blocks(
+        self,
+        detectors_and_waveform,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = HeterodynedTransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            n_bins=64,
+            reference_parameters=example_params(),
+            time_marginalization={
+                "tc_range": (-0.03, 0.03),
+                "upsample_factor": 4,
+                "phasor_block_size": 13,
+            },
+        )
+        rng = np.random.default_rng(41)
+        low_coeff = jnp.asarray(
+            rng.normal(size=likelihood.n_bins) + 1j * rng.normal(size=likelihood.n_bins)
+        )
+        high_coeff = jnp.asarray(
+            rng.normal(size=likelihood.n_bins) + 1j * rng.normal(size=likelihood.n_bins)
+        )
+
+        blocked = likelihood._direct_sum_network_match(low_coeff, high_coeff)
+        expected = (
+            likelihood._time_phasors(
+                likelihood.tc_window,
+                likelihood.freq_grid_low,
+            )
+            @ low_coeff
+        )
+        expected += (
+            likelihood._time_phasors(
+                likelihood.tc_window,
+                likelihood.freq_grid_high,
+            )
+            @ high_coeff
+        )
+        np.testing.assert_allclose(
+            np.asarray(blocked)[: len(likelihood.tc_window)],
+            expected,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+        assert not hasattr(likelihood, "_tc_phase_low")
+        assert not hasattr(likelihood, "_tc_phase_high")
+        assert not hasattr(likelihood, "tc_array")
+        assert likelihood._tc_time_blocks.size < (
+            len(likelihood.tc_window) + likelihood.tc_phasor_block_size
+        )
+        assert likelihood._tc_valid_time_mask.size == likelihood._tc_time_blocks.size
+
+    def test_direct_sum_rejects_underresolved_timing_width(
+        self,
+        detectors_and_waveform,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+
+        with pytest.raises(ValueError, match="does not resolve timing_sigma_s"):
+            HeterodynedTransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                n_bins=32,
+                reference_parameters=example_params(),
+                time_marginalization={
+                    "tc_range": (-0.03, 0.03),
+                    "upsample_factor": 1,
+                    "timing_sigma_s": 2.0e-5,
+                    "samples_per_timing_sigma": 4,
+                },
+            )
+
+    def test_direct_sum_rejects_unbounded_time_grid_before_reference_work(
+        self,
+        detectors_and_waveform,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        reference_calls = []
+
+        def counted_reference(frequencies, params):
+            reference_calls.append(len(frequencies))
+            return waveform(frequencies, params)
+
+        with pytest.raises(ValueError, match="above the bounded limit"):
+            HeterodynedTransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                reference_waveform=counted_reference,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                n_bins=32,
+                reference_parameters=example_params(),
+                time_marginalization={
+                    "tc_range": (-0.03, 0.03),
+                    "upsample_factor": 100_000_000,
+                    "normalization": "window",
+                },
+            )
+
+        assert reference_calls == []
+
+    def test_direct_sum_can_normalize_over_explicit_time_prior(
+        self,
+        detectors_and_waveform,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = HeterodynedTransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            n_bins=32,
+            reference_parameters=example_params(),
+            time_marginalization={
+                "tc_range": (-0.03, 0.03),
+                "upsample_factor": 4,
+                "normalization": "window",
+            },
+        )
+
+        assert likelihood.tc_normalization == "window"
+        assert likelihood._tc_normalization_count == len(likelihood.tc_window)
+        prior_width = 0.06
+        requested_step = 2.0 / (
+            float(ifos[0].data.sampling_frequency) * likelihood.tc_upsample
+        )
+        expected_count = int(np.ceil(prior_width / requested_step))
+        midpoint_step = prior_width / expected_count
+        assert len(likelihood.tc_window) == expected_count
+        assert float(likelihood.tc_window[0]) == pytest.approx(
+            -0.03 + 0.5 * midpoint_step
+        )
+        assert float(likelihood.tc_window[-1]) == pytest.approx(
+            0.03 - 0.5 * midpoint_step
+        )
+
+    def test_window_normalization_rejects_prior_outside_data_support(
+        self,
+        detectors_and_waveform,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        duration = float(ifos[0].data.duration)
+
+        with pytest.raises(ValueError, match="centered data duration"):
+            HeterodynedTransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                n_bins=32,
+                reference_parameters=example_params(),
+                time_marginalization={
+                    "tc_range": (-0.03, 0.5 * duration + 0.01),
+                    "normalization": "window",
+                },
+            )
+
+    def test_direct_sum_requires_explicit_frozen_dynamic_response(
+        self,
+        detectors_and_waveform,
+        monkeypatch,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        xg_plan = _fixture_xg_plan(ifos, waveform, fmin, fmax, gps, n_bins=32)
+        monkeypatch.setattr(
+            type(ifos[0]),
+            "response_is_time_dependent",
+            True,
+            raising=False,
+        )
+        kwargs = {
+            "detectors": ifos,
+            "waveform": waveform,
+            "f_min": fmin,
+            "f_max": fmax,
+            "trigger_time": gps,
+            "n_bins": 32,
+            "reference_parameters": example_params(),
+            "xg_plan": xg_plan,
+        }
+
+        with pytest.raises(ValueError, match="freeze_response=true"):
+            HeterodynedTransientLikelihoodFD(
+                **kwargs,
+                time_marginalization={"tc_range": (-0.03, 0.03)},
+            )
+
+        likelihood = HeterodynedTransientLikelihoodFD(
+            **kwargs,
+            time_marginalization={
+                "tc_range": (-0.03, 0.03),
+                "freeze_response": True,
+                "timing_sigma_s": 0.01,
+                "normalization": "window",
+            },
+        )
+        assert likelihood.freeze_time_dependent_response is True
+
+    @pytest.mark.parametrize(
+        ("time_config", "message"),
+        [
+            (
+                {
+                    "tc_range": (-0.03, 0.03),
+                    "freeze_response": True,
+                    "timing_sigma_s": 0.01,
+                },
+                "normalization='window'",
+            ),
+            (
+                {
+                    "tc_range": (-0.03, 0.03),
+                    "freeze_response": True,
+                    "normalization": "window",
+                },
+                "finite timing_sigma_s",
+            ),
+            (
+                {
+                    "tc_range": (0.01, 0.03),
+                    "freeze_response": True,
+                    "timing_sigma_s": 0.01,
+                    "normalization": "window",
+                },
+                "pivot t_c=0",
+            ),
+        ],
+    )
+    def test_dynamic_direct_sum_requires_complete_physics_contract(
+        self,
+        detectors_and_waveform,
+        monkeypatch,
+        time_config,
+        message,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        xg_plan = _fixture_xg_plan(ifos, waveform, fmin, fmax, gps, n_bins=32)
+        monkeypatch.setattr(
+            type(ifos[0]),
+            "response_is_time_dependent",
+            True,
+            raising=False,
+        )
+
+        with pytest.raises(ValueError, match=message):
+            HeterodynedTransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                n_bins=32,
+                reference_parameters=example_params(),
+                time_marginalization=time_config,
+                xg_plan=xg_plan,
+            )
+
+    def test_direct_sum_accepts_dominant_mode_timing_cache(
+        self,
+        detectors_and_waveform,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        xg_plan = _fixture_xg_plan(ifos, waveform, fmin, fmax, gps, n_bins=64)
+        timed_waveform = DominantModeTimeCachedWaveform(waveform)
+        for ifo in ifos:
+            ifo.time_dependent_response = True
+
+        likelihood = HeterodynedTransientLikelihoodFD(
+            detectors=ifos,
+            waveform=timed_waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            n_bins=64,
+            reference_parameters=example_params(),
+            phase_marginalization=True,
+            time_marginalization={
+                "tc_range": (-0.03, 0.03),
+                "freeze_response": True,
+                "timing_sigma_s": 0.01,
+                "normalization": "window",
+            },
+            xg_plan=xg_plan,
+        )
+        params = example_params()
+        cache = likelihood.generate_waveform(params)
+
+        assert "__tau__" in cache["low"]
+        assert "__tau__" in cache["high"]
+        np.testing.assert_allclose(
+            likelihood.evaluate_from_waveform(params, cache),
+            likelihood.evaluate(params),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    def test_xg_heterodyne_rejects_iterative_reference_and_implicit_bins(
+        self,
+        detectors_and_waveform,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        timed_waveform = DominantModeTimeCachedWaveform(waveform)
+        for ifo in ifos:
+            ifo.time_dependent_response = True
+
+        with pytest.raises(ValueError, match="fixed reference_parameters"):
+            HeterodynedTransientLikelihoodFD(
+                detectors=ifos,
+                waveform=timed_waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                n_bins=32,
+                prior=_waveform_cache_prior(),
+            )
+
+        with pytest.raises(ValueError, match="explicit, prequalified n_bins"):
+            HeterodynedTransientLikelihoodFD(
+                detectors=ifos,
+                waveform=timed_waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                reference_parameters=example_params(),
+            )
+
+        with pytest.raises(ValueError, match="verified qualification manifest"):
+            HeterodynedTransientLikelihoodFD(
+                detectors=ifos,
+                waveform=timed_waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                n_bins=32,
+                reference_parameters=example_params(),
+            )
+
+    def test_rejected_xg_setup_does_not_slice_dense_frequency_data(
+        self,
+        detectors_and_waveform,
+        monkeypatch,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        timed_waveform = DominantModeTimeCachedWaveform(waveform)
+        for ifo in ifos:
+            ifo.time_dependent_response = True
+
+        def fail_if_called(*args, **kwargs):
+            del args, kwargs
+            pytest.fail("frequency slicing ran before the XG setup gate")
+
+        monkeypatch.setattr(
+            HeterodynedTransientLikelihoodFD,
+            "_set_detector_frequency_bounds",
+            fail_if_called,
+        )
+
+        with pytest.raises(ValueError, match="fixed reference_parameters"):
+            HeterodynedTransientLikelihoodFD(
+                detectors=ifos,
+                waveform=timed_waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                n_bins=32,
+                prior=_waveform_cache_prior(),
+            )
+
+    def test_oversized_bin_plan_fails_before_frequency_slicing(
+        self,
+        detectors_and_waveform,
+        monkeypatch,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+
+        def fail_if_called(*args, **kwargs):
+            del args, kwargs
+            pytest.fail("frequency slicing ran before the bin limit gate")
+
+        monkeypatch.setattr(
+            HeterodynedTransientLikelihoodFD,
+            "_set_detector_frequency_bounds",
+            fail_if_called,
+        )
+
+        with pytest.raises(ValueError, match="bounded bin limit"):
+            HeterodynedTransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                n_bins=4_194_304,
+                reference_parameters=example_params(),
+            )
+
+    def test_reference_summary_construction_is_chunked(
+        self,
+        detectors_and_waveform,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        chunk_size = 127
+        call_sizes = []
+
+        def counted_reference(frequencies, params):
+            call_sizes.append(len(frequencies))
+            return waveform(frequencies, params)
+
+        likelihood = HeterodynedTransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            reference_waveform=counted_reference,
+            reference_chunk_size=chunk_size,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            n_bins=32,
+            reference_parameters=example_params(),
+        )
+
+        assert jnp.isfinite(likelihood.evaluate(example_params()))
+        assert max(call_sizes) <= chunk_size
+        assert len(call_sizes) > len(ifos) + 2
+
     def test_no_reference_params_and_no_prior_raises(self, detectors_and_waveform):
         ifos, waveform, fmin, fmax, gps = detectors_and_waveform
         with pytest.raises(ValueError):
@@ -1930,6 +2504,27 @@ class TestHeterodynedTransientLikelihoodFD:
                 f_min=fmin,
                 f_max=fmax,
                 trigger_time=gps,
+            )
+
+    def test_incomplete_reference_parameters_fail_before_waveform_construction(
+        self,
+        detectors_and_waveform,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+
+        with pytest.raises(ValueError, match=r"incomplete.*dec"):
+            HeterodynedTransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                n_bins=32,
+                reference_parameters={
+                    key: value
+                    for key, value in example_params().items()
+                    if key != "dec"
+                },
             )
 
     def test_evaluate_jit_matches(self, detectors_and_waveform):
@@ -2069,12 +2664,66 @@ class TestHeterodynedTransientLikelihoodFD:
         assert jnp.isclose(likelihood.freq_grid_low[0], fmin)
         assert jnp.isfinite(likelihood.evaluate(example_params()))
 
+    def test_binning_edges_invert_phase_envelope_without_dense_grid(self):
+        frequencies = jnp.linspace(5.0, 2_048.0, 1_000_001)
+        n_bins = 257
+
+        edges = HeterodynedTransientLikelihoodFD._make_binning_scheme(
+            frequencies,
+            n_bins,
+        )
+        edge_phase = HeterodynedTransientLikelihoodFD._max_phase_diff(
+            edges,
+            edges[0],
+            edges[-1],
+        )
+        expected_phase = jnp.linspace(0.0, edge_phase[-1], n_bins + 1)
+
+        np.testing.assert_allclose(edge_phase, expected_phase, rtol=2e-12, atol=2e-12)
+        assert jnp.all(jnp.diff(edges) > 0)
+
+    def test_reference_projection_null_is_rejected(self):
+        source = {
+            "p": jnp.ones(3, dtype=jnp.complex128),
+            "c": 1j * jnp.ones(3, dtype=jnp.complex128),
+            "__tau__": jnp.arange(3.0),
+        }
+
+        with pytest.raises(ValueError, match="response null"):
+            HeterodynedTransientLikelihoodFD._validate_reference_projection(
+                "CE",
+                source,
+                jnp.asarray((1.0 + 0.0j, 0.0 + 0.0j, 1.0 + 0.0j)),
+                "low",
+            )
+
+    def test_qualified_bin_edge_digest_checks_final_retained_plan(
+        self,
+        detectors_and_waveform,
+    ):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        ifos[0].finite_arm_response = True
+
+        with pytest.raises(ValueError, match="bin edges do not match"):
+            HeterodynedTransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                n_bins=32,
+                reference_parameters=example_params(),
+                xg_plan=_VerifiedXGPlan("0" * 64, _XG_PLAN_AUTHORITY),
+            )
+
     @pytest.mark.parametrize(
         ("n_bins", "epsilon", "match"),
         [
             (32, 0.5, "mutually exclusive"),
             (0, None, "positive integer"),
+            (True, None, "positive integer"),
             (None, 0.0, "positive number"),
+            (None, np.inf, "positive number"),
         ],
     )
     def test_invalid_binning_parameters_raise(
@@ -2380,6 +3029,20 @@ class TestHeterodynedTransientLikelihoodFD:
 
 
 class TestMultibandedTransientLikelihoodFD:
+    def test_rejects_unqualified_xg_response(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        ifos[0].finite_arm_response = True
+
+        with pytest.raises(ValueError, match="not qualified with the multiband"):
+            MultibandedTransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                reference_chirp_mass=20.0,
+            )
+
     # ── Initialization ────────────────────────────────────────────────────────
 
     def test_infers_banding_parameters_from_prior(self, detectors_and_waveform):

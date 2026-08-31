@@ -1,7 +1,11 @@
+import hashlib
+import json
 import logging
 from typing import Optional, Union
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 from ripplegw.interfaces import Waveform
 
 from jimgw.cli._config import (
@@ -11,12 +15,14 @@ from jimgw.cli._config import (
     DataConfig,
     InjectionDataConfig,
     LikelihoodConfig,
+    PipelineConfig,
 )
 from jimgw.cli._prior import build_prior
 from jimgw.cli._transforms import to_likelihood_space
 from jimgw.core.constants import EARTH_RADIUS_LIGHT_S
 from jimgw.core.prior import CombinePrior, UniformPrior
 from jimgw.core.single_event.detector import GroundBased2G
+from jimgw.core.single_event.dominant_mode import DominantModeTimeCachedWaveform
 from jimgw.core.single_event.likelihood import (
     HeterodynedTransientLikelihoodFD,
     MultibandedTransientLikelihoodFD,
@@ -24,6 +30,7 @@ from jimgw.core.single_event.likelihood import (
 )
 from jimgw.core.single_event.marginalization_config import (
     DistanceMargConfig,
+    HeterodyneTimeMargConfig,
     PhaseMargConfig,
     TimeMargConfig,
 )
@@ -32,31 +39,147 @@ from jimgw.core.transforms import NtoMTransform
 logger = logging.getLogger(__name__)
 
 
+def detector_metadata_sha256(ifos: list[GroundBased2G]) -> str:
+    """Hash detector site, arm, and response metadata in network order."""
+
+    payload = [
+        {
+            "name": ifo.name,
+            "latitude": ifo.latitude,
+            "longitude": ifo.longitude,
+            "elevation": ifo.elevation,
+            "xarm_azimuth": ifo.xarm_azimuth,
+            "yarm_azimuth": ifo.yarm_azimuth,
+            "xarm_tilt": ifo.xarm_tilt,
+            "yarm_tilt": ifo.yarm_tilt,
+            "arm_length_m": ifo.arm_length_m,
+        }
+        for ifo in ifos
+    ]
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _validate_xg_detector_inputs(
+    ifos: list[GroundBased2G],
+    input_files_sha256: dict[str, str],
+) -> None:
+    """Check realized detector provenance and precision without copying arrays."""
+
+    expected_provenance = tuple(sorted(input_files_sha256.items()))
+    for ifo in ifos:
+        if ifo.input_provenance_sha256 != expected_provenance:
+            raise ValueError(
+                f"{ifo.name} data were not built from the qualified XG inputs"
+            )
+        realized_arrays = {
+            "strain frequencies": (ifo.data.frequencies, np.dtype(np.float64)),
+            "strain": (ifo.data.fd, np.dtype(np.complex128)),
+            "PSD frequencies": (ifo.psd.frequencies, np.dtype(np.float64)),
+            "PSD": (ifo.psd.values, np.dtype(np.float64)),
+        }
+        for label, (array, expected_dtype) in realized_arrays.items():
+            if np.dtype(array.dtype) != expected_dtype:
+                raise TypeError(
+                    f"{ifo.name} {label} uses {array.dtype}, but the qualified "
+                    f"XG path requires {expected_dtype}"
+                )
+
+
 def build_likelihood(
-    cfg: LikelihoodConfig,
+    pipeline_cfg: PipelineConfig,
     ifos: list[GroundBased2G],
     waveform: Waveform,
-    trigger_time: float,
-    waveform_f_ref: float,
-    time_frame: str,
     prior: CombinePrior,
     likelihood_transforms: list[NtoMTransform],
-    data_cfg: DataConfig,
 ) -> Union[
     TransientLikelihoodFD,
     HeterodynedTransientLikelihoodFD,
     MultibandedTransientLikelihoodFD,
 ]:
-    """Build a likelihood from the validated likelihood config.
+    """Build a likelihood from one validated pipeline contract.
 
-    Uses ``HeterodynedTransientLikelihoodFD`` when ``cfg.heterodyne`` is set,
+    Uses ``HeterodynedTransientLikelihoodFD`` when the heterodyne config is set,
     otherwise falls back to ``TransientLikelihoodFD``.  ``prior`` and
     ``likelihood_transforms`` are required for the heterodyne case (the optimizer
     needs them to find reference parameters).
 
-    ``data_cfg`` is only used when ``cfg.heterodyne.reference_parameters.type =
+    The data config is only used when ``reference_parameters.type =
     "injection"`` — it must be an ``InjectionDataConfig`` in that case.
     """
+    cfg: LikelihoodConfig = pipeline_cfg.likelihood
+    trigger_time = pipeline_cfg.data.trigger_time
+    waveform_f_ref = pipeline_cfg.waveform.f_ref
+    time_frame = pipeline_cfg.sampling.time_frame
+    data_cfg: DataConfig = pipeline_cfg.data
+    verified_xg_manifest = pipeline_cfg.verified_xg_manifest
+    uses_xg_response = cfg.time_dependent_response or cfg.finite_arm_response
+    uses_xg_compression = uses_xg_response and cfg.heterodyne is not None
+
+    if uses_xg_response and not jax.config.jax_enable_x64:
+        raise RuntimeError("XG likelihood construction requires JAX 64-bit precision")
+    if uses_xg_compression:
+        if verified_xg_manifest is None:
+            raise ValueError(
+                "XG likelihood construction requires a qualification receipt "
+                "verified against the complete pipeline config"
+            )
+        if (
+            pipeline_cfg.xg_analysis_contract_sha256()
+            != verified_xg_manifest.analysis_contract_sha256
+        ):
+            raise ValueError(
+                "the pipeline config changed after XG qualification verification"
+            )
+        if (
+            pipeline_cfg.xg_input_files_sha256()
+            != verified_xg_manifest.input_files_sha256
+        ):
+            raise ValueError(
+                "the XG input files changed after qualification verification"
+            )
+        source_waveform = (
+            waveform.source
+            if isinstance(waveform, DominantModeTimeCachedWaveform)
+            else waveform
+        )
+        expected_class_name = pipeline_cfg.waveform.approximant
+        if type(source_waveform).__name__ != expected_class_name:
+            raise TypeError(
+                "the realized waveform does not match the qualified approximant"
+            )
+        realized_f_ref = getattr(waveform, "f_ref", None)
+        if realized_f_ref is None or float(realized_f_ref) != waveform_f_ref:
+            raise ValueError(
+                "the realized waveform reference frequency does not match the "
+                "qualified pipeline config"
+            )
+    elif verified_xg_manifest is not None:
+        raise ValueError(
+            "the pipeline response or compression mode changed after XG "
+            "qualification verification"
+        )
+
+    if cfg.time_dependent_response and not isinstance(
+        waveform,
+        DominantModeTimeCachedWaveform,
+    ):
+        raise TypeError(
+            "time_dependent_response requires DominantModeTimeCachedWaveform"
+        )
+    for ifo in ifos:
+        if cfg.finite_arm_response and ifo.arm_length_m is None:
+            raise ValueError(
+                f"finite_arm_response requires arm_length_m metadata for {ifo.name}"
+            )
+        ifo.time_dependent_response = cfg.time_dependent_response
+        ifo.finite_arm_response = cfg.finite_arm_response
+
     phase_marg = None
     if cfg.phase_marginalization:
         phase_marg = PhaseMargConfig()
@@ -64,6 +187,30 @@ def build_likelihood(
     fixed_params = cfg.fixed_parameters if cfg.fixed_parameters else None
 
     if cfg.heterodyne is not None:
+        if verified_xg_manifest is not None:
+            metadata_digest = detector_metadata_sha256(ifos)
+            if metadata_digest != verified_xg_manifest.detector_metadata_sha256:
+                raise ValueError(
+                    "XG qualification detector metadata does not match the "
+                    "constructed network"
+                )
+            _validate_xg_detector_inputs(
+                ifos,
+                verified_xg_manifest.input_files_sha256,
+            )
+        heterodyne_time_marg = None
+        if cfg.time_marginalization is not None:
+            heterodyne_time_marg = HeterodyneTimeMargConfig(
+                tc_range=cfg.time_marginalization.tc_range,
+                upsample_factor=cfg.time_marginalization.upsample_factor,
+                phasor_block_size=cfg.time_marginalization.phasor_block_size,
+                freeze_response=cfg.time_marginalization.freeze_response,
+                timing_sigma_s=cfg.time_marginalization.timing_sigma_s,
+                samples_per_timing_sigma=(
+                    cfg.time_marginalization.samples_per_timing_sigma
+                ),
+                normalization=cfg.time_marginalization.normalization,
+            )
         ref_cfg = cfg.heterodyne.reference_parameters
         reference_params: Optional[dict] = None
         optimizer_popsize = 500
@@ -123,7 +270,14 @@ def build_likelihood(
             prior=prior,
             likelihood_transforms=likelihood_transforms,
             phase_marginalization=phase_marg,
+            time_marginalization=heterodyne_time_marg,
             reference_parameters=reference_params,
+            reference_chunk_size=cfg.heterodyne.reference_chunk_size,
+            xg_plan=(
+                pipeline_cfg._issue_verified_xg_plan()
+                if verified_xg_manifest is not None
+                else None
+            ),
         )
         logger.info(
             "Built heterodyne likelihood: f_min=%.1f, f_max=%.1f, n_bins=%d",
@@ -208,7 +362,10 @@ def build_likelihood(
 
     time_marg = None
     if cfg.time_marginalization is not None:
-        time_marg = TimeMargConfig(tc_range=cfg.time_marginalization.tc_range)
+        time_marg = TimeMargConfig(
+            tc_range=cfg.time_marginalization.tc_range,
+            upsample_factor=cfg.time_marginalization.upsample_factor,
+        )
 
     dist_marg = None
     if cfg.distance_marginalization is not None:

@@ -125,6 +125,14 @@ def run(
 
     logger.info("Loaded config from %s", config)
 
+    likelihood_raw = raw.get("likelihood", {})
+    if likelihood_raw.get("time_dependent_response", False) or likelihood_raw.get(
+        "finite_arm_response", False
+    ):
+        import jax
+
+        jax.config.update("jax_enable_x64", True)
+
     try:
         cfg = PipelineConfig.model_validate(raw)
     except ValidationError as exc:
@@ -157,11 +165,16 @@ def run(
         infer_sample_transforms,
     )
     from jimgw.cli._waveform import build_waveform
+    from jimgw.core.single_event.dominant_mode import (
+        DominantModeTimeCachedWaveform,
+    )
 
     trigger_time: float = cfg.data.trigger_time
 
     # Stage 2: waveform
     waveform = build_waveform(cfg.waveform)
+    if cfg.likelihood.time_dependent_response:
+        waveform = DominantModeTimeCachedWaveform(waveform)
 
     # Stage 3: data — injection runs receive the already-built waveform
     ifos = build_data(
@@ -170,18 +183,27 @@ def run(
         f_max=cfg.likelihood.f_max,
         waveform=waveform,
         time_frame=cfg.sampling.time_frame,
+        time_dependent_response=cfg.likelihood.time_dependent_response,
+        finite_arm_response=cfg.likelihood.finite_arm_response,
+        seed=cfg.seed,
+        input_provenance_sha256=(
+            cfg.verified_xg_manifest.input_files_sha256
+            if cfg.verified_xg_manifest is not None
+            else None
+        ),
     )
 
     # NS AW requires all sampling-space parameters in [0, 1].
     # Must run before build_prior so the built prior and
     # prior_params already reflect the substitution.
+    effective_prior_cfg = cfg.prior
     if cfg.sampler.type == "blackjax-ns-aw":
-        modified_prior = adapt_prior_for_ns_time(cfg.prior, cfg.sampling)
+        modified_prior = adapt_prior_for_ns_time(effective_prior_cfg, cfg.sampling)
         if modified_prior is not None:
-            cfg.prior = modified_prior
+            effective_prior_cfg = modified_prior
 
     # Stage 4: prior
-    prior = build_prior(cfg.prior)
+    prior = build_prior(effective_prior_cfg)
 
     # Stage 5: transform inference
     prior_params = frozenset(prior.parameter_names)
@@ -192,7 +214,7 @@ def run(
         ifos,
         cfg.sampling,
         unit_cube=ns_aw,
-        prior_cfg=cfg.prior,
+        prior_cfg=effective_prior_cfg,
     )
     likelihood_transforms = infer_likelihood_transforms(
         prior_params,
@@ -205,15 +227,11 @@ def run(
 
     # Stage 6: likelihood
     likelihood = build_likelihood(
-        cfg.likelihood,
+        cfg,
         ifos,
         waveform,
-        trigger_time,
-        cfg.waveform.f_ref,
         prior=prior,
         likelihood_transforms=likelihood_transforms,
-        data_cfg=cfg.data,
-        time_frame=cfg.sampling.time_frame,
     )
 
     # Stage 7: build Jim + run sampler

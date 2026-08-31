@@ -1,8 +1,9 @@
+import hashlib
 import logging
 from abc import abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
-from typing import Any, Optional, Union
+from dataclasses import dataclass, field, replace
+from typing import Any, Optional, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -13,7 +14,6 @@ from jaxtyping import Array, Complex, Float
 from ripplegw.interfaces import DistanceScaledWaveform, Waveform
 from scipy.fft import fft as scipy_fft
 from scipy.fft import next_fast_len
-from scipy.interpolate import interp1d
 
 from jimgw.core.base import LikelihoodBase
 from jimgw.core.constants import EARTH_RADIUS_LIGHT_S, MTSUN
@@ -21,6 +21,7 @@ from jimgw.core.prior import Prior, find_specific_prior
 from jimgw.core.single_event.detector import Detector
 from jimgw.core.single_event.marginalization_config import (
     DistanceMargConfig,
+    HeterodyneTimeMargConfig,
     PhaseMargConfig,
     TimeMargConfig,
 )
@@ -39,9 +40,31 @@ from jimgw.typing import ComplexScalar, FloatLike, FloatScalar
 
 logger = logging.getLogger(__name__)
 
+_XG_PLAN_AUTHORITY = object()
+
+
+@dataclass(frozen=True)
+class _VerifiedXGPlan:
+    """Internal capability proving that an XG bin plan was verified."""
+
+    bin_edges_sha256: str
+    _authority: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._authority is not _XG_PLAN_AUTHORITY:
+            raise TypeError("XG plans must come from the verified pipeline builder")
+        if len(self.bin_edges_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in self.bin_edges_sha256
+        ):
+            raise ValueError("XG bin edges must use a SHA-256 digest")
+
+
 _LIKELIHOOD_OPTIMIZATION_AXES = frozenset(
     {"shared_frequency_grid", "detector_phasor", "real_inner_product"}
 )
+_MAX_DIRECT_SUM_PHASOR_ELEMENTS = 4_194_304
+_MAX_DIRECT_SUM_TIME_SAMPLES = 4_194_304
+_MIN_RELATIVE_BIN_REFERENCE_RESPONSE = 1.0e-12
 
 
 @dataclass(frozen=True)
@@ -335,7 +358,9 @@ class SingleEventLikelihood(LikelihoodBase):
         be separated from an expensive intrinsic carrier.
         """
 
-        declared_names = set(getattr(self.waveform, "cacheable_parameter_names", ()))
+        declared_names: set[str] = set(
+            getattr(self.waveform, "cacheable_parameter_names", ())
+        )
         builder = getattr(self.waveform, "build_waveform_cache", None)
         reconstructor = getattr(self.waveform, "waveform_from_cache", None)
         has_builder = callable(builder)
@@ -362,6 +387,36 @@ class SingleEventLikelihood(LikelihoodBase):
             names.add("d_L")
         return frozenset(names)
 
+    @property
+    def waveform_cache_dependency_parameter_names(self) -> frozenset[str]:
+        """Likelihood-space inputs that invalidate the source cache.
+
+        The normal carrier dependencies are the waveform inputs that cannot be
+        reconstructed from its reusable cache.  A waveform can also declare
+        ``emission_time_parameter_names`` when its cached payload contains an
+        intrinsic frequency-to-time map.  Those timing inputs remain cache
+        dependencies even when the carrier cache can otherwise reconstruct
+        them cheaply.
+
+        The blocked-likelihood adapter maps these likelihood-space names back
+        through the configured transforms to price proposal blocks.
+        """
+
+        carrier_dependencies = set(self.waveform.parameter_names) - set(
+            self.waveform_cacheable_parameter_names
+        )
+        timing_dependencies = set(
+            getattr(self.waveform, "emission_time_parameter_names", ())
+        )
+        dependencies = carrier_dependencies | timing_dependencies
+        if getattr(self, "phase_marginalization", False):
+            dependencies.discard("phase_c")
+        if getattr(self, "time_marginalization", False):
+            dependencies.discard("t_c")
+        if getattr(self, "distance_marginalization", False):
+            dependencies.discard("d_L")
+        return frozenset(dependencies)
+
     def _waveform_sky_for_cache(
         self,
         frequencies: Float[Array, " n_freq"],
@@ -375,7 +430,10 @@ class SingleEventLikelihood(LikelihoodBase):
         """
         custom_builder = getattr(self.waveform, "build_waveform_cache", None)
         if callable(custom_builder):
-            return custom_builder(frequencies, params)
+            return cast(
+                dict[str, Complex[Array, " n_freq"]],
+                custom_builder(frequencies, params),
+            )
 
         # Not using `waveform_caches_distance` for passing type checks
         if isinstance(self.waveform, DistanceScaledWaveform):
@@ -396,7 +454,10 @@ class SingleEventLikelihood(LikelihoodBase):
         """
         custom_reconstructor = getattr(self.waveform, "waveform_from_cache", None)
         if callable(custom_reconstructor):
-            return custom_reconstructor(frequencies, params, cached_polarizations)
+            return cast(
+                dict[str, Complex[Array, " n_freq"]],
+                custom_reconstructor(frequencies, params, cached_polarizations),
+            )
 
         if not self.waveform_caches_distance:
             return cached_polarizations
@@ -578,6 +639,22 @@ class TransientLikelihoodFD(SingleEventLikelihood):
         self.phase_marginalization = phase_marginalization is not None
         self.distance_marginalization = distance_marginalization is not None
 
+        response_is_time_dependent = bool(
+            getattr(self.waveform, "time_dependent_response", False)
+            or getattr(self.waveform, "response_is_time_dependent", False)
+            or any(
+                getattr(detector, "time_dependent_response", False)
+                or getattr(detector, "response_is_time_dependent", False)
+                for detector in self.detectors
+            )
+        )
+        if self.time_marginalization and response_is_time_dependent:
+            raise ValueError(
+                "dense FFT time marginalization freezes the time-dependent "
+                "detector response; sample t_c explicitly or use the guarded "
+                "heterodyne direct-sum path"
+            )
+
         if self.time_marginalization and self.distance_marginalization:
             raise NotImplementedError(
                 "Joint time + distance marginalization is not yet supported."
@@ -614,9 +691,7 @@ class TransientLikelihoodFD(SingleEventLikelihood):
                 4.0 * self.df * jnp.conj(ifo.sliced_fd_data) / ifo.sliced_psd
                 for ifo in self.detectors
             ]
-            self._inverse_sliced_psd = [
-                1.0 / ifo.sliced_psd for ifo in self.detectors
-            ]
+            self._inverse_sliced_psd = [1.0 / ifo.sliced_psd for ifo in self.detectors]
 
     # --- direct evaluation ---
 
@@ -1032,8 +1107,12 @@ class TransientLikelihoodFD(SingleEventLikelihood):
 class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
     """Frequency-domain likelihood using the relative-binning (heterodyne) scheme.
 
-    Optionally marginalizes over coalescence phase when ``phase_marginalization``
-    is provided.
+    Optionally marginalizes over coalescence time by a direct sum on the
+    relative-bin endpoints.  This keeps the production evaluation independent
+    of the full data duration and does not use the dense FFT/ZoomFFT reduction
+    implemented by :class:`TransientLikelihoodFD`.  Coalescence phase can be
+    marginalized analytically at each time sample.  Luminosity distance remains
+    sampled.
 
     Args:
         detectors: List of detector objects containing data and metadata.
@@ -1071,6 +1150,17 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
             ``phase_c``.  Pass a [`PhaseMargConfig`][jimgw.core.single_event.likelihood.PhaseMargConfig]
             object, a plain dict ``{}``, or ``True`` (shorthand for ``PhaseMargConfig()``).
             ``None`` or ``False`` (default) disables phase marginalization.
+        time_marginalization: If provided, marginalize over coalescence time
+            ``t_c`` on a uniform direct-sum grid. Pass a
+            [`TimeMargConfig`][jimgw.core.single_event.likelihood.TimeMargConfig],
+            a plain dictionary, or ``True``. The grid uses the same strict
+            interval bounds and normalization as the dense likelihood.
+        reference_chunk_size: Maximum number of dense frequency samples used
+            at once while constructing the fixed reference summaries. This
+            bounds host and device scratch memory independently of the number
+            of relative bins.
+        xg_plan: Internal capability created only after the complete pipeline
+            and its frozen XG bin plan have passed receipt verification.
     """
 
     n_bins: int
@@ -1101,10 +1191,15 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         prior: Optional[Prior] = None,
         likelihood_transforms: Optional[list[NtoMTransform]] = None,
         phase_marginalization: Optional[Union[PhaseMargConfig, dict, bool]] = None,
+        time_marginalization: Optional[
+            Union[HeterodyneTimeMargConfig, TimeMargConfig, dict, bool]
+        ] = None,
+        reference_chunk_size: int = 262_144,
+        xg_plan: Optional[_VerifiedXGPlan] = None,
     ):
         super().__init__(detectors, waveform, fixed_parameters)
 
-        # --- coerce phase marginalization input ---
+        # --- coerce marginalization inputs ---
         if isinstance(phase_marginalization, dict):
             phase_marginalization = PhaseMargConfig(**phase_marginalization)
         elif phase_marginalization is True:
@@ -1113,35 +1208,104 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
             phase_marginalization = None
         self.phase_marginalization = phase_marginalization is not None
 
-        # --- frequency setup (same as TransientLikelihoodFD) ---
-        _frequencies = self._set_detector_frequency_bounds(f_min, f_max)
-
-        assert all(
-            jnp.isclose(
-                _frequencies[0][1] - _frequencies[0][0],
-                freq[1] - freq[0],
+        if isinstance(time_marginalization, dict):
+            time_marginalization = HeterodyneTimeMargConfig(**time_marginalization)
+        elif time_marginalization is True:
+            time_marginalization = HeterodyneTimeMargConfig()
+        elif not time_marginalization:
+            time_marginalization = None
+        elif not isinstance(time_marginalization, HeterodyneTimeMargConfig):
+            time_marginalization = HeterodyneTimeMargConfig(
+                tc_range=time_marginalization.tc_range,
+                upsample_factor=time_marginalization.upsample_factor,
             )
-            for freq in _frequencies
-        ), "All detectors must have the same frequency spacing."
+        self.time_marginalization = time_marginalization is not None
 
-        self.df = _frequencies[0][1] - _frequencies[0][0]
-        self.frequencies = jnp.unique(jnp.concatenate(_frequencies))
-        self.frequency_masks = [
-            jnp.isin(self.frequencies, detector.sliced_frequencies)
-            for detector in detectors
-        ]
+        if (
+            isinstance(reference_chunk_size, bool)
+            or not isinstance(reference_chunk_size, (int, np.integer))
+            or reference_chunk_size <= 0
+        ):
+            raise ValueError("reference_chunk_size must be a positive integer")
+        self.reference_chunk_size = int(reference_chunk_size)
+        self.coefficient_builder = "numpy-segmented-v1"
 
         self.trigger_time = trigger_time
         self.gmst = compute_gmst(self.trigger_time)
+        xg_response = bool(
+            getattr(self.waveform, "time_dependent_response", False)
+            or getattr(self.waveform, "response_is_time_dependent", False)
+            or any(
+                getattr(detector, "time_dependent_response", False)
+                or getattr(detector, "response_is_time_dependent", False)
+                or getattr(detector, "finite_arm_response", False)
+                for detector in self.detectors
+            )
+        )
+        if xg_plan is not None and (
+            not isinstance(xg_plan, _VerifiedXGPlan)
+            or xg_plan._authority is not _XG_PLAN_AUTHORITY
+        ):
+            raise TypeError("xg_plan must be an internally verified XG plan")
+        if xg_response and not reference_parameters:
+            raise ValueError(
+                "XG heterodyne likelihood requires fixed reference_parameters; "
+                "iterative reference optimization is disabled"
+            )
+        if xg_response and n_bins is None:
+            raise ValueError(
+                "XG heterodyne likelihood requires an explicit, prequalified n_bins"
+            )
+        if xg_response and xg_plan is None:
+            raise ValueError(
+                "XG heterodyne likelihood requires a verified qualification "
+                "manifest before construction"
+            )
+        if not xg_response and xg_plan is not None:
+            raise ValueError("xg_plan is only valid for an XG detector response")
+        if time_marginalization is not None:
+            self._validate_direct_sum_time_resolution(time_marginalization)
 
         # --- phase marginalization flag ---
         if self.phase_marginalization and "phase_c" in self.fixed_parameters:
             raise ValueError(
                 "Cannot have phase_c fixed while marginalizing over phase_c"
             )
+        if self.time_marginalization and "t_c" in self.fixed_parameters:
+            raise ValueError("Cannot have t_c fixed while marginalizing over t_c")
 
-        # --- heterodyne setup ---
-        logger.info("Initializing heterodyned likelihood..")
+        if n_bins is not None:
+            if epsilon is not None:
+                raise ValueError(
+                    "'n_bins' and 'epsilon' are mutually exclusive; specify at most one."
+                )
+            if isinstance(n_bins, bool) or not isinstance(n_bins, (int, np.integer)):
+                raise ValueError(
+                    f"'n_bins' must be a positive integer, got {n_bins!r}."
+                )
+            n_bins = int(n_bins)
+            if n_bins <= 0:
+                raise ValueError(
+                    f"'n_bins' must be a positive integer, got {n_bins!r}."
+                )
+            if n_bins + 1 > _MAX_DIRECT_SUM_PHASOR_ELEMENTS:
+                raise ValueError(
+                    f"heterodyne n_bins={n_bins} exceeds the bounded bin limit "
+                    f"{_MAX_DIRECT_SUM_PHASOR_ELEMENTS - 1}"
+                )
+        elif epsilon is None:
+            epsilon = 0.5
+
+        if epsilon is not None:
+            if isinstance(epsilon, bool) or not np.isfinite(float(epsilon)):
+                raise ValueError(
+                    f"'epsilon' must be a positive number and finite, got {epsilon!r}."
+                )
+            epsilon = float(epsilon)
+            if epsilon <= 0:
+                raise ValueError(
+                    f"'epsilon' must be a positive number and finite, got {epsilon!r}."
+                )
 
         if likelihood_transforms is None:
             likelihood_transforms = []
@@ -1149,13 +1313,85 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         if reference_waveform is None:
             reference_waveform = waveform
 
+        prepared_reference_parameters = None
         if reference_parameters:
-            self.reference_parameters = reference_parameters.copy()
-            apply_fixed_parameters(self.reference_parameters, self.fixed_parameters)
+            prepared_reference_parameters = reference_parameters.copy()
+            apply_fixed_parameters(
+                prepared_reference_parameters,
+                self.fixed_parameters,
+            )
+            prepared_reference_parameters["trigger_time"] = self.trigger_time
+            prepared_reference_parameters["gmst"] = self.gmst
+            if self.phase_marginalization:
+                prepared_reference_parameters.setdefault("phase_c", 0.0)
+            if self.time_marginalization:
+                prepared_reference_parameters.setdefault("t_c", 0.0)
+            required_reference_parameters = set(self.waveform.parameter_names) | {
+                "ra",
+                "dec",
+                "psi",
+                "t_c",
+            }
+            missing_reference_parameters = required_reference_parameters - set(
+                prepared_reference_parameters
+            )
+            if missing_reference_parameters:
+                raise ValueError(
+                    "heterodyne reference_parameters are incomplete; missing "
+                    f"{sorted(missing_reference_parameters)}"
+                )
+        elif prior is None:
+            raise ValueError(
+                "Either reference parameters or parameter names must be provided"
+            )
+
+        # --- frequency setup (same as TransientLikelihoodFD) ---
+        _frequencies = self._set_detector_frequency_bounds(f_min, f_max)
+        if any(len(frequencies) < 2 for frequencies in _frequencies):
+            raise ValueError(
+                "Each detector frequency grid must contain at least 2 bins"
+            )
+        grid_metadata = [
+            (
+                len(frequencies),
+                float(jax.device_get(frequencies[0])),
+                float(jax.device_get(frequencies[-1])),
+                float(jax.device_get(frequencies[1] - frequencies[0])),
+            )
+            for frequencies in _frequencies
+        ]
+        spacings = [metadata[3] for metadata in grid_metadata]
+        if not all(np.isclose(spacings[0], spacing) for spacing in spacings[1:]):
+            raise ValueError("All detectors must have the same frequency spacing")
+
+        self.df = _frequencies[0][1] - _frequencies[0][0]
+        first_grid = grid_metadata[0]
+        if all(
+            metadata[0] == first_grid[0]
+            and metadata[1] == first_grid[1]
+            and metadata[2] == first_grid[2]
+            and metadata[3] == first_grid[3]
+            for metadata in grid_metadata[1:]
+        ):
+            self.frequencies = _frequencies[0]
+            self.identical_frequency_grids = True
+        else:
+            host_frequencies = [
+                np.asarray(jax.device_get(frequencies)) for frequencies in _frequencies
+            ]
+            merged_frequencies = np.unique(np.concatenate(host_frequencies))
+            self.frequencies = jnp.asarray(merged_frequencies)
+            self.identical_frequency_grids = False
+
+        # --- heterodyne setup ---
+        logger.info("Initializing heterodyned likelihood..")
+
+        if prepared_reference_parameters is not None:
+            self.reference_parameters = prepared_reference_parameters
             logger.info(
                 f"Found reference parameters, they are {self.reference_parameters}"
             )
-        elif prior:
+        elif prior is not None:
             logger.info("No reference parameters are provided, finding it...")
             reference_parameters = self.maximize_likelihood(
                 prior=prior,
@@ -1168,65 +1404,97 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
                 key: float(value) for key, value in reference_parameters.items()
             }
             logger.info(f"The reference parameters are {self.reference_parameters}")
-        else:
-            raise ValueError(
-                "Either reference parameters or parameter names must be provided"
-            )
         logger.info("Constructing reference waveforms..")
 
         self.reference_parameters["trigger_time"] = self.trigger_time
         self.reference_parameters["gmst"] = self.gmst
+        if self.phase_marginalization:
+            self.reference_parameters.setdefault("phase_c", 0.0)
+        if self.time_marginalization:
+            self.reference_parameters.setdefault("t_c", 0.0)
+        required_reference_parameters = set(self.waveform.parameter_names) | {
+            "ra",
+            "dec",
+            "psi",
+            "t_c",
+        }
+        missing_reference_parameters = required_reference_parameters - set(
+            self.reference_parameters
+        )
+        if missing_reference_parameters:
+            raise ValueError(
+                "heterodyne reference_parameters are incomplete; missing "
+                f"{sorted(missing_reference_parameters)}"
+            )
 
         self.waveform_low_ref = {}
         self.waveform_high_ref = {}
         self.summary_data = {}
 
-        if n_bins is not None:
-            if epsilon is not None:
-                raise ValueError(
-                    "'n_bins' and 'epsilon' are mutually exclusive; specify at most one."
-                )
-            elif n_bins <= 0:
-                raise ValueError(
-                    f"'n_bins' must be a positive integer, got {n_bins!r}."
-                )
-        elif epsilon is None:
-            epsilon = 0.5
-
         if epsilon is not None:
-            if epsilon <= 0:
-                raise ValueError(
-                    f"'epsilon' must be a positive number, got {epsilon!r}."
-                )
-            else:
-                freqs_arr = self.frequencies
-                phase = HeterodynedTransientLikelihoodFD._max_phase_diff(
-                    freqs_arr, freqs_arr[0], freqs_arr[-1]
-                )
-                n_bins = max(1, int(float(phase[-1]) / epsilon))
+            phase = HeterodynedTransientLikelihoodFD._max_phase_diff(
+                jnp.asarray((self.frequencies[0], self.frequencies[-1])),
+                self.frequencies[0],
+                self.frequencies[-1],
+            )
+            n_bins = max(1, int(float(phase[-1]) / epsilon))
         assert isinstance(n_bins, int)
+        if n_bins + 1 > _MAX_DIRECT_SUM_PHASOR_ELEMENTS:
+            raise ValueError(
+                f"heterodyne n_bins={n_bins} exceeds the bounded bin limit "
+                f"{_MAX_DIRECT_SUM_PHASOR_ELEMENTS - 1}"
+            )
         freq_grid = self._make_binning_scheme(self.frequencies, n_bins=n_bins)
 
-        ref_hpc = reference_waveform(self.frequencies, self.reference_parameters)
-        masked_freq_grid = self._mask_and_set_frequency_arrays(ref_hpc, freq_grid)
+        reference_support = self._find_reference_frequency_support(reference_waveform)
+        self._set_frequency_arrays_from_support(freq_grid, reference_support)
 
         hpc_low = reference_waveform(self.freq_grid_low, self.reference_parameters)
         hpc_high = reference_waveform(self.freq_grid_high, self.reference_parameters)
-
-        for i, detector in enumerate(self.detectors):
-            hpc_ifo = {key: ref_hpc[key][self.frequency_masks[i]] for key in ref_hpc}
-            waveform_ref = detector.fd_response(
-                detector.sliced_frequencies, hpc_ifo, self.reference_parameters
+        hpc_low, hpc_high = self._trim_reference_zero_edges(hpc_low, hpc_high)
+        bin_edges = np.asarray(
+            jax.device_get(self.freq_grid_edges),
+            dtype="<f8",
+        )
+        bin_digest = hashlib.sha256()
+        bin_digest.update(b"jimgw-xg-bin-edges-v1\0float64-le\0")
+        bin_digest.update(bin_edges.tobytes(order="C"))
+        self.bin_edges_sha256 = bin_digest.hexdigest()
+        if xg_plan is not None and self.bin_edges_sha256 != xg_plan.bin_edges_sha256:
+            raise ValueError(
+                "XG qualification bin edges do not match the retained reference support"
             )
-            self.waveform_low_ref[detector.name] = detector.fd_response(
+        masked_freq_grid = self.freq_grid_edges
+
+        for detector in self.detectors:
+            waveform_low_ref = detector.fd_response(
                 self.freq_grid_low, hpc_low, self.reference_parameters
             )
-            self.waveform_high_ref[detector.name] = detector.fd_response(
+            waveform_high_ref = detector.fd_response(
                 self.freq_grid_high, hpc_high, self.reference_parameters
             )
-            self.summary_data[detector.name] = self._compute_coefficients(
+            self._validate_reference_projection(
+                detector.name,
+                hpc_low,
+                waveform_low_ref,
+                "low",
+            )
+            self._validate_reference_projection(
+                detector.name,
+                hpc_high,
+                waveform_high_ref,
+                "high",
+            )
+            self.waveform_low_ref[detector.name] = waveform_low_ref
+            self.waveform_high_ref[detector.name] = waveform_high_ref
+
+        if time_marginalization is not None:
+            self._init_direct_sum_time_marginalization(time_marginalization)
+
+        for detector in self.detectors:
+            self.summary_data[detector.name] = self._compute_reference_coefficients(
                 detector,
-                waveform_ref,
+                reference_waveform,
                 masked_freq_grid,
             )
 
@@ -1276,6 +1544,13 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         waveform_sky_high: dict[str, Complex[Array, " n_bins"]],
     ) -> FloatScalar:
         """Core likelihood computation from physical-distance bin-edge polarizations."""
+        if self.time_marginalization:
+            return self._time_marginalized_likelihood(
+                params,
+                waveform_sky_low,
+                waveform_sky_high,
+            )
+
         frequencies_low = self.freq_grid_low
         frequencies_high = self.freq_grid_high
         log_likelihood: FloatScalar = jnp.zeros(())
@@ -1316,10 +1591,335 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
 
         return log_likelihood
 
+    def _time_marginalized_likelihood(
+        self,
+        params: dict[str, Float],
+        waveform_sky_low: dict[str, Complex[Array, " n_bins"]],
+        waveform_sky_high: dict[str, Complex[Array, " n_bins"]],
+    ) -> FloatScalar:
+        """Evaluate relative-bin summaries on the direct-sum time grid."""
+
+        network_low_coeff = jnp.zeros(self.n_bins, dtype=jnp.complex128)
+        network_high_coeff = jnp.zeros(self.n_bins, dtype=jnp.complex128)
+        optimal_snr: FloatScalar = jnp.zeros(())
+        inverse_width = 1.0 / self.bin_widths
+
+        for detector in self.detectors:
+            waveform_low = detector.fd_response(
+                self.freq_grid_low,
+                waveform_sky_low,
+                params,
+            )
+            waveform_high = detector.fd_response(
+                self.freq_grid_high,
+                waveform_sky_high,
+                params,
+            )
+            r_low = waveform_low / self.waveform_low_ref[detector.name]
+            r_high = waveform_high / self.waveform_high_ref[detector.name]
+
+            A0, A1, B0, B1 = self.summary_data[detector.name]
+            network_low_coeff += (0.5 * A0 - A1 * inverse_width) * r_low.conj()
+            network_high_coeff += (0.5 * A0 + A1 * inverse_width) * r_high.conj()
+
+            # A time translation has unit modulus. The relative-binning h-h
+            # approximation therefore needs one reduction, not one per time.
+            r0 = 0.5 * (r_low + r_high)
+            r1 = (r_high - r_low) * inverse_width
+            optimal_snr += jnp.sum(
+                B0 * jnp.abs(r0) ** 2 + 2.0 * B1 * (r0 * r1.conj()).real
+            ).real
+
+        network_match = self._direct_sum_network_match(
+            network_low_coeff,
+            network_high_coeff,
+        )
+        if self.phase_marginalization:
+            time_integrand = log_i0(jnp.absolute(network_match))
+        else:
+            time_integrand = network_match.real
+        time_integrand = jnp.where(
+            self._tc_valid_time_mask,
+            time_integrand,
+            -jnp.inf,
+        )
+
+        return (
+            -0.5 * optimal_snr
+            + logsumexp(time_integrand)
+            - jnp.log(self._tc_normalization_count)
+        )
+
+    def _init_direct_sum_time_marginalization(
+        self,
+        config: HeterodyneTimeMargConfig,
+    ) -> None:
+        """Construct the duration-independent direct-sum time reduction."""
+
+        duration = float(self.detectors[0].data.duration)
+        sampling_frequency = float(self.detectors[0].data.sampling_frequency)
+        n_total = int(duration * sampling_frequency / 2.0)
+        upsample_factor = int(config.upsample_factor)
+        fine_grid_size = n_total * upsample_factor
+        fine_step = duration / fine_grid_size
+        if config.normalization == "window":
+            # Midpoint quadrature covers the exact declared uniform-prior
+            # interval. Its spacing never exceeds the requested FFT-derived
+            # resolution, and equal weights sum to one without an endpoint
+            # or off-grid evidence offset.
+            prior_width = config.tc_range[1] - config.tc_range[0]
+            n_window = max(1, int(np.ceil(prior_width / fine_step)))
+            window_step = prior_width / n_window
+            tc_window = config.tc_range[0] + window_step * (np.arange(n_window) + 0.5)
+        else:
+            q_min = -(fine_grid_size // 2)
+            q_max = (fine_grid_size - 1) // 2
+            first = max(
+                q_min,
+                int(np.floor(config.tc_range[0] / fine_step)) + 1,
+            )
+            last = min(
+                q_max,
+                int(np.ceil(config.tc_range[1] / fine_step)) - 1,
+            )
+            tc_window = fine_step * np.arange(first, last + 1)
+
+        if tc_window.size == 0:
+            raise ValueError(
+                f"time_marginalization tc_range {config.tc_range} contains no "
+                "direct-sum time samples; widen the range"
+            )
+
+        self.tc_range = config.tc_range
+        self.tc_upsample = upsample_factor
+        self.tc_window = jnp.asarray(tc_window)
+        self._tc_normalization_count = (
+            fine_grid_size if config.normalization == "full_grid" else len(tc_window)
+        )
+        self.tc_normalization = config.normalization
+        self.freeze_time_dependent_response = config.freeze_response
+        n_phasor_frequencies = self.n_bins + 1
+        if n_phasor_frequencies > _MAX_DIRECT_SUM_PHASOR_ELEMENTS:
+            raise ValueError(
+                f"direct-sum n_bins={self.n_bins} exceeds the bounded phasor "
+                f"limit {_MAX_DIRECT_SUM_PHASOR_ELEMENTS}; reduce the bin plan"
+            )
+        self.tc_phasor_block_size = min(
+            int(config.phasor_block_size),
+            len(tc_window),
+        )
+        phasor_elements = self.tc_phasor_block_size * n_phasor_frequencies
+        if phasor_elements > _MAX_DIRECT_SUM_PHASOR_ELEMENTS:
+            maximum_block_size = max(
+                1,
+                _MAX_DIRECT_SUM_PHASOR_ELEMENTS // n_phasor_frequencies,
+            )
+            raise ValueError(
+                "direct-sum phasor block would contain "
+                f"{phasor_elements} elements; set phasor_block_size <= "
+                f"{maximum_block_size} for {self.n_bins} bins"
+            )
+        n_time_blocks = int(np.ceil(len(tc_window) / self.tc_phasor_block_size))
+        padded_size = n_time_blocks * self.tc_phasor_block_size
+        padded_times = np.zeros(padded_size)
+        padded_times[: len(tc_window)] = tc_window
+        valid_times = np.arange(padded_size) < len(tc_window)
+        self._tc_time_blocks = jnp.asarray(padded_times).reshape(
+            n_time_blocks,
+            self.tc_phasor_block_size,
+        )
+        self._tc_valid_time_mask = jnp.asarray(valid_times)
+
+    def _validate_direct_sum_time_resolution(
+        self,
+        config: HeterodyneTimeMargConfig,
+    ) -> None:
+        """Reject an underresolved time grid before reference construction."""
+
+        response_is_time_dependent = bool(
+            getattr(self.waveform, "time_dependent_response", False)
+            or getattr(self.waveform, "response_is_time_dependent", False)
+            or any(
+                getattr(detector, "time_dependent_response", False)
+                or getattr(detector, "response_is_time_dependent", False)
+                for detector in self.detectors
+            )
+        )
+        if response_is_time_dependent and not config.freeze_response:
+            raise ValueError(
+                "direct-sum time marginalization shifts only the carrier; set "
+                "freeze_response=true to acknowledge that a time-dependent "
+                "response and its h-h term are frozen at t_c=0"
+            )
+        if response_is_time_dependent and config.normalization != "window":
+            raise ValueError(
+                "time-dependent direct-sum marginalization requires "
+                "normalization='window'"
+            )
+        if response_is_time_dependent and config.timing_sigma_s is None:
+            raise ValueError(
+                "time-dependent direct-sum marginalization requires a finite "
+                "timing_sigma_s from the frozen science envelope"
+            )
+        if response_is_time_dependent and not (
+            config.tc_range[0] < 0.0 < config.tc_range[1]
+        ):
+            raise ValueError("the frozen response pivot t_c=0 must lie inside tc_range")
+
+        duration = float(self.detectors[0].data.duration)
+        if config.normalization == "window":
+            support_min = -0.5 * duration
+            support_max = 0.5 * duration
+            if config.tc_range[0] < support_min or config.tc_range[1] > support_max:
+                raise ValueError(
+                    "window-normalized tc_range must lie inside the centered "
+                    f"data duration [{support_min}, {support_max}] s"
+                )
+        sampling_frequency = float(self.detectors[0].data.sampling_frequency)
+        n_total = int(duration * sampling_frequency / 2.0)
+        fine_grid_size = n_total * int(config.upsample_factor)
+        fine_step = duration / fine_grid_size
+        if config.normalization == "window":
+            n_window = int(
+                np.ceil((config.tc_range[1] - config.tc_range[0]) / fine_step)
+            )
+        else:
+            q_min = -(fine_grid_size // 2)
+            q_max = (fine_grid_size - 1) // 2
+            first = max(q_min, int(np.floor(config.tc_range[0] / fine_step)) + 1)
+            last = min(q_max, int(np.ceil(config.tc_range[1] / fine_step)) - 1)
+            n_window = max(0, last - first + 1)
+        if n_window > _MAX_DIRECT_SUM_TIME_SAMPLES:
+            raise ValueError(
+                f"direct-sum time grid has {n_window} samples, above the bounded "
+                f"limit {_MAX_DIRECT_SUM_TIME_SAMPLES}; narrow tc_range or reduce "
+                "upsample_factor"
+            )
+
+        if config.timing_sigma_s is None:
+            return
+        maximum_step = config.timing_sigma_s / config.samples_per_timing_sigma
+        if fine_step > maximum_step:
+            required_upsample = int(np.ceil(duration / (n_total * maximum_step)))
+            raise ValueError(
+                "direct-sum time spacing "
+                f"{fine_step:.6g} s does not resolve timing_sigma_s="
+                f"{config.timing_sigma_s:.6g} s with "
+                f"{config.samples_per_timing_sigma} samples per sigma; "
+                f"set upsample_factor >= {required_upsample}"
+            )
+
+    def _direct_sum_network_match(
+        self,
+        network_low_coeff: Complex[Array, " n_bin"],
+        network_high_coeff: Complex[Array, " n_bin"],
+    ) -> Complex[Array, " n_time_padded"]:
+        """Generate bounded phasor blocks and evaluate the network match."""
+
+        edge_coefficients = jnp.concatenate(
+            (
+                network_low_coeff[:1],
+                network_high_coeff[:-1] + network_low_coeff[1:],
+                network_high_coeff[-1:],
+            )
+        )
+
+        def evaluate_block(times: Float[Array, " block_size"]):
+            return self._time_phasors(times, self.freq_grid_edges) @ edge_coefficients
+
+        block_matches = jax.lax.map(evaluate_block, self._tc_time_blocks)
+        return block_matches.reshape(-1)
+
+    @staticmethod
+    def _time_phasors(
+        times: Float[Array, " n_time"],
+        frequencies: Float[Array, " n_bin"],
+    ) -> Complex[Array, "n_time n_bin"]:
+        """Return conjugate time phasors for ``data * h.conj()`` summaries."""
+
+        angle = (2.0 * jnp.pi) * times[:, None] * frequencies[None, :]
+        return jax.lax.complex(jnp.cos(angle), jnp.sin(angle))
+
     # --- relative-binning setup helpers ---
 
-    def _make_binning_scheme(
+    def _trim_reference_zero_edges(
         self,
+        waveform_low: Mapping[str, Array],
+        waveform_high: Mapping[str, Array],
+    ) -> tuple[dict[str, Array], dict[str, Array]]:
+        """Trim outer bins whose source waveform vanishes at either endpoint."""
+
+        def physical_amplitude(waveform: Mapping[str, Array]) -> np.ndarray:
+            physical = [
+                np.abs(np.asarray(jax.device_get(value)))
+                for name, value in waveform.items()
+                if not name.startswith("__")
+            ]
+            if not physical:
+                raise ValueError("reference waveform has no physical polarizations")
+            return np.sum(np.stack(physical), axis=0)
+
+        valid = (physical_amplitude(waveform_low) > 0) & (
+            physical_amplitude(waveform_high) > 0
+        )
+        valid_indices = np.flatnonzero(valid)
+        if valid_indices.size == 0:
+            raise ValueError("reference waveform has no nonzero heterodyne bins")
+        first = int(valid_indices[0])
+        stop = int(valid_indices[-1]) + 1
+        if not np.all(valid[first:stop]):
+            raise ValueError(
+                "reference waveform has an internal zero that cannot be represented "
+                "by one contiguous heterodyne bin plan"
+            )
+
+        self.freq_grid_edges = self.freq_grid_edges[first : stop + 1]
+        self.freq_grid_low = self.freq_grid_edges[:-1]
+        self.freq_grid_high = self.freq_grid_edges[1:]
+        self.n_bins = stop - first
+        self.bin_widths = self.freq_grid_high - self.freq_grid_low
+        return (
+            {name: value[first:stop] for name, value in waveform_low.items()},
+            {name: value[first:stop] for name, value in waveform_high.items()},
+        )
+
+    @staticmethod
+    def _validate_reference_projection(
+        detector_name: str,
+        source_polarizations: Mapping[str, Array],
+        projected_reference: Array,
+        edge_name: str,
+    ) -> None:
+        """Reject detector-reference nulls that make waveform ratios unstable."""
+
+        physical = [
+            np.abs(np.asarray(jax.device_get(value)))
+            for name, value in source_polarizations.items()
+            if not name.startswith("__")
+        ]
+        if not physical:
+            raise ValueError("reference waveform has no physical polarizations")
+        source_scale = np.sum(np.stack(physical), axis=0)
+        projected_amplitude = np.abs(np.asarray(jax.device_get(projected_reference)))
+        relative_amplitude = np.divide(
+            projected_amplitude,
+            source_scale,
+            out=np.zeros_like(projected_amplitude, dtype=float),
+            where=source_scale > 0,
+        )
+        invalid = (~np.isfinite(relative_amplitude)) | (
+            relative_amplitude <= _MIN_RELATIVE_BIN_REFERENCE_RESPONSE
+        )
+        if np.any(invalid):
+            minimum = float(np.min(relative_amplitude))
+            raise ValueError(
+                f"heterodyne reference projection for detector {detector_name!r} "
+                f"has a {edge_name}-edge response null (minimum relative "
+                f"amplitude {minimum:.3g}); choose a non-null fixed reference"
+            )
+
+    @staticmethod
+    def _make_binning_scheme(
         freqs: Float[Array, " n_freq"],
         n_bins: int,
         chi: float = 1.0,
@@ -1329,44 +1929,141 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         ``n_bins`` must be a positive integer resolved by the caller
         (see :meth:`__init__`).
         """
-        phase_diff_array = self._max_phase_diff(freqs, freqs[0], freqs[-1], chi=chi)
-        total_phase = phase_diff_array[-1]
-        phase_diff = jnp.linspace(0.0, total_phase, n_bins + 1)
-        f_bins = interp1d(phase_diff_array, freqs)(phase_diff)
-        return jnp.array(f_bins)
+        f_low = float(freqs[0])
+        f_high = float(freqs[-1])
+        if not np.isfinite(f_low) or not np.isfinite(f_high) or f_low >= f_high:
+            raise ValueError(
+                "heterodyne frequency support must be finite and increasing"
+            )
+
+        gamma = np.asarray((-5.0, -2.0, 3.0, 5.0, 7.0)) / 3.0
+        f_star = np.where(gamma >= 0.0, f_high, f_low)
+
+        def phase_envelope(frequency: np.ndarray) -> np.ndarray:
+            scaled = frequency[:, None] / f_star[None, :]
+            raw = (2.0 * np.pi * chi) * np.sum(
+                np.power(scaled, gamma[None, :]) * np.sign(gamma)[None, :],
+                axis=1,
+            )
+            return raw
+
+        endpoint_phase = phase_envelope(np.asarray((f_low, f_high)))
+        target_phase = np.linspace(
+            endpoint_phase[0],
+            endpoint_phase[1],
+            n_bins + 1,
+        )
+
+        # The envelope derivative is strictly positive because every term has
+        # sign(gamma) * gamma > 0. Vector bisection therefore gives the exact
+        # continuous bin edges with O(n_bins) memory, independent of the dense
+        # data duration.
+        lower = np.full(n_bins + 1, f_low)
+        upper = np.full(n_bins + 1, f_high)
+        for _ in range(52):
+            midpoint = 0.5 * (lower + upper)
+            below_target = phase_envelope(midpoint) < target_phase
+            lower = np.where(below_target, midpoint, lower)
+            upper = np.where(below_target, upper, midpoint)
+
+        f_bins = 0.5 * (lower + upper)
+        f_bins[0] = f_low
+        f_bins[-1] = f_high
+        return jnp.asarray(f_bins)
 
     def _mask_and_set_frequency_arrays(
         self,
         waveform: dict[str, Complex[Array, " n_freq"]],
         frequencies: Float[Array, " n_freq"],
     ) -> Float[Array, " n_valid+1"]:
-        """
-        Mask out trivial waveform pieces which are usually beyond merger frequency.
+        """Set bin endpoints after removing zero-valued reference support."""
 
-        This is to avoid creating NaNs from 0/0 when computing the r0 and r1,
-        where the ratios between waveforms are taken.
-
-        Remark:
-            The following operations change array shapes dynamically, which is
-            not jittable. In the future, if jax.jit is preferable, this has to
-            be scrapped, and then when computing the likelihood (inside _likelihood),
-            replace jnp.sum with jnp.nansum.
-            The current implementation has the advantage of greatly reducing memory
-            usage when the detector f_max is larger than merger frequency.
-        """
-        h_amp = jnp.array([jnp.abs(p) for p in waveform.values()]).sum(axis=0)
+        physical_polarizations = [
+            polarization
+            for name, polarization in waveform.items()
+            if not name.startswith("__")
+        ]
+        if not physical_polarizations:
+            raise ValueError("reference waveform has no physical polarizations")
+        h_amp = jnp.array([jnp.abs(p) for p in physical_polarizations]).sum(axis=0)
         _valid_frequencies = self.frequencies[h_amp > 0]
-        valid_mask = (frequencies >= _valid_frequencies[0]) & (
-            frequencies <= _valid_frequencies[-1]
+        return self._set_frequency_arrays_from_support(
+            frequencies,
+            (
+                float(_valid_frequencies[0]),
+                float(_valid_frequencies[-1]),
+            ),
         )
 
-        masked_frequencies = frequencies[valid_mask]
-        self.freq_grid_low = masked_frequencies[:-1]
-        self.freq_grid_high = masked_frequencies[1:]
-        self.n_bins = len(masked_frequencies) - 1
-        self.bin_widths = self.freq_grid_high - self.freq_grid_low
+    def _find_reference_frequency_support(
+        self,
+        reference_waveform: Waveform,
+    ) -> tuple[float, float]:
+        """Find the outer nonzero support with bounded endpoint scans."""
 
-        return masked_frequencies
+        n_frequencies = len(self.frequencies)
+
+        def valid_chunk(start: int, stop: int) -> tuple[np.ndarray, np.ndarray]:
+            chunk_frequencies = self.frequencies[start:stop]
+            polarizations = reference_waveform(
+                chunk_frequencies,
+                self.reference_parameters,
+            )
+            amplitude = np.zeros(stop - start)
+            for name, polarization in polarizations.items():
+                if name.startswith("__"):
+                    continue
+                amplitude += np.abs(np.asarray(jax.device_get(polarization)))
+            return (
+                np.asarray(jax.device_get(chunk_frequencies)),
+                np.flatnonzero(amplitude > 0),
+            )
+
+        first_frequency: float | None = None
+        for start in range(0, n_frequencies, self.reference_chunk_size):
+            stop = min(start + self.reference_chunk_size, n_frequencies)
+            host_frequencies, valid = valid_chunk(start, stop)
+            if valid.size:
+                first_frequency = float(host_frequencies[valid[0]])
+                break
+
+        if first_frequency is None:
+            raise ValueError("reference waveform is zero throughout the analysis band")
+
+        last_frequency: float | None = None
+        for stop in range(n_frequencies, 0, -self.reference_chunk_size):
+            start = max(0, stop - self.reference_chunk_size)
+            host_frequencies, valid = valid_chunk(start, stop)
+            if valid.size:
+                last_frequency = float(host_frequencies[valid[-1]])
+                break
+
+        if last_frequency is None:
+            raise RuntimeError("failed to recover the final reference support sample")
+        return first_frequency, last_frequency
+
+    def _set_frequency_arrays_from_support(
+        self,
+        frequencies: Float[Array, " n_freq"],
+        support: tuple[float, float],
+    ) -> Float[Array, " n_valid+1"]:
+        """Set static bin endpoints for a fixed nonzero support interval."""
+
+        host_frequencies = np.asarray(jax.device_get(frequencies))
+        valid = (host_frequencies >= support[0]) & (host_frequencies <= support[1])
+        masked_frequencies = host_frequencies[valid]
+        if masked_frequencies.size < 2:
+            raise ValueError(
+                "reference waveform support contains fewer than two bin edges"
+            )
+
+        masked_frequencies_array = jnp.asarray(masked_frequencies)
+        self.freq_grid_edges = masked_frequencies_array
+        self.freq_grid_low = masked_frequencies_array[:-1]
+        self.freq_grid_high = masked_frequencies_array[1:]
+        self.n_bins = len(masked_frequencies_array) - 1
+        self.bin_widths = self.freq_grid_high - self.freq_grid_low
+        return masked_frequencies_array
 
     @staticmethod
     def _max_phase_diff(
@@ -1400,40 +2097,101 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         h_ref: Complex[Array, " n_freq"],
         f_bins: Float[Array, " n_valid+1"],
     ) -> Complex[Array, "4 n_valid"]:
-        data = detector.sliced_fd_data
-        psd = detector.sliced_psd
-        freqs = detector.sliced_frequencies
+        """Compute summaries with one bin-index array, never a dense mask."""
 
-        data_prod = jnp.array(data * h_ref.conj()) / psd
-        self_prod = jnp.array(h_ref * h_ref.conj()) / psd
-
-        # Broadcasting for 2D frequencies
-        freqs_broadcast = freqs[None, :]  # Shape: (1, n_freq)
-        freq_bins_left = f_bins[:-1][:, None]  # Shpae: (n_valid, 1)
-        freq_bins_right = f_bins[1:][:, None]  # Shape: (n_valid, 1)
-        freq_bins_center = (freq_bins_left + freq_bins_right) / 2
-
-        # Shape: (n_valid, n_freq)
-        mask = (freqs_broadcast >= freq_bins_left) & (freqs_broadcast < freq_bins_right)
-        # The half-open interval [left, right) excludes any frequency that lands
-        # exactly on the upper edge of the last bin (f_bins[-1]).  This happens
-        # whenever the interpolated bin edge coincides with the last discrete
-        # frequency sample (common when the waveform reaches f_max).  Extend the
-        # last row to a closed interval by OR-ing in the equality condition.
-        mask = mask.at[-1].set(mask[-1] | (freqs == f_bins[-1]))
-        freq_shift_matrix = (freqs_broadcast - freq_bins_center) * mask
-
-        # The resultant arrays have shape (n_valid), the dimension with "n_freq" is summed over.
-        summary_data = jnp.array(
-            [
-                jnp.sum(data_prod[None, :] * mask, axis=1),  # A0
-                jnp.sum(data_prod[None, :] * freq_shift_matrix, axis=1),  # A1
-                jnp.sum(self_prod[None, :] * mask, axis=1),  # B0
-                jnp.sum(self_prod[None, :] * freq_shift_matrix, axis=1),  # B1
-            ]
+        summary = HeterodynedTransientLikelihoodFD._segmented_coefficient_sums(
+            data=np.asarray(jax.device_get(detector.sliced_fd_data)),
+            psd=np.asarray(jax.device_get(detector.sliced_psd)),
+            frequencies=np.asarray(jax.device_get(detector.sliced_frequencies)),
+            reference=np.asarray(jax.device_get(h_ref)),
+            bins=np.asarray(jax.device_get(f_bins)),
         )
+        return jnp.asarray((4.0 / float(detector.duration)) * summary)
 
-        return 4 / detector.duration * summary_data
+    def _compute_reference_coefficients(
+        self,
+        detector: Detector,
+        reference_waveform: Waveform,
+        f_bins: Float[Array, " n_valid+1"],
+    ) -> Complex[Array, "4 n_valid"]:
+        """Stream fixed-reference summaries in bounded frequency chunks."""
+
+        bins = np.asarray(jax.device_get(f_bins))
+        n_frequencies = len(detector.sliced_frequencies)
+        if n_frequencies <= self.reference_chunk_size:
+            frequencies = detector.sliced_frequencies
+            polarizations = reference_waveform(
+                frequencies,
+                self.reference_parameters,
+            )
+            reference = detector.fd_response(
+                frequencies,
+                polarizations,
+                self.reference_parameters,
+            )
+            return self._compute_coefficients(detector, reference, f_bins)
+
+        summary = np.zeros((4, len(bins) - 1), dtype=np.complex128)
+        for start in range(0, n_frequencies, self.reference_chunk_size):
+            stop = min(start + self.reference_chunk_size, n_frequencies)
+            frequencies = detector.sliced_frequencies[start:stop]
+            polarizations = reference_waveform(
+                frequencies,
+                self.reference_parameters,
+            )
+            reference = detector.fd_response(
+                frequencies,
+                polarizations,
+                self.reference_parameters,
+            )
+            summary += self._segmented_coefficient_sums(
+                data=np.asarray(jax.device_get(detector.sliced_fd_data[start:stop])),
+                psd=np.asarray(jax.device_get(detector.sliced_psd[start:stop])),
+                frequencies=np.asarray(jax.device_get(frequencies)),
+                reference=np.asarray(jax.device_get(reference)),
+                bins=bins,
+            )
+        return jnp.asarray((4.0 / float(detector.duration)) * summary)
+
+    @staticmethod
+    def _segmented_coefficient_sums(
+        *,
+        data: np.ndarray,
+        psd: np.ndarray,
+        frequencies: np.ndarray,
+        reference: np.ndarray,
+        bins: np.ndarray,
+    ) -> np.ndarray:
+        """Accumulate unnormalized A0, A1, B0, and B1 bin summaries."""
+
+        n_bins = len(bins) - 1
+        if n_bins <= 0 or np.any(np.diff(bins) <= 0):
+            raise ValueError("heterodyne frequency-bin edges must be increasing")
+
+        indices = np.searchsorted(bins, frequencies, side="right") - 1
+        indices = np.where(frequencies == bins[-1], n_bins - 1, indices)
+        valid = (indices >= 0) & (indices < n_bins)
+        indices = indices[valid]
+        selected_frequencies = frequencies[valid]
+        centers = 0.5 * (bins[:-1] + bins[1:])
+        shifts = selected_frequencies - centers[indices]
+
+        data_product = (data * reference.conj() / psd)[valid]
+        self_product = (reference * reference.conj() / psd)[valid]
+
+        def segmented_sum(values: np.ndarray) -> np.ndarray:
+            result = np.zeros(n_bins, dtype=values.dtype)
+            np.add.at(result, indices, values)
+            return result
+
+        return np.stack(
+            (
+                segmented_sum(data_product),
+                segmented_sum(data_product * shifts),
+                segmented_sum(self_product),
+                segmented_sum(self_product * shifts),
+            )
+        )
 
     # --- reference-parameter optimization ---
 
@@ -1664,6 +2422,21 @@ class MultibandedTransientLikelihoodFD(SingleEventLikelihood):
     ):
 
         super().__init__(detectors, waveform, fixed_parameters)
+
+        xg_response = bool(
+            getattr(self.waveform, "time_dependent_response", False)
+            or getattr(self.waveform, "response_is_time_dependent", False)
+            or any(
+                getattr(detector, "time_dependent_response", False)
+                or getattr(detector, "response_is_time_dependent", False)
+                or getattr(detector, "finite_arm_response", False)
+                for detector in self.detectors
+            )
+        )
+        if xg_response:
+            raise ValueError(
+                "XG detector responses are not qualified with the multiband likelihood"
+            )
 
         logger.info("Initializing multi-banded likelihood...")
 

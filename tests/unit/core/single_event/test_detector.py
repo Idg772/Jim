@@ -109,6 +109,39 @@ class TestInjectSignal:
 
         assert_all_in_range(det.sliced_frequencies, F_MIN, F_MAX)
 
+    def test_chunked_injection_matches_single_chunk_projection(self):
+        chunked = make_detector()
+        chunked.inject_signal(
+            duration=DURATION,
+            sampling_frequency=SAMPLING_FREQUENCY,
+            trigger_time=GPS_TIME,
+            waveform_model=RippleIMRPhenomD(f_ref=20.0),
+            parameters=REFERENCE_PARAMS,
+            f_min=F_MIN,
+            f_max=F_MAX,
+            zero_noise=True,
+            waveform_chunk_size=17,
+        )
+        single_chunk = make_detector()
+        single_chunk.inject_signal(
+            duration=DURATION,
+            sampling_frequency=SAMPLING_FREQUENCY,
+            trigger_time=GPS_TIME,
+            waveform_model=RippleIMRPhenomD(f_ref=20.0),
+            parameters=REFERENCE_PARAMS,
+            f_min=F_MIN,
+            f_max=F_MAX,
+            zero_noise=True,
+            waveform_chunk_size=100_000,
+        )
+
+        np.testing.assert_allclose(
+            chunked.data.fd,
+            single_chunk.data.fd,
+            rtol=2e-13,
+            atol=2e-13,
+        )
+
     def test_noisy_injection_differs_from_zero_noise(self):
         """Adding noise produces data that differs from the zero-noise case."""
         det_clean = make_detector()
@@ -247,24 +280,36 @@ def test_enabling_finite_arm_response_without_metadata_fails_closed():
 
 
 def test_finite_arm_transfer_matches_reference_formula_and_zero_frequency_limit():
-    frequency = np.array([0.0, 37.0, 513.0, 3_000.0])
-    direction_cosine = np.array([-0.9, -0.25, 0.4, 0.95])
+    frequency = np.array([37.0, 513.0, 3_000.0])
+    direction_cosine = np.array([-0.9, -0.25, 0.4])
     arm_length_m = 40_000.0
-    x = frequency * arm_length_m / C_SI
-    reference = 0.5 * (
-        np.exp(-1j * np.pi * x * (1.0 + direction_cosine))
-        * np.sinc(x * (1.0 - direction_cosine))
-        + np.exp(1j * np.pi * x * (1.0 - direction_cosine))
-        * np.sinc(x * (1.0 + direction_cosine))
+    expected = np.asarray(
+        [
+            0.9987960412044885 - 0.04495412025027641j,
+            0.8573935336800160 - 0.4514702806266361j,
+            0.05407716762215714 - 0.2753005453324634j,
+        ]
     )
 
     result = finite_arm_transfer(frequency, direction_cosine, arm_length_m)
 
-    np.testing.assert_allclose(result, reference, rtol=1e-13, atol=1e-14)
+    np.testing.assert_allclose(result, expected, rtol=1e-13, atol=1e-14)
     np.testing.assert_array_equal(
-        finite_arm_transfer(jnp.zeros(3), direction_cosine[:3], arm_length_m),
+        finite_arm_transfer(jnp.zeros(3), direction_cosine, arm_length_m),
         jnp.ones(3, dtype=jnp.complex128),
     )
+
+
+def test_finite_arm_transfer_matches_published_low_frequency_slope():
+    arm_length_m = 40_000.0
+    direction_cosine = jnp.asarray([-0.8, 0.0, 0.65])
+    x = 1.0e-7
+    frequency = x * C_SI / arm_length_m
+    transfer = finite_arm_transfer(frequency, direction_cosine, arm_length_m)
+    slope = (transfer - 1.0) / x
+    expected = -1j * np.pi * (2.0 - np.asarray(direction_cosine))
+
+    np.testing.assert_allclose(slope, expected, rtol=1e-6, atol=2e-6)
 
 
 def test_frequency_dependent_antenna_pattern_has_long_wavelength_limit():
@@ -323,12 +368,8 @@ def test_fd_response_can_opt_in_per_call_or_from_detector_configuration():
     }
 
     default = detector.fd_response(frequency, h_sky, params)
-    explicit_static = detector.fd_response(
-        frequency, h_sky, params, finite_arm=False
-    )
-    explicit_finite = detector.fd_response(
-        frequency, h_sky, params, finite_arm=True
-    )
+    explicit_static = detector.fd_response(frequency, h_sky, params, finite_arm=False)
+    explicit_finite = detector.fd_response(frequency, h_sky, params, finite_arm=True)
     detector.finite_arm_response = True
     configured_finite = detector.fd_response(frequency, h_sky, params)
 
@@ -364,9 +405,7 @@ def test_time_dependent_response_requires_and_consumes_emission_clock():
         params,
     )
     gmst = emission_gmst(params["gmst"], params["t_c"], tau)
-    m, n, omega = detector._wave_frame(
-        params["ra"], params["dec"], params["psi"], gmst
-    )
+    m, n, omega = detector._wave_frame(params["ra"], params["dec"], params["psi"], gmst)
     expected_patterns = {
         polarization.name: jnp.einsum(
             "ij,ij...->...",

@@ -21,9 +21,10 @@ def _fake_likelihood(
     fixed_parameters: dict | None = None,
     waveform_caches_distance: bool = False,
     cacheable_parameter_names: frozenset[str] = frozenset(),
+    cache_dependency_parameter_names: frozenset[str] | None = None,
 ) -> SimpleNamespace:
     """Minimal duck-typed stand-in exposing only what the module reads."""
-    return SimpleNamespace(
+    likelihood = SimpleNamespace(
         waveform=SimpleNamespace(
             parameter_names=waveform_parameter_names,
             cacheable_parameter_names=cacheable_parameter_names,
@@ -31,6 +32,11 @@ def _fake_likelihood(
         fixed_parameters=fixed_parameters or {},
         waveform_caches_distance=waveform_caches_distance,
     )
+    if cache_dependency_parameter_names is not None:
+        likelihood.waveform_cache_dependency_parameter_names = (
+            cache_dependency_parameter_names
+        )
+    return likelihood
 
 
 class TestValidateParameterBlocks:
@@ -183,6 +189,51 @@ class TestInferWaveformSamplingDependencies:
             likelihood_transforms=[],
         )
         assert deps == {"a"}
+
+    def test_declared_emission_time_dependency_rebuilds_source_cache(self):
+        likelihood = _fake_likelihood(
+            waveform_parameter_names=("iota", "d_L"),
+            waveform_caches_distance=True,
+            cacheable_parameter_names=frozenset({"iota", "d_L"}),
+            cache_dependency_parameter_names=frozenset({"M_c", "eta"}),
+        )
+        deps = _infer_waveform_sampling_dependencies(
+            likelihood,
+            parameter_names=("M_c", "eta", "iota", "d_L", "ra"),
+            sample_transforms=[],
+            likelihood_transforms=[],
+        )
+        assert deps == {"M_c", "eta"}
+
+    def test_declared_emission_time_dependency_follows_transform(self):
+        likelihood = _fake_likelihood(
+            waveform_parameter_names=("iota",),
+            cacheable_parameter_names=frozenset({"iota"}),
+            cache_dependency_parameter_names=frozenset({"eta"}),
+        )
+        likelihood_transform = NtoMTransform(name_mapping=(["q"], ["eta"]))
+        deps = _infer_waveform_sampling_dependencies(
+            likelihood,
+            parameter_names=("q", "iota"),
+            sample_transforms=[],
+            likelihood_transforms=[likelihood_transform],
+        )
+        assert deps == {"q"}
+
+    def test_unknown_declared_cache_dependency_fails_closed(self):
+        likelihood = _fake_likelihood(
+            waveform_parameter_names=("iota",),
+            cacheable_parameter_names=frozenset({"iota"}),
+            cache_dependency_parameter_names=frozenset({"misspelled_mass"}),
+        )
+
+        with pytest.raises(ValueError, match="misspelled_mass"):
+            _infer_waveform_sampling_dependencies(
+                likelihood,
+                parameter_names=("iota",),
+                sample_transforms=[],
+                likelihood_transforms=[],
+            )
 
 
 class TestBuildRebuildRequiredByBlock:

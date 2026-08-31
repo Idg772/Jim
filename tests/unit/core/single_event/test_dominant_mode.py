@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from jaxtyping import Array, Complex, Float
-from ripplegw.interfaces import FrequencyDomainWaveform
+from ripplegw.interfaces import DistanceScaledWaveform, FrequencyDomainWaveform
 
 from jimgw.core.single_event.dominant_mode import (
     TIME_TO_COALESCENCE_KEY,
@@ -39,6 +39,7 @@ class _CustomCacheWaveform(FrequencyDomainWaveform):
         "domain": "FD",
         "is_precessing": False,
         "source_type": "cbc",
+        "dominant_mode_only": True,
     }
 
     def __init__(self):
@@ -118,6 +119,13 @@ def test_unit_distance_cache_scales_only_physical_polarizations():
         np.asarray(first[TIME_TO_COALESCENCE_KEY]),
     )
 
+    inclined_params = {**params, "d_L": 250.0, "iota": 1.1}
+    inclined = waveform.waveform_from_cache(frequency, inclined_params, cache)
+    direct = waveform(frequency, inclined_params)
+    np.testing.assert_allclose(np.asarray(inclined["p"]), np.asarray(direct["p"]))
+    np.testing.assert_allclose(np.asarray(inclined["c"]), np.asarray(direct["c"]))
+    assert "iota" in waveform.cacheable_parameter_names
+
 
 def test_adapter_delegates_custom_iota_and_distance_reconstruction():
     source = _CustomCacheWaveform()
@@ -192,6 +200,53 @@ def test_adapter_requires_timing_and_distance_parameters():
 
     with pytest.raises(ValueError, match="missing"):
         DominantModeTimeCachedWaveform(IncompleteWaveform())
+
+
+def test_custom_cache_must_explicitly_reconstruct_distance():
+    class DistanceScaledCustomCache(
+        FrequencyDomainWaveform,
+        DistanceScaledWaveform,
+    ):
+        f_ref = 20.0
+        waveform_metadata: ClassVar[dict[str, object]] = {
+            "domain": "FD",
+            "dominant_mode_only": True,
+        }
+
+        @property
+        def parameter_names(self):
+            return ("M_c", "eta", "s1_z", "s2_z", "d_L", "iota")
+
+        @property
+        def cacheable_parameter_names(self):
+            return frozenset(("iota",))
+
+        def __call__(self, frequency, params):
+            carrier = frequency / params["d_L"]
+            return {"p": carrier + 0j, "c": -1j * carrier}
+
+        def build_waveform_cache(self, frequency, params):
+            return {"carrier_with_distance": frequency / params["d_L"]}
+
+        def waveform_from_cache(self, frequency, params, cache):
+            del frequency, params
+            carrier = cache["carrier_with_distance"]
+            return {"p": carrier + 0j, "c": -1j * carrier}
+
+    with pytest.raises(TypeError, match="explicitly declare d_L cacheable"):
+        DominantModeTimeCachedWaveform(DistanceScaledCustomCache())
+
+
+def test_adapter_rejects_unknown_combined_backend_without_positive_capability():
+    class UnknownCombinedWaveform(_CustomCacheWaveform):
+        waveform_metadata: ClassVar[dict[str, object]] = {
+            "domain": "FD",
+            "is_precessing": False,
+            "source_type": "cbc",
+        }
+
+    with pytest.raises(ValueError, match="does not explicitly declare"):
+        DominantModeTimeCachedWaveform(UnknownCombinedWaveform())
 
 
 def test_adapter_rejects_reserved_or_non_tensor_output_leaves():

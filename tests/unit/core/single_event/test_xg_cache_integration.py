@@ -30,12 +30,8 @@ def _cache_digest(cache) -> str:
 @pytest.mark.parametrize("finite_arm_response", [False, True])
 def test_rotating_response_reuses_only_intrinsic_source_cache(finite_arm_response):
     detector = get_H1()
-    detector.set_data(
-        Data.from_file(str(FIXTURES_DIR / "GW150914_strain_H1.npz"))
-    )
-    detector.set_psd(
-        PowerSpectrum.from_file(str(FIXTURES_DIR / "GW150914_psd_H1.npz"))
-    )
+    detector.set_data(Data.from_file(str(FIXTURES_DIR / "GW150914_strain_H1.npz")))
+    detector.set_psd(PowerSpectrum.from_file(str(FIXTURES_DIR / "GW150914_psd_H1.npz")))
     detector.time_dependent_response = True
     detector.finite_arm_response = finite_arm_response
     waveform = DominantModeTimeCachedWaveform(RippleIMRPhenomD(f_ref=20.0))
@@ -66,6 +62,7 @@ def test_rotating_response_reuses_only_intrinsic_source_cache(finite_arm_respons
         {**params, "ra": 5.8, "dec": 0.7, "psi": 1.1},
         {**params, "t_c": 0.04},
         {**params, "d_L": 900.0},
+        {**params, "iota": 1.2},
     )
 
     for proposal in proposals:
@@ -75,13 +72,11 @@ def test_rotating_response_reuses_only_intrinsic_source_cache(finite_arm_respons
         assert _cache_digest(cache) == initial_digest
 
     cached_gradient = jax.grad(
-        lambda tc: likelihood.evaluate_from_waveform(
-            {**params, "t_c": tc}, cache
-        )
+        lambda tc: likelihood.evaluate_from_waveform({**params, "t_c": tc}, cache)
     )(jnp.asarray(0.01))
-    rebuilt_gradient = jax.grad(
-        lambda tc: likelihood.evaluate({**params, "t_c": tc})
-    )(jnp.asarray(0.01))
+    rebuilt_gradient = jax.grad(lambda tc: likelihood.evaluate({**params, "t_c": tc}))(
+        jnp.asarray(0.01)
+    )
     np.testing.assert_allclose(
         cached_gradient,
         rebuilt_gradient,

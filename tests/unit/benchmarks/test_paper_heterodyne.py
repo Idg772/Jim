@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax.scipy.special import logsumexp
 
 from benchmarks.device_parallel_nss.paper_heterodyne import (
     PaperTimeMarginalizedHeterodynedLikelihoodFD,
@@ -54,7 +55,7 @@ def _parameters() -> dict[str, float]:
     }
 
 
-def _heterodyne(*, n_bins: int = 5000):
+def _heterodyne(*, n_bins: int = 5000, phase_marginalization: bool = True):
     ifos, waveform = _problem()
     return PaperTimeMarginalizedHeterodynedLikelihoodFD(
         detectors=ifos,
@@ -64,7 +65,7 @@ def _heterodyne(*, n_bins: int = 5000):
         trigger_time=GPS,
         n_bins=n_bins,
         reference_parameters=_parameters(),
-        phase_marginalization=True,
+        phase_marginalization=phase_marginalization,
         time_marginalization={"tc_range": TC_RANGE},
     )
 
@@ -149,14 +150,101 @@ def test_segmented_coefficients_match_parent_dense_builder() -> None:
     )
     edges = jnp.concatenate((heterodyne.freq_grid_low, heterodyne.freq_grid_high[-1:]))
 
-    dense = HeterodynedTransientLikelihoodFD._compute_coefficients(
-        detector,
-        reference,
-        edges,
+    frequencies = detector.sliced_frequencies[None, :]
+    left = edges[:-1, None]
+    right = edges[1:, None]
+    centers = 0.5 * (left + right)
+    mask = (frequencies >= left) & (frequencies < right)
+    mask = mask.at[-1].set(mask[-1] | (frequencies[0] == edges[-1]))
+    shifts = (frequencies - centers) * mask
+    data_product = detector.sliced_fd_data * reference.conj() / detector.sliced_psd
+    self_product = reference * reference.conj() / detector.sliced_psd
+    dense = (4.0 / detector.duration) * jnp.stack(
+        (
+            jnp.sum(data_product[None, :] * mask, axis=1),
+            jnp.sum(data_product[None, :] * shifts, axis=1),
+            jnp.sum(self_product[None, :] * mask, axis=1),
+            jnp.sum(self_product[None, :] * shifts, axis=1),
+        )
     )
     segmented = heterodyne._compute_coefficients(detector, reference, edges)
     np.testing.assert_allclose(segmented, dense, rtol=2e-13, atol=2e-13)
     assert heterodyne.coefficient_builder == "numpy-segmented-v1"
+
+
+@pytest.mark.parametrize("phase_marginalization", [False, True])
+def test_supported_core_matches_benchmark_direct_sum(
+    phase_marginalization: bool,
+) -> None:
+    benchmark_likelihood = _heterodyne(
+        n_bins=128,
+        phase_marginalization=phase_marginalization,
+    )
+    ifos, waveform = _problem()
+    supported = HeterodynedTransientLikelihoodFD(
+        detectors=ifos,
+        waveform=waveform,
+        f_min=F_MIN,
+        f_max=F_MAX,
+        trigger_time=GPS,
+        n_bins=128,
+        reference_parameters=_parameters(),
+        phase_marginalization=phase_marginalization,
+        time_marginalization={
+            "tc_range": TC_RANGE,
+            "phasor_block_size": 11,
+        },
+    )
+
+    np.testing.assert_allclose(
+        supported.evaluate(_parameters()),
+        benchmark_likelihood.evaluate(_parameters()),
+        rtol=2e-13,
+        atol=2e-13,
+    )
+
+
+@pytest.mark.parametrize("phase_marginalization", [False, True])
+def test_window_normalized_direct_sum_matches_explicit_time_quadrature(
+    phase_marginalization: bool,
+) -> None:
+    ifos, waveform = _problem()
+    compressed = HeterodynedTransientLikelihoodFD(
+        detectors=ifos,
+        waveform=waveform,
+        f_min=F_MIN,
+        f_max=F_MAX,
+        trigger_time=GPS,
+        n_bins=5000,
+        reference_parameters=_parameters(),
+        phase_marginalization=phase_marginalization,
+        time_marginalization={
+            "tc_range": TC_RANGE,
+            "normalization": "window",
+            "phasor_block_size": 11,
+        },
+    )
+    full_ifos, full_waveform = _problem()
+    full = TransientLikelihoodFD(
+        detectors=full_ifos,
+        waveform=full_waveform,
+        f_min=F_MIN,
+        f_max=F_MAX,
+        trigger_time=GPS,
+        phase_marginalization=phase_marginalization,
+    )
+    params = _parameters()
+    explicit_values = jax.vmap(lambda tc: full.evaluate({**params, "t_c": tc}))(
+        compressed.tc_window
+    )
+    explicit_quadrature = logsumexp(explicit_values) - jnp.log(
+        len(compressed.tc_window)
+    )
+
+    assert float(compressed.evaluate(params)) == pytest.approx(
+        float(explicit_quadrature),
+        abs=0.05,
+    )
 
 
 def test_cached_and_jitted_evaluations_match_direct() -> None:

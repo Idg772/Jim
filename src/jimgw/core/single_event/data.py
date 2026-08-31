@@ -812,8 +812,8 @@ class PowerSpectrum(ABC):
 
         Supported formats:
 
-        * ``.npz`` — NumPy archive containing ``values`` (PSD, Hz⁻¹) and
-          ``frequencies`` arrays. *is_asd* is ignored.
+        * ``.npz`` — NumPy archive containing ``values`` and ``frequencies``
+          arrays. Values are treated as ASD and squared when *is_asd=True*.
         * ``.txt`` / ``.dat`` — two-column whitespace-separated text file
           ``(frequency, value)``.  Set *is_asd=True* if the second column
           contains amplitude spectral density (Hz⁻¹/²); it will be squared
@@ -824,8 +824,7 @@ class PowerSpectrum(ABC):
         Args:
             path: Path to the PSD file.
             is_asd: If ``True``, the file contains ASD values (Hz⁻¹/²) that
-                are squared to obtain the PSD. Applies only to text/CSV files;
-                ignored for ``.npz``. Defaults to ``False``.
+                are squared to obtain the PSD. Defaults to ``False``.
 
         Returns:
             PowerSpectrum: Loaded power spectrum.
@@ -837,7 +836,10 @@ class PowerSpectrum(ABC):
                     raise ValueError(
                         "The file must contain 'values' and 'frequencies' keys."
                     )
-                values = jnp.array(data["values"])
+                values_np = np.asarray(data["values"])
+                if is_asd:
+                    values_np = values_np**2
+                values = jnp.array(values_np)
                 frequencies = jnp.array(data["frequencies"])
                 name = str(data.get("name", ""))
             return cls(values, frequencies, name)

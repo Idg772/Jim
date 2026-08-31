@@ -66,6 +66,38 @@ def test_2pn_clock_is_jittable_and_differentiable():
     assert np.isfinite(float(derivative))
 
 
+@pytest.mark.parametrize(
+    ("frequency", "mass_1", "mass_2", "chi_1", "chi_2"),
+    [
+        (512.0, 30.0, 30.0, 0.0, 0.0),
+        (2048.0, 1.4, 1.4, -0.99, -0.99),
+    ],
+)
+def test_2pn_clock_freezes_unphysical_post_inspiral_values_at_coalescence(
+    frequency,
+    mass_1,
+    mass_2,
+    chi_1,
+    chi_2,
+):
+    tau = time_to_coalescence_2pn(
+        frequency,
+        mass_1,
+        mass_2,
+        chi_1,
+        chi_2,
+    )
+
+    assert float(tau) == 0.0
+
+
+def test_2pn_clock_stays_at_coalescence_above_isco():
+    frequencies = jnp.asarray([512.0, 2_048.0, 8_192.0, 32_768.0])
+    tau = time_to_coalescence_2pn(frequencies, 30.0, 30.0)
+
+    np.testing.assert_array_equal(np.asarray(tau), np.zeros(len(frequencies)))
+
+
 def test_positive_tau_moves_time_and_unwrapped_gmst_earlier():
     trigger_time = 1_500_000_000.0
     t_c = 0.02
