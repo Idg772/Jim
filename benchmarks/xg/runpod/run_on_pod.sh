@@ -130,8 +130,10 @@ export UV_PROJECT_ENVIRONMENT="/workspace/jim-xg-venv-${source_revision:0:12}"
 export UV_HTTP_TIMEOUT=300
 export UV_HTTP_RETRIES=10
 export UV_CONCURRENT_DOWNLOADS=4
-if ! command -v uv >/dev/null 2>&1; then
+if ! command -v uv >/dev/null 2>&1 \
+  || [[ "$(uv --version)" != "uv 0.11.2" ]]; then
   curl -LsSf "https://astral.sh/uv/0.11.2/install.sh" | sh
+  hash -r
 fi
 if [[ "$(uv --version)" != "uv 0.11.2" ]]; then
   echo "The frozen XG runtime requires uv 0.11.2" >&2
