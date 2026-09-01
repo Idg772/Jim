@@ -192,7 +192,6 @@ def _validate_pod_metadata(payload: object, pod_id: str) -> None:
     expected = {
         "id": pod_id,
         "imageName": IMAGE,
-        "gpuTypeId": GPU_ID,
         "gpuCount": GPU_COUNT,
         "desiredStatus": "RUNNING",
         "runtimeStatus": "running",
@@ -203,8 +202,8 @@ def _validate_pod_metadata(payload: object, pod_id: str) -> None:
     ]
     if not isinstance(machine, dict) or machine.get("secureCloud") is not True:
         mismatches.append("machine.secureCloud")
-    if isinstance(machine, dict) and machine.get("gpuTypeId") not in (None, GPU_ID):
-        mismatches.append("machine.gpuTypeId")
+    if not isinstance(machine, dict) or machine.get("gpuId") != GPU_ID:
+        mismatches.append("machine.gpuId")
     ports = payload.get("ports")
     if not isinstance(ports, list) or "22/tcp" not in ports:
         mismatches.append("ports")

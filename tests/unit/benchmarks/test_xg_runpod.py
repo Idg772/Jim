@@ -444,7 +444,6 @@ def test_live_pod_metadata_requires_exact_paid_launch() -> None:
     payload = {
         "id": "pod-fixture-1",
         "imageName": workflow.IMAGE,
-        "gpuTypeId": workflow.GPU_ID,
         "gpuCount": workflow.GPU_COUNT,
         "desiredStatus": "RUNNING",
         "runtimeStatus": "running",
@@ -452,7 +451,7 @@ def test_live_pod_metadata_requires_exact_paid_launch() -> None:
         "ports": ["22/tcp"],
         "machine": {
             "secureCloud": True,
-            "gpuTypeId": workflow.GPU_ID,
+            "gpuId": workflow.GPU_ID,
         },
     }
 
