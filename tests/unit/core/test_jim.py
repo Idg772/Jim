@@ -814,6 +814,68 @@ class TestJimPriorLikelihoodConsistencyChecks:
             if block != intrinsic_block
         )
 
+    def test_swig_blocks_use_transformed_inclination_coordinate(self):
+        from jimgw.core.prior import SinePrior
+        from jimgw.core.transforms import CosineTransform
+        from jimgw.samplers.config import BlackJAXSwiGConfig
+
+        prior = CombinePrior(
+            [
+                UniformPrior(10.0, 80.0, parameter_names=["M_c"]),
+                SinePrior(["iota"]),
+                UniformPrior(0.0, 3.14, parameter_names=["ra"]),
+                UniformPrior(-1.57, 1.57, parameter_names=["dec"]),
+                UniformPrior(0.0, 3.14, parameter_names=["psi"]),
+                UniformPrior(-0.1, 0.1, parameter_names=["t_c"]),
+            ]
+        )
+        likelihood = self._make_mock_single_event_likelihood(
+            waveform_parameter_names=("M_c", "iota"),
+        )
+        likelihood.waveform.cacheable_parameter_names = frozenset({"iota"})
+        likelihood.waveform.build_waveform_cache = lambda axis, params: {}
+        likelihood.waveform.waveform_from_cache = lambda axis, params, cache: {}
+        inclination_transform = CosineTransform(name_mapping=(["iota"], ["cos_iota"]))
+        blocks = [
+            ["M_c"],
+            ["cos_iota"],
+            ["ra", "dec"],
+            ["psi"],
+            ["t_c"],
+        ]
+
+        jim = Jim(
+            likelihood=likelihood,
+            prior=prior,
+            sampler_config=BlackJAXSwiGConfig(
+                blocks=blocks,
+                n_live=4,
+                n_delete_frac=0.5,
+            ),
+            sample_transforms=[inclination_transform],
+        )
+
+        assert "cos_iota" in jim.sampling_parameter_names
+        assert "iota" not in jim.sampling_parameter_names
+        cosine_block = (jim.sampling_parameter_names.index("cos_iota"),)
+        intrinsic_block = (jim.sampling_parameter_names.index("M_c"),)
+        assert jim._rebuild_required_by_block[cosine_block] is False
+        assert jim._rebuild_required_by_block[intrinsic_block] is True
+
+        stale_blocks = [block.copy() for block in blocks]
+        stale_blocks[1] = ["iota"]
+        with pytest.raises(ValueError, match=r"Block parameter.*'iota'"):
+            Jim(
+                likelihood=likelihood,
+                prior=prior,
+                sampler_config=BlackJAXSwiGConfig(
+                    blocks=stale_blocks,
+                    n_live=4,
+                    n_delete_frac=0.5,
+                ),
+                sample_transforms=[inclination_transform],
+            )
+
     def test_swig_resolves_cache_hit_bridge_blocks_and_passes_them_to_backend(self):
         from jimgw.samplers.config import BlackJAXSwiGConfig
 

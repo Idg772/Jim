@@ -235,6 +235,7 @@ The CLI auto-infers transforms for all other cases.
 | --- | --- | --- | --- |
 | `time_frame` | str | `"detector"` | Controls the sampling parameter space of signal arrival times. `"detector"` (default): sample detector time rather than geocentric. Set to an explicit detector name (e.g. `"H1"`) to use a specific detector. `"geocentric"`: sample geocentric time directly. |
 | `sky_frame` | str | `"detector"` | Controls the sampling parameter space of sky position. `"detector"` (default): sample `azimuth`/`zenith` relative to the detector baseline (requires ≥ 2 detectors). `"geocentric"`: sample `ra`/`dec` directly. |
+| `inclination_coordinate` | str | `"iota"` | Controls the sampler-facing inclination coordinate. Set to `"cos_iota"` to sample the exactly uniform cosine coordinate while keeping a physical sine prior on `iota`; injection, likelihood, and output parameters remain `iota`. |
 
 ---
 

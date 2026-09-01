@@ -1,0 +1,104 @@
+# Frozen engineering candidate for the current dominant-mode XG implementation.
+# The compressed science run remains fail-closed until the matching independent
+# qualification bundle is present and its manifest fields are added below.
+
+seed = 0
+
+[data]
+type = "injection"
+detectors = ["CE"]
+trigger_time = 0.0
+duration = 8192.0
+sampling_frequency = 4096.0
+zero_noise = true
+psd_files = { CE = "benchmark-results/xg-ce-4096-65536/inputs/CE_psd.txt" }
+psd_is_asd = { CE = false }
+waveform_chunk_size = 262144
+
+[data.injection_parameters]
+M_c = 1.1802650981093186
+q = 0.9724191074091124
+s1_z = -0.014169601016451747
+s2_z = -0.02350583516601907
+lambda_1 = 483.1557044220429
+lambda_2 = 771.0436351634714
+d_L = 20.0
+iota = 2.016083447361016
+ra = 2.96479778676665
+dec = 0.17257877754217157
+psi = 1.6782976747256861
+phase_c = 2.7844901856551694
+t_c = 0.03512602655783986
+
+[waveform]
+approximant = "IMRPhenomD_NRTidalv2"
+f_ref = 20.0
+
+[prior]
+M_c = { type = "uniform", min = 1.18, max = 1.1807 }
+q = { type = "uniform", min = 0.5, max = 1.0 }
+s1_z = { type = "uniform", min = -0.05, max = 0.05 }
+s2_z = { type = "uniform", min = -0.05, max = 0.05 }
+lambda_1 = { type = "uniform", min = 0.0, max = 1000.0 }
+lambda_2 = { type = "uniform", min = 0.0, max = 1000.0 }
+d_L = { type = "power_law", min = 1.0, max = 1000.0, alpha = 2.0 }
+iota = { type = "sine" }
+ra = { type = "uniform", min = 0.0, max = 6.283185307179586 }
+dec = { type = "cosine" }
+psi = { type = "uniform", min = 0.0, max = 3.141592653589793 }
+t_c = { type = "uniform", min = -0.1, max = 0.1 }
+
+[sampling]
+time_frame = "CE"
+sky_frame = "geocentric"
+inclination_coordinate = "cos_iota"
+
+[likelihood]
+f_min = 5.0
+f_max = 2048.0
+time_dependent_response = true
+finite_arm_response = true
+phase_marginalization = true
+
+[likelihood.heterodyne]
+n_bins = 65536
+reference_chunk_size = 131072
+# qualification_manifest = "benchmark-results/xg-ce-4096-65536/qualification/xg-qualification.json"
+# qualification_manifest_sha256 = "replace-after-independent-qualification"
+
+[likelihood.heterodyne.reference_parameters]
+type = "injection"
+
+[sampler]
+type = "blackjax-swig"
+blocks = [
+  ["M_c", "q", "lambda_1", "lambda_2", "s1_z", "s2_z", "t_det"],
+  ["ra", "dec"],
+  ["psi"],
+  ["cos_iota", "d_L"],
+]
+bridge_blocks = [
+  ["ra", "dec", "psi", "cos_iota", "d_L", "t_det"],
+]
+scheduler = "fsm"
+n_live = 4096
+n_delete_frac = 0.125
+n_devices = 4
+num_gibbs_sweeps = 2
+num_inner_steps_per_dim = 1
+max_steps = 10
+max_shrinkage = 100
+termination_dlogz = 0.0485873516
+direction_mode = "covariance"
+periodic_wrapped_covariance = true
+adaptive_slice_widths = true
+width_adaptation_rate = 0.25
+width_target_expansions = 1.0
+width_target_shrinks = 3.0
+bracket_mode = "shrink-only"
+num_de_jumps = 0
+
+[output]
+dir = "benchmark-results/xg-ce-4096-65536/output"
+save_corner = false
+overwrite = false

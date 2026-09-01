@@ -116,6 +116,11 @@ def infer_sample_transforms(
             "time_frame='geocentric': sampling t_c directly, no time sample transform"
         )
 
+    # --- Inclination sample transform ------------------------------------
+    if "iota" in prior_params and sampling_cfg.inclination_coordinate == "cos_iota":
+        sample_transforms.append(CosineTransform((["iota"], ["cos_iota"])))
+        logger.debug("Added CosineTransform(iota -> cos_iota)")
+
     # --- Sky sample transform ---------------------------------------------
     has_equatorial_sky = _EQUATORIAL_SKY_PARAMS <= prior_params
 
@@ -260,6 +265,11 @@ def _build_unit_cube_transforms(
     # transform outputs (azimuth, zenith) instead, since their push-forward priors
     # are flat in those coordinates.
     consumed = _EQUATORIAL_SKY_PARAMS if sky_transform_applied else set()
+    cosine_inclination = (
+        "iota" in prior_params and sampling_cfg.inclination_coordinate == "cos_iota"
+    )
+    if cosine_inclination:
+        consumed = {*consumed, "iota"}
 
     # All other prior parameters (including J-frame spin angles and spherical spin
     # components) stay in sampling space for NS AW; their physics transforms live in
@@ -299,6 +309,17 @@ def _build_unit_cube_transforms(
         unit_transforms.append(
             BoundToBound(
                 name_mapping=(["cos_zenith"], ["cos_zenith_unit"]),
+                original_lower_bound=-1.0,
+                original_upper_bound=1.0,
+                target_lower_bound=0.0,
+                target_upper_bound=1.0,
+            )
+        )
+
+    if cosine_inclination:
+        unit_transforms.append(
+            BoundToBound(
+                name_mapping=(["cos_iota"], ["cos_iota_unit"]),
                 original_lower_bound=-1.0,
                 original_upper_bound=1.0,
                 target_lower_bound=0.0,

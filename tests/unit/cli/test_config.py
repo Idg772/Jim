@@ -551,6 +551,7 @@ def test_sampling_config_defaults():
     cfg = PipelineConfig.model_validate(_MINIMAL_RAW)
     assert cfg.sampling.time_frame == "detector"
     assert cfg.sampling.sky_frame == "detector"
+    assert cfg.sampling.inclination_coordinate == "iota"
 
 
 def test_likelihood_config_values():

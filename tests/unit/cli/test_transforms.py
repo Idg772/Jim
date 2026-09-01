@@ -20,7 +20,12 @@ _MINIMAL_PRIOR = {
 }
 
 
-def _make_pipeline_cfg(prior_raw=None, sky_frame="detector", time_frame="detector"):
+def _make_pipeline_cfg(
+    prior_raw=None,
+    sky_frame="detector",
+    time_frame="detector",
+    inclination_coordinate="iota",
+):
     """Build a minimal PipelineConfig, merging prior_raw on top of _MINIMAL_PRIOR."""
     return PipelineConfig.model_validate(
         {
@@ -30,7 +35,11 @@ def _make_pipeline_cfg(prior_raw=None, sky_frame="detector", time_frame="detecto
             "likelihood": {"f_min": 20.0, "f_max": 1024.0},
             "sampler": {"type": "flowmc"},
             "output": {"dir": "tests/tmp/test"},
-            "sampling": {"sky_frame": sky_frame, "time_frame": time_frame},
+            "sampling": {
+                "sky_frame": sky_frame,
+                "time_frame": time_frame,
+                "inclination_coordinate": inclination_coordinate,
+            },
         }
     )
 
@@ -45,7 +54,12 @@ def _make_ifos():
 TRIGGER_TIME = 1126259462.4
 
 
-def _infer(prior_params, sky_frame="detector", time_frame="detector"):
+def _infer(
+    prior_params,
+    sky_frame="detector",
+    time_frame="detector",
+    inclination_coordinate="iota",
+):
 
     from jimgw.cli._transforms import (
         infer_likelihood_transforms,
@@ -53,7 +67,11 @@ def _infer(prior_params, sky_frame="detector", time_frame="detector"):
     )
 
     ifos = _make_ifos()
-    cfg = SamplingConfig(sky_frame=sky_frame, time_frame=time_frame)  # type: ignore[arg-type]
+    cfg = SamplingConfig(
+        sky_frame=sky_frame,
+        time_frame=time_frame,
+        inclination_coordinate=inclination_coordinate,
+    )  # type: ignore[arg-type]
     prior_cfg = PriorConfig.model_validate({})
     sample_t = infer_sample_transforms(
         frozenset(prior_params),
@@ -129,6 +147,69 @@ def test_geocentric_sky_no_sky_sample_transform():
     sample_names = [type(t).__name__ for t in sample_t]
     assert "SkyFrameToDetectorFrameSkyPositionTransform" not in sample_names
     assert "GeocentricArrivalTimeToDetectorArrivalTimeTransform" in sample_names
+
+
+@pytest.mark.slow
+def test_cos_iota_sample_coordinate_round_trips_to_physical_iota():
+    sample_t, _ = _infer(
+        {"M_c", "q", "iota"},
+        inclination_coordinate="cos_iota",
+    )
+
+    transforms = [
+        transform
+        for transform in sample_t
+        if type(transform).__name__ == "CosineTransform"
+    ]
+    assert len(transforms) == 1
+    transformed, _ = transforms[0].transform({"iota": 1.2})
+    recovered, _ = transforms[0].inverse(transformed)
+    assert recovered["iota"] == pytest.approx(1.2)
+
+
+def test_cos_iota_sample_coordinate_requires_sine_iota_prior():
+    with pytest.raises(ValidationError, match="type='sine'"):
+        _make_pipeline_cfg(
+            prior_raw={
+                "iota": {"type": "uniform", "min": 0.0, "max": 3.14159},
+            },
+            inclination_coordinate="cos_iota",
+        )
+
+
+def test_cos_iota_sample_coordinate_requires_iota_prior():
+    with pytest.raises(ValidationError, match="physical 'iota'"):
+        _make_pipeline_cfg(inclination_coordinate="cos_iota")
+
+
+def test_cos_iota_sample_coordinate_rejects_duplicate_prior_coordinate():
+    with pytest.raises(ValidationError, match="also contains 'cos_iota'"):
+        _make_pipeline_cfg(
+            prior_raw={
+                "iota": {"type": "sine"},
+                "cos_iota": {"type": "uniform", "min": -1.0, "max": 1.0},
+            },
+            inclination_coordinate="cos_iota",
+        )
+
+
+def test_cos_iota_unit_cube_transform_is_applied_once():
+    from jimgw.cli._transforms import infer_sample_transforms
+
+    sampling_cfg = SamplingConfig(inclination_coordinate="cos_iota")
+    prior_cfg = PriorConfig.model_validate({"iota": {"type": "sine"}})
+    transforms = infer_sample_transforms(
+        frozenset({"iota"}),
+        TRIGGER_TIME,
+        _make_ifos(),
+        sampling_cfg,
+        unit_cube=True,
+        prior_cfg=prior_cfg,
+    )
+
+    mappings = [transform.name_mapping for transform in transforms]
+    assert mappings.count((["iota"], ["cos_iota"])) == 1
+    assert mappings.count((["cos_iota"], ["cos_iota_unit"])) == 1
 
 
 # ---------------------------------------------------------------------------

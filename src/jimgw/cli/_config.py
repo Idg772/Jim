@@ -430,6 +430,14 @@ class SamplingConfig(BaseModel):
     - ``"geocentric"``: sample directly in ra/dec.
     Only used when ``ra``/``dec`` are in the prior."""
 
+    inclination_coordinate: Literal["iota", "cos_iota"] = "iota"
+    """Sampling coordinate for binary inclination.
+
+    ``"cos_iota"`` maps a physical sine-distributed ``iota`` prior to its
+    exactly uniform cosine coordinate. The inverse sample transform restores
+    ``iota`` before prior and likelihood evaluation.
+    """
+
 
 # ---------------------------------------------------------------------------
 # Likelihood section
@@ -1856,6 +1864,29 @@ class PipelineConfig(BaseModel):
                 "time_frame to 'detector' or a specific detector name."
             )
 
+        return self
+
+    @model_validator(mode="after")
+    def _validate_inclination_sampling_coordinate(self) -> "PipelineConfig":
+        if self.sampling.inclination_coordinate == "iota":
+            return self
+
+        iota_prior = self.prior.root.get("iota")
+        if iota_prior is None:
+            raise ValueError(
+                "inclination_coordinate='cos_iota' requires a physical 'iota' "
+                "entry in [prior]"
+            )
+        if "cos_iota" in self.prior.root:
+            raise ValueError(
+                "inclination_coordinate='cos_iota' cannot be used when [prior] "
+                "also contains 'cos_iota'; keep only the physical 'iota' prior"
+            )
+        if not isinstance(iota_prior, SineSpec):
+            raise ValueError(  # noqa: TRY004 - invalid scientific prior contract
+                "inclination_coordinate='cos_iota' requires [prior].iota to use "
+                "type='sine' so the transformed prior is exactly uniform"
+            )
         return self
 
     @model_validator(mode="after")
