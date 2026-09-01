@@ -53,6 +53,11 @@ def detector_metadata_sha256(ifos: list[GroundBased2G]) -> str:
             "xarm_tilt": ifo.xarm_tilt,
             "yarm_tilt": ifo.yarm_tilt,
             "arm_length_m": ifo.arm_length_m,
+            "orbital_motion_response": ifo.orbital_motion_response,
+            "orbital_reference_time": ifo.orbital_reference_time,
+            "orbital_validity_s": ifo.orbital_validity_s,
+            "orbital_acceleration_over_c": ifo.orbital_acceleration_over_c,
+            "orbital_jerk_over_c": ifo.orbital_jerk_over_c,
         }
         for ifo in ifos
     ]
@@ -118,7 +123,11 @@ def build_likelihood(
     time_frame = pipeline_cfg.sampling.time_frame
     data_cfg: DataConfig = pipeline_cfg.data
     verified_xg_manifest = pipeline_cfg.verified_xg_manifest
-    uses_xg_response = cfg.time_dependent_response or cfg.finite_arm_response
+    uses_xg_response = (
+        cfg.time_dependent_response
+        or cfg.finite_arm_response
+        or cfg.orbital_motion_response
+    )
     uses_xg_compression = uses_xg_response and cfg.heterodyne is not None
 
     if uses_xg_response and not jax.config.jax_enable_x64:
@@ -179,6 +188,13 @@ def build_likelihood(
             )
         ifo.time_dependent_response = cfg.time_dependent_response
         ifo.finite_arm_response = cfg.finite_arm_response
+        ifo.configure_orbital_motion_response(
+            enabled=cfg.orbital_motion_response,
+            reference_time=cfg.orbital_reference_time,
+            validity_s=cfg.orbital_validity_s,
+            acceleration_over_c=cfg.orbital_acceleration_over_c,
+            jerk_over_c=cfg.orbital_jerk_over_c,
+        )
 
     phase_marg = None
     if cfg.phase_marginalization:

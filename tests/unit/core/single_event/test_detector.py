@@ -17,7 +17,10 @@ from jimgw.core.single_event.detector import (
     get_L1,
     get_V1,
 )
-from jimgw.core.single_event.time_dependent_response import emission_gmst
+from jimgw.core.single_event.time_dependent_response import (
+    earth_orbital_curvature_delay,
+    emission_gmst,
+)
 from jimgw.core.single_event.waveform import RippleIMRPhenomD
 from tests.utils import assert_all_in_range
 
@@ -261,6 +264,11 @@ def test_builtin_detectors_have_explicit_arm_length_metadata():
 
     assert {det.name: det.arm_length_m for det in detectors} == expected_lengths
     assert all(not det.finite_arm_response for det in detectors)
+    assert all(not det.orbital_motion_response for det in detectors)
+    assert all(det.orbital_acceleration_over_c is None for det in detectors)
+    assert all(det.orbital_jerk_over_c is None for det in detectors)
+    assert all(det.orbital_reference_time is None for det in detectors)
+    assert all(det.orbital_validity_s is None for det in detectors)
     assert all(det.arm_length_m == 10_000.0 for det in get_ET())
 
 
@@ -425,6 +433,201 @@ def test_time_dependent_response_requires_and_consumes_emission_clock():
     )
 
     np.testing.assert_allclose(result, expected, rtol=3e-12, atol=3e-12)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (
+            {
+                "orbital_motion_response": True,
+                "orbital_acceleration_over_c": (1.0, 2.0, 3.0),
+                "orbital_jerk_over_c": (4.0, 5.0, 6.0),
+                "orbital_reference_time": 100.0,
+                "orbital_validity_s": (-8_192.0, 0.1),
+            },
+            "requires time_dependent_response=True",
+        ),
+        (
+            {
+                "time_dependent_response": True,
+                "orbital_motion_response": True,
+            },
+            "requires orbital coefficients, reference time, and validity",
+        ),
+        (
+            {"orbital_acceleration_over_c": (1.0, 2.0, 3.0)},
+            "must be provided together",
+        ),
+        (
+            {
+                "orbital_acceleration_over_c": (1.0, 2.0),
+                "orbital_jerk_over_c": (4.0, 5.0, 6.0),
+                "orbital_reference_time": 100.0,
+                "orbital_validity_s": (-8_192.0, 0.1),
+            },
+            "must contain three finite values",
+        ),
+        (
+            {
+                "orbital_acceleration_over_c": (1.0, np.nan, 3.0),
+                "orbital_jerk_over_c": (4.0, 5.0, 6.0),
+                "orbital_reference_time": 100.0,
+                "orbital_validity_s": (-8_192.0, 0.1),
+            },
+            "must contain three finite values",
+        ),
+    ],
+)
+def test_orbital_motion_configuration_fails_closed(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        GroundBased2G("orbital-invalid", **kwargs)
+
+
+def test_mutated_orbital_motion_configuration_is_revalidated_at_projection():
+    detector = get_CE()
+    detector.time_dependent_response = True
+    detector.orbital_motion_response = True
+    h_sky = {
+        "p": jnp.ones(1, dtype=jnp.complex128),
+        "c": jnp.zeros(1, dtype=jnp.complex128),
+        "__tau__": jnp.ones(1),
+    }
+    params = {
+        "ra": 1.2,
+        "dec": -0.4,
+        "psi": 0.7,
+        "gmst": 2.1,
+        "trigger_time": 0.0,
+        "t_c": 0.0,
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="requires orbital coefficients, reference time, and validity",
+    ):
+        detector.fd_response(jnp.asarray([20.0]), h_sky, params)
+
+
+def test_orbital_motion_response_can_be_configured_and_cleared_atomically():
+    detector = get_CE()
+    detector.time_dependent_response = True
+    detector.configure_orbital_motion_response(
+        enabled=True,
+        reference_time=100.0,
+        validity_s=(-8_192.0, 0.1),
+        acceleration_over_c=(1.2e-11, -0.7e-11, 0.4e-11),
+        jerk_over_c=(-2.0e-18, 1.0e-18, 0.3e-18),
+    )
+
+    assert detector.orbital_motion_response
+    assert detector.orbital_reference_time == 100.0
+    assert detector.orbital_validity_s == (-8_192.0, 0.1)
+    detector.configure_orbital_motion_response(enabled=False)
+    assert not detector.orbital_motion_response
+    assert detector.orbital_acceleration_over_c is None
+    assert detector.orbital_jerk_over_c is None
+    assert detector.orbital_reference_time is None
+    assert detector.orbital_validity_s is None
+
+
+@pytest.mark.parametrize("finite_arm_response", [False, True])
+def test_orbital_motion_response_applies_inertial_delay_with_existing_phase_sign(
+    finite_arm_response,
+):
+    detector = get_CE()
+    detector.data.start_time = 90.0
+    detector.time_dependent_response = True
+    detector.finite_arm_response = finite_arm_response
+    frequency = jnp.asarray([5.0, 20.0, 100.0])
+    tau = jnp.asarray([7_000.0, 300.0, 2.0])
+    h_sky = {
+        "p": jnp.asarray([1.0 + 0.2j] * 3),
+        "c": jnp.asarray([-0.3 + 0.4j] * 3),
+        "__tau__": tau,
+    }
+    params = {
+        "ra": 1.2,
+        "dec": -0.4,
+        "psi": 0.7,
+        "gmst": 2.1,
+        "trigger_time": 100.0,
+        "t_c": 0.02,
+    }
+    acceleration_over_c = (1.2e-11, -0.7e-11, 0.4e-11)
+    jerk_over_c = (-2.0e-18, 1.0e-18, 0.3e-18)
+
+    terrestrial_only = detector.fd_response(frequency, h_sky, params)
+    detector.orbital_acceleration_over_c = acceleration_over_c
+    detector.orbital_jerk_over_c = jerk_over_c
+    detector.orbital_reference_time = params["trigger_time"]
+    detector.orbital_validity_s = (-8_192.0, 0.1)
+    detector.orbital_motion_response = True
+    with_orbit = detector.fd_response(frequency, h_sky, params)
+
+    orbital_delay = earth_orbital_curvature_delay(
+        params["ra"],
+        params["dec"],
+        params["t_c"] - tau,
+        acceleration_over_c,
+        jerk_over_c,
+    )
+    expected = terrestrial_only * jnp.exp(-2j * jnp.pi * frequency * orbital_delay)
+    np.testing.assert_allclose(with_orbit, expected, rtol=3e-12, atol=3e-12)
+
+
+def test_orbital_motion_response_rejects_wrong_reference_epoch():
+    detector = GroundBased2G(
+        "orbital-reference",
+        time_dependent_response=True,
+        orbital_motion_response=True,
+        orbital_acceleration_over_c=(1.2e-11, -0.7e-11, 0.4e-11),
+        orbital_jerk_over_c=(-2.0e-18, 1.0e-18, 0.3e-18),
+        orbital_reference_time=100.0,
+        orbital_validity_s=(-8_192.0, 0.1),
+    )
+
+    with pytest.raises(ValueError, match="exactly match"):
+        detector.validate_orbital_motion_for_trigger(101.0)
+
+
+def test_orbital_motion_response_fails_closed_outside_qualified_interval():
+    detector = GroundBased2G(
+        "orbital-validity",
+        time_dependent_response=True,
+        orbital_motion_response=True,
+        orbital_acceleration_over_c=(1.2e-11, -0.7e-11, 0.4e-11),
+        orbital_jerk_over_c=(-2.0e-18, 1.0e-18, 0.3e-18),
+        orbital_reference_time=100.0,
+        orbital_validity_s=(-10.0, 0.1),
+    )
+    h_sky = {
+        "p": jnp.ones(2, dtype=jnp.complex128),
+        "c": jnp.zeros(2, dtype=jnp.complex128),
+        "__tau__": jnp.asarray([5.0, 11.0]),
+    }
+    params = {
+        "ra": 1.2,
+        "dec": -0.4,
+        "psi": 0.7,
+        "gmst": 2.1,
+        "trigger_time": 100.0,
+        "t_c": 0.0,
+    }
+
+    project = jax.jit(
+        lambda trigger_time: detector.fd_response(
+            jnp.asarray([20.0, 30.0]),
+            h_sky,
+            {**params, "trigger_time": trigger_time},
+        )
+    )
+    result = project(jnp.asarray(100.0))
+    wrong_reference = project(jnp.asarray(101.0))
+
+    assert np.isfinite(np.asarray(result[0]))
+    assert not np.isfinite(np.asarray(result[1]))
+    assert not np.any(np.isfinite(np.asarray(wrong_reference)))
 
 
 def test_timed_waveform_cannot_be_projected_with_static_response():

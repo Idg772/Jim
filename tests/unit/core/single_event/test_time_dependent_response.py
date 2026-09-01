@@ -14,9 +14,11 @@ from jimgw.core.single_event.time_dependent_response import (
     combine_sidereal_sidebands,
     delay_from_geocenter,
     detector_time_phasor,
+    earth_orbital_curvature_delay,
     emission_gmst,
     emission_time,
     evaluate_sidereal_harmonics,
+    inertial_source_direction,
     linear_gmst,
     long_wavelength_antenna_patterns,
     project_dynamic_long_wavelength,
@@ -125,6 +127,72 @@ def test_linear_gmst_wraps_without_using_absolute_times():
     np.testing.assert_allclose(
         np.asarray(jnp.mod(unwrapped, 2.0 * jnp.pi)), np.asarray(wrapped), atol=3e-15
     )
+
+
+def test_inertial_source_direction_uses_ra_without_gmst_rotation():
+    directions = inertial_source_direction(
+        jnp.asarray([0.0, jnp.pi / 2.0, 1.7]),
+        jnp.asarray([0.0, 0.0, jnp.pi / 2.0]),
+    )
+
+    expected = np.asarray(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    ).T
+    np.testing.assert_allclose(np.asarray(directions), expected, atol=2e-16)
+
+
+def test_orbital_curvature_delay_has_documented_sign_and_no_affine_terms():
+    emission_offset = jnp.asarray([-3.0, 0.0, 2.0])
+    acceleration_over_c = jnp.asarray([2.0, 0.0, 0.0])
+    jerk_over_c = jnp.asarray([6.0, 0.0, 0.0])
+
+    delay = jax.jit(earth_orbital_curvature_delay)(
+        0.0,
+        0.0,
+        emission_offset,
+        acceleration_over_c,
+        jerk_over_c,
+    )
+    opposite_sky_delay = earth_orbital_curvature_delay(
+        jnp.pi,
+        0.0,
+        emission_offset,
+        acceleration_over_c,
+        jerk_over_c,
+    )
+    expected = -(np.asarray(emission_offset) ** 2 + np.asarray(emission_offset) ** 3)
+
+    np.testing.assert_allclose(np.asarray(delay), expected, atol=2e-14)
+    np.testing.assert_allclose(np.asarray(opposite_sky_delay), -expected, atol=2e-14)
+    assert (
+        float(earth_orbital_curvature_delay(0.0, 0.0, 0.0, (2, 0, 0), (6, 0, 0))) == 0.0
+    )
+    first_derivative_at_reference = jax.grad(
+        lambda offset: earth_orbital_curvature_delay(
+            0.0, 0.0, offset, acceleration_over_c, jerk_over_c
+        )
+    )(jnp.asarray(0.0))
+    assert float(first_derivative_at_reference) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("acceleration", "jerk", "message"),
+    [
+        ((1.0, 2.0), (1.0, 2.0, 3.0), "acceleration_over_c"),
+        ((1.0, 2.0, 3.0), (1.0, 2.0), "jerk_over_c"),
+    ],
+)
+def test_orbital_curvature_delay_rejects_non_cartesian_coefficients(
+    acceleration,
+    jerk,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        earth_orbital_curvature_delay(0.0, 0.0, 1.0, acceleration, jerk)
 
 
 def test_vector_response_matches_scalar_detector_methods():

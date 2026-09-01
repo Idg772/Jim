@@ -446,6 +446,41 @@ class CosineTransform(BijectiveTransform):
             for i in range(len(name_mapping[1]))
         }
 
+    def inverse(self, y: dict[str, Float]) -> tuple[dict[str, Float], FloatScalar]:
+        """Invert cosine coordinates with an explicit bounded-domain guard.
+
+        Automatic differentiation of ``arccos`` produces NaNs outside
+        ``[-1, 1]`` and infinities at its endpoints.  Those values can leak
+        into a transformed log prior before the physical prior has a chance to
+        reject the proposal.  Evaluate the inverse at the nearest interior
+        floating-point value and return ``-inf`` Jacobian density only for
+        genuinely out-of-support coordinates.  Endpoint clipping is
+        measure-zero and keeps the exactly transformed sine prior finite.
+        """
+
+        y_copy = y.copy()
+        inverse_log_det: FloatScalar = jnp.zeros(())
+        in_support = jnp.asarray(True)
+        output_params: dict[str, Float] = {}
+        for input_name, output_name in zip(*self.name_mapping, strict=True):
+            value = y_copy[output_name]
+            one = jnp.ones_like(value)
+            lower = jnp.nextafter(-one, jnp.zeros_like(value))
+            upper = jnp.nextafter(one, jnp.zeros_like(value))
+            safe_value = jnp.clip(value, lower, upper)
+            output_params[input_name] = jnp.arccos(safe_value)
+            inverse_log_det -= 0.5 * jnp.log1p(-(safe_value * safe_value))
+            in_support = jnp.logical_and(
+                in_support,
+                jnp.logical_and(value >= -one, value <= one),
+            )
+
+        inverse_log_det = jnp.where(in_support, inverse_log_det, -jnp.inf)
+        for output_name in self.name_mapping[1]:
+            y_copy.pop(output_name)
+        y_copy.update(output_params)
+        return y_copy, inverse_log_det
+
 
 @jaxtyped(typechecker=typechecker)
 class BoundToBound(BijectiveTransform):

@@ -6,6 +6,9 @@ dominant-mode, aligned-spin XG response path. It uses one 40 km CE detector,
 sampled luminosity distance, phase marginalization, 65,536 relative bins,
 4,096 live points, 512 simultaneous deletions, two Gibbs sweeps, and no sky
 folding. Inclination is sampled in the exact uniform `cos_iota` coordinate.
+The trigger is a physical GPS epoch inside the pinned DE405 span. Earth-orbit
+curvature uses an affine-removed cubic surrogate fitted over the complete
+emission-time support and checked against the full ephemeris.
 
 The injection coordinates are adapted from the public Licence-to-Bin example
 at revision `5c15b707e1b9c90d0ef2f36d4b378124f31074a8`. Its precessing spins are
@@ -14,7 +17,7 @@ supports dominant nonprecessing waveforms only. The Euclidean `d_L^2` prior is
 also an explicit approximation to the paper's source-frame-volume prior. This
 is therefore an aligned tracer, not a reproduction of the published signal.
 
-Prepare the immutable CE PSD:
+Prepare the immutable CE PSD and Earth/Sun ephemerides:
 
 ```console
 uv run python benchmarks/xg/prepare_inputs.py

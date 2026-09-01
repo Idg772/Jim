@@ -27,13 +27,25 @@ def _cache_digest(cache) -> str:
     return digest.hexdigest()
 
 
-@pytest.mark.parametrize("finite_arm_response", [False, True])
-def test_rotating_response_reuses_only_intrinsic_source_cache(finite_arm_response):
+@pytest.mark.parametrize(
+    ("finite_arm_response", "orbital_motion_response"),
+    [(False, False), (True, False), (False, True), (True, True)],
+)
+def test_rotating_response_reuses_only_intrinsic_source_cache(
+    finite_arm_response,
+    orbital_motion_response,
+):
     detector = get_H1()
     detector.set_data(Data.from_file(str(FIXTURES_DIR / "GW150914_strain_H1.npz")))
     detector.set_psd(PowerSpectrum.from_file(str(FIXTURES_DIR / "GW150914_psd_H1.npz")))
     detector.time_dependent_response = True
     detector.finite_arm_response = finite_arm_response
+    detector.orbital_motion_response = orbital_motion_response
+    if orbital_motion_response:
+        detector.orbital_acceleration_over_c = (1.2e-11, -0.7e-11, 0.4e-11)
+        detector.orbital_jerk_over_c = (-2.0e-18, 1.0e-18, 0.3e-18)
+        detector.orbital_reference_time = 1_126_259_462.4
+        detector.orbital_validity_s = (-8_192.0, 0.1)
     waveform = DominantModeTimeCachedWaveform(RippleIMRPhenomD(f_ref=20.0))
     likelihood = TransientLikelihoodFD(
         detectors=[detector],

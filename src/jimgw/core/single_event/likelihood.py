@@ -41,6 +41,7 @@ from jimgw.typing import ComplexScalar, FloatLike, FloatScalar
 logger = logging.getLogger(__name__)
 
 _XG_PLAN_AUTHORITY = object()
+_XG_QUALIFICATION_PLAN_AUTHORITY = object()
 
 
 @dataclass(frozen=True)
@@ -59,12 +60,82 @@ class _VerifiedXGPlan:
             raise ValueError("XG bin edges must use a SHA-256 digest")
 
 
+@dataclass(frozen=True)
+class _QualificationXGPlan:
+    """Internal capability restricted to deterministic qualification work."""
+
+    bin_edges_sha256: str
+    _authority: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._authority is not _XG_QUALIFICATION_PLAN_AUTHORITY:
+            raise TypeError(
+                "XG qualification plans must come from the qualification builder"
+            )
+        if len(self.bin_edges_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in self.bin_edges_sha256
+        ):
+            raise ValueError("XG qualification bin edges must use a SHA-256 digest")
+
+
 _LIKELIHOOD_OPTIMIZATION_AXES = frozenset(
     {"shared_frequency_grid", "detector_phasor", "real_inner_product"}
 )
 _MAX_DIRECT_SUM_PHASOR_ELEMENTS = 4_194_304
 _MAX_DIRECT_SUM_TIME_SAMPLES = 4_194_304
 _MIN_RELATIVE_BIN_REFERENCE_RESPONSE = 1.0e-12
+
+
+def _set_and_merge_heterodyne_frequency_grids(
+    detectors: Sequence[Detector],
+    f_min: float | dict[str, float],
+    f_max: float | dict[str, float],
+) -> tuple[Float[Array, " n_freq"], bool, FloatScalar]:
+    """Apply detector bounds and return the canonical heterodyne frequency grid."""
+
+    detector_frequencies = []
+    for detector in detectors:
+        detector_f_min = f_min[detector.name] if isinstance(f_min, dict) else f_min
+        detector_f_max = f_max[detector.name] if isinstance(f_max, dict) else f_max
+        detector.set_frequency_bounds(detector_f_min, detector_f_max)
+        detector_frequencies.append(detector.sliced_frequencies)
+    if not detector_frequencies:
+        raise ValueError("heterodyne likelihood requires at least one detector")
+    if any(len(frequencies) < 2 for frequencies in detector_frequencies):
+        raise ValueError("Each detector frequency grid must contain at least 2 bins")
+
+    grid_metadata = [
+        (
+            len(frequencies),
+            float(jax.device_get(frequencies[0])),
+            float(jax.device_get(frequencies[-1])),
+            float(jax.device_get(frequencies[1] - frequencies[0])),
+        )
+        for frequencies in detector_frequencies
+    ]
+    spacings = [metadata[3] for metadata in grid_metadata]
+    if not all(np.isclose(spacings[0], spacing) for spacing in spacings[1:]):
+        raise ValueError("All detectors must have the same frequency spacing")
+
+    first_grid = grid_metadata[0]
+    if all(
+        metadata[0] == first_grid[0]
+        and metadata[1] == first_grid[1]
+        and metadata[2] == first_grid[2]
+        and metadata[3] == first_grid[3]
+        for metadata in grid_metadata[1:]
+    ):
+        frequencies = detector_frequencies[0]
+        identical_frequency_grids = True
+    else:
+        host_frequencies = [
+            np.asarray(jax.device_get(frequencies))
+            for frequencies in detector_frequencies
+        ]
+        frequencies = jnp.asarray(np.unique(np.concatenate(host_frequencies)))
+        identical_frequency_grids = False
+    df = detector_frequencies[0][1] - detector_frequencies[0][0]
+    return frequencies, identical_frequency_grids, df
 
 
 @dataclass(frozen=True)
@@ -1159,8 +1230,9 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
             at once while constructing the fixed reference summaries. This
             bounds host and device scratch memory independently of the number
             of relative bins.
-        xg_plan: Internal capability created only after the complete pipeline
-            and its frozen XG bin plan have passed receipt verification.
+        xg_plan: Internal capability created either after complete production
+            receipt verification or by the isolated deterministic qualification
+            builder. The latter does not authorize normal production use.
     """
 
     n_bins: int
@@ -1195,7 +1267,7 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
             Union[HeterodyneTimeMargConfig, TimeMargConfig, dict, bool]
         ] = None,
         reference_chunk_size: int = 262_144,
-        xg_plan: Optional[_VerifiedXGPlan] = None,
+        xg_plan: Optional[Union[_VerifiedXGPlan, _QualificationXGPlan]] = None,
     ):
         super().__init__(detectors, waveform, fixed_parameters)
 
@@ -1242,11 +1314,14 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
                 for detector in self.detectors
             )
         )
-        if xg_plan is not None and (
-            not isinstance(xg_plan, _VerifiedXGPlan)
-            or xg_plan._authority is not _XG_PLAN_AUTHORITY
-        ):
-            raise TypeError("xg_plan must be an internally verified XG plan")
+        production_plan = isinstance(xg_plan, _VerifiedXGPlan) and (
+            xg_plan._authority is _XG_PLAN_AUTHORITY
+        )
+        qualification_plan = isinstance(xg_plan, _QualificationXGPlan) and (
+            xg_plan._authority is _XG_QUALIFICATION_PLAN_AUTHORITY
+        )
+        if xg_plan is not None and not (production_plan or qualification_plan):
+            raise TypeError("xg_plan must be an internally authorized XG plan")
         if xg_response and not reference_parameters:
             raise ValueError(
                 "XG heterodyne likelihood requires fixed reference_parameters; "
@@ -1346,42 +1421,15 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
             )
 
         # --- frequency setup (same as TransientLikelihoodFD) ---
-        _frequencies = self._set_detector_frequency_bounds(f_min, f_max)
-        if any(len(frequencies) < 2 for frequencies in _frequencies):
-            raise ValueError(
-                "Each detector frequency grid must contain at least 2 bins"
-            )
-        grid_metadata = [
-            (
-                len(frequencies),
-                float(jax.device_get(frequencies[0])),
-                float(jax.device_get(frequencies[-1])),
-                float(jax.device_get(frequencies[1] - frequencies[0])),
-            )
-            for frequencies in _frequencies
-        ]
-        spacings = [metadata[3] for metadata in grid_metadata]
-        if not all(np.isclose(spacings[0], spacing) for spacing in spacings[1:]):
-            raise ValueError("All detectors must have the same frequency spacing")
-
-        self.df = _frequencies[0][1] - _frequencies[0][0]
-        first_grid = grid_metadata[0]
-        if all(
-            metadata[0] == first_grid[0]
-            and metadata[1] == first_grid[1]
-            and metadata[2] == first_grid[2]
-            and metadata[3] == first_grid[3]
-            for metadata in grid_metadata[1:]
-        ):
-            self.frequencies = _frequencies[0]
-            self.identical_frequency_grids = True
-        else:
-            host_frequencies = [
-                np.asarray(jax.device_get(frequencies)) for frequencies in _frequencies
-            ]
-            merged_frequencies = np.unique(np.concatenate(host_frequencies))
-            self.frequencies = jnp.asarray(merged_frequencies)
-            self.identical_frequency_grids = False
+        (
+            self.frequencies,
+            self.identical_frequency_grids,
+            self.df,
+        ) = _set_and_merge_heterodyne_frequency_grids(
+            self.detectors,
+            f_min,
+            f_max,
+        )
 
         # --- heterodyne setup ---
         logger.info("Initializing heterodyned likelihood..")
@@ -1444,22 +1492,15 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
                 f"heterodyne n_bins={n_bins} exceeds the bounded bin limit "
                 f"{_MAX_DIRECT_SUM_PHASOR_ELEMENTS - 1}"
             )
-        freq_grid = self._make_binning_scheme(self.frequencies, n_bins=n_bins)
-
-        reference_support = self._find_reference_frequency_support(reference_waveform)
-        self._set_frequency_arrays_from_support(freq_grid, reference_support)
-
-        hpc_low = reference_waveform(self.freq_grid_low, self.reference_parameters)
-        hpc_high = reference_waveform(self.freq_grid_high, self.reference_parameters)
-        hpc_low, hpc_high = self._trim_reference_zero_edges(hpc_low, hpc_high)
-        bin_edges = np.asarray(
-            jax.device_get(self.freq_grid_edges),
-            dtype="<f8",
+        planned_edges, hpc_low, hpc_high = self._plan_fixed_reference_bin_edges(
+            self.frequencies,
+            n_bins,
+            reference_waveform,
+            self.reference_parameters,
+            self.reference_chunk_size,
         )
-        bin_digest = hashlib.sha256()
-        bin_digest.update(b"jimgw-xg-bin-edges-v1\0float64-le\0")
-        bin_digest.update(bin_edges.tobytes(order="C"))
-        self.bin_edges_sha256 = bin_digest.hexdigest()
+        self._set_frequency_arrays(planned_edges)
+        self.bin_edges_sha256 = self._bin_edges_sha256(self.freq_grid_edges)
         if xg_plan is not None and self.bin_edges_sha256 != xg_plan.bin_edges_sha256:
             raise ValueError(
                 "XG qualification bin edges do not match the retained reference support"
@@ -1849,18 +1890,40 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
     ) -> tuple[dict[str, Array], dict[str, Array]]:
         """Trim outer bins whose source waveform vanishes at either endpoint."""
 
-        def physical_amplitude(waveform: Mapping[str, Array]) -> np.ndarray:
-            physical = [
-                np.abs(np.asarray(jax.device_get(value)))
-                for name, value in waveform.items()
-                if not name.startswith("__")
-            ]
-            if not physical:
-                raise ValueError("reference waveform has no physical polarizations")
-            return np.sum(np.stack(physical), axis=0)
+        edges, waveform_low, waveform_high = self._trim_reference_edge_arrays(
+            self.freq_grid_edges,
+            waveform_low,
+            waveform_high,
+        )
+        self._set_frequency_arrays(edges)
+        return waveform_low, waveform_high
 
-        valid = (physical_amplitude(waveform_low) > 0) & (
-            physical_amplitude(waveform_high) > 0
+    @staticmethod
+    def _physical_waveform_amplitude(
+        waveform: Mapping[str, Array],
+    ) -> np.ndarray:
+        """Return the summed host amplitude of physical polarization leaves."""
+
+        physical = [
+            np.abs(np.asarray(jax.device_get(value)))
+            for name, value in waveform.items()
+            if not name.startswith("__")
+        ]
+        if not physical:
+            raise ValueError("reference waveform has no physical polarizations")
+        return np.sum(np.stack(physical), axis=0)
+
+    @classmethod
+    def _trim_reference_edge_arrays(
+        cls,
+        frequency_edges: Float[Array, " n_bin+1"],
+        waveform_low: Mapping[str, Array],
+        waveform_high: Mapping[str, Array],
+    ) -> tuple[Float[Array, " n_valid+1"], dict[str, Array], dict[str, Array]]:
+        """Return the contiguous nonzero endpoint interval without mutating state."""
+
+        valid = (cls._physical_waveform_amplitude(waveform_low) > 0) & (
+            cls._physical_waveform_amplitude(waveform_high) > 0
         )
         valid_indices = np.flatnonzero(valid)
         if valid_indices.size == 0:
@@ -1873,12 +1936,8 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
                 "by one contiguous heterodyne bin plan"
             )
 
-        self.freq_grid_edges = self.freq_grid_edges[first : stop + 1]
-        self.freq_grid_low = self.freq_grid_edges[:-1]
-        self.freq_grid_high = self.freq_grid_edges[1:]
-        self.n_bins = stop - first
-        self.bin_widths = self.freq_grid_high - self.freq_grid_low
         return (
+            frequency_edges[first : stop + 1],
             {name: value[first:stop] for name, value in waveform_low.items()},
             {name: value[first:stop] for name, value in waveform_high.items()},
         )
@@ -2001,27 +2060,40 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
     ) -> tuple[float, float]:
         """Find the outer nonzero support with bounded endpoint scans."""
 
-        n_frequencies = len(self.frequencies)
+        return self._find_reference_frequency_support_on_grid(
+            self.frequencies,
+            reference_waveform,
+            self.reference_parameters,
+            self.reference_chunk_size,
+        )
+
+    @classmethod
+    def _find_reference_frequency_support_on_grid(
+        cls,
+        frequencies: Float[Array, " n_freq"],
+        reference_waveform: Waveform,
+        reference_parameters: Mapping[str, Any],
+        reference_chunk_size: int,
+    ) -> tuple[float, float]:
+        """Find a fixed reference's outer support without likelihood state."""
+
+        n_frequencies = len(frequencies)
 
         def valid_chunk(start: int, stop: int) -> tuple[np.ndarray, np.ndarray]:
-            chunk_frequencies = self.frequencies[start:stop]
+            chunk_frequencies = frequencies[start:stop]
             polarizations = reference_waveform(
                 chunk_frequencies,
-                self.reference_parameters,
+                reference_parameters,
             )
-            amplitude = np.zeros(stop - start)
-            for name, polarization in polarizations.items():
-                if name.startswith("__"):
-                    continue
-                amplitude += np.abs(np.asarray(jax.device_get(polarization)))
+            amplitude = cls._physical_waveform_amplitude(polarizations)
             return (
                 np.asarray(jax.device_get(chunk_frequencies)),
                 np.flatnonzero(amplitude > 0),
             )
 
         first_frequency: float | None = None
-        for start in range(0, n_frequencies, self.reference_chunk_size):
-            stop = min(start + self.reference_chunk_size, n_frequencies)
+        for start in range(0, n_frequencies, reference_chunk_size):
+            stop = min(start + reference_chunk_size, n_frequencies)
             host_frequencies, valid = valid_chunk(start, stop)
             if valid.size:
                 first_frequency = float(host_frequencies[valid[0]])
@@ -2031,8 +2103,8 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
             raise ValueError("reference waveform is zero throughout the analysis band")
 
         last_frequency: float | None = None
-        for stop in range(n_frequencies, 0, -self.reference_chunk_size):
-            start = max(0, stop - self.reference_chunk_size)
+        for stop in range(n_frequencies, 0, -reference_chunk_size):
+            start = max(0, stop - reference_chunk_size)
             host_frequencies, valid = valid_chunk(start, stop)
             if valid.size:
                 last_frequency = float(host_frequencies[valid[-1]])
@@ -2049,6 +2121,20 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
     ) -> Float[Array, " n_valid+1"]:
         """Set static bin endpoints for a fixed nonzero support interval."""
 
+        masked_frequencies_array = self._frequency_edges_from_support(
+            frequencies,
+            support,
+        )
+        self._set_frequency_arrays(masked_frequencies_array)
+        return masked_frequencies_array
+
+    @staticmethod
+    def _frequency_edges_from_support(
+        frequencies: Float[Array, " n_freq"],
+        support: tuple[float, float],
+    ) -> Float[Array, " n_valid+1"]:
+        """Return planned edges within one fixed nonzero support interval."""
+
         host_frequencies = np.asarray(jax.device_get(frequencies))
         valid = (host_frequencies >= support[0]) & (host_frequencies <= support[1])
         masked_frequencies = host_frequencies[valid]
@@ -2057,13 +2143,60 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
                 "reference waveform support contains fewer than two bin edges"
             )
 
-        masked_frequencies_array = jnp.asarray(masked_frequencies)
-        self.freq_grid_edges = masked_frequencies_array
-        self.freq_grid_low = masked_frequencies_array[:-1]
-        self.freq_grid_high = masked_frequencies_array[1:]
-        self.n_bins = len(masked_frequencies_array) - 1
+        return jnp.asarray(masked_frequencies)
+
+    def _set_frequency_arrays(
+        self,
+        frequency_edges: Float[Array, " n_valid+1"],
+    ) -> None:
+        """Store one already validated static edge array on the likelihood."""
+
+        self.freq_grid_edges = frequency_edges
+        self.freq_grid_low = frequency_edges[:-1]
+        self.freq_grid_high = frequency_edges[1:]
+        self.n_bins = len(frequency_edges) - 1
         self.bin_widths = self.freq_grid_high - self.freq_grid_low
-        return masked_frequencies_array
+
+    @staticmethod
+    def _bin_edges_sha256(frequency_edges: Float[Array, " n_bin+1"]) -> str:
+        """Hash canonical little-endian float64 XG bin edges."""
+
+        bin_edges = np.asarray(jax.device_get(frequency_edges), dtype="<f8")
+        bin_digest = hashlib.sha256()
+        bin_digest.update(b"jimgw-xg-bin-edges-v1\0float64-le\0")
+        bin_digest.update(bin_edges.tobytes(order="C"))
+        return bin_digest.hexdigest()
+
+    @classmethod
+    def _plan_fixed_reference_bin_edges(
+        cls,
+        frequencies: Float[Array, " n_freq"],
+        n_bins: int,
+        reference_waveform: Waveform,
+        reference_parameters: Mapping[str, Any],
+        reference_chunk_size: int,
+    ) -> tuple[
+        Float[Array, " n_valid+1"],
+        dict[str, Array],
+        dict[str, Array],
+    ]:
+        """Plan retained edges and endpoint waveforms without summary construction."""
+
+        frequency_edges = cls._make_binning_scheme(frequencies, n_bins=n_bins)
+        support = cls._find_reference_frequency_support_on_grid(
+            frequencies,
+            reference_waveform,
+            reference_parameters,
+            reference_chunk_size,
+        )
+        frequency_edges = cls._frequency_edges_from_support(frequency_edges, support)
+        waveform_low = reference_waveform(frequency_edges[:-1], reference_parameters)
+        waveform_high = reference_waveform(frequency_edges[1:], reference_parameters)
+        return cls._trim_reference_edge_arrays(
+            frequency_edges,
+            waveform_low,
+            waveform_high,
+        )
 
     @staticmethod
     def _max_phase_diff(

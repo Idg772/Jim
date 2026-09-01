@@ -29,6 +29,11 @@ def build_data(
     time_frame: str = "detector",
     time_dependent_response: bool = False,
     finite_arm_response: bool = False,
+    orbital_motion_response: bool = False,
+    orbital_reference_time: Optional[float] = None,
+    orbital_validity_s: Optional[tuple[float, float]] = None,
+    orbital_acceleration_over_c: Optional[tuple[float, float, float]] = None,
+    orbital_jerk_over_c: Optional[tuple[float, float, float]] = None,
     seed: int = 0,
     input_provenance_sha256: Optional[dict[str, str]] = None,
 ) -> list[GroundBased2G]:
@@ -60,6 +65,13 @@ def build_data(
             )
         ifo.time_dependent_response = time_dependent_response
         ifo.finite_arm_response = finite_arm_response
+        ifo.configure_orbital_motion_response(
+            enabled=orbital_motion_response,
+            reference_time=orbital_reference_time,
+            validity_s=orbital_validity_s,
+            acceleration_over_c=orbital_acceleration_over_c,
+            jerk_over_c=orbital_jerk_over_c,
+        )
 
     if isinstance(data_cfg, GWOSCDataConfig):
         _load_gwosc(ifos, data_cfg)
@@ -72,7 +84,11 @@ def build_data(
             f_max=f_max,
             time_frame=time_frame,
             seed=seed,
-            require_configured_psd=(time_dependent_response or finite_arm_response),
+            require_configured_psd=(
+                time_dependent_response
+                or finite_arm_response
+                or orbital_motion_response
+            ),
         )
     elif isinstance(data_cfg, FileDataConfig):
         _load_files(ifos, data_cfg, f_min=f_min, f_max=f_max)

@@ -71,6 +71,73 @@ class LongWavelengthResponse(NamedTuple):
     gmst: Float[Array, "..."]
 
 
+def inertial_source_direction(
+    ra: Float[Array, "..."] | float,
+    dec: Float[Array, "..."] | float,
+) -> Float[Array, "3 ..."]:
+    """Return the geocentre-to-source unit vector in inertial coordinates.
+
+    Right ascension is already an inertial angle, so this vector deliberately
+    has no GMST dependence.  The Earth-fixed source direction used for the
+    terrestrial detector geometry is a different object and remains in
+    :func:`_sky_basis`.
+    """
+
+    ra, dec = jnp.broadcast_arrays(ra, dec)
+    cos_dec = jnp.cos(dec)
+    return jnp.stack(
+        [cos_dec * jnp.cos(ra), cos_dec * jnp.sin(ra), jnp.sin(dec)],
+        axis=0,
+    )
+
+
+def earth_orbital_curvature_delay(
+    ra: Float[Array, "..."] | float,
+    dec: Float[Array, "..."] | float,
+    emission_offset: Float[Array, "..."] | float,
+    acceleration_over_c: Float[Array, "3"] | tuple[float, float, float],
+    jerk_over_c: Float[Array, "3"] | tuple[float, float, float],
+) -> Float[Array, "..."]:
+    """Return the nonlinear Earth-orbital arrival-time residual.
+
+    ``emission_offset`` is ``t_c - tau(f)`` relative to the trigger epoch.
+    ``acceleration_over_c`` and ``jerk_over_c`` are inertial Earth-centre
+    quadratic and cubic surrogate coefficients divided by the speed of light,
+    in ``s^-1`` and ``s^-2`` respectively. They can be instantaneous
+    ephemeris derivatives or coefficients fitted over a declared time window.
+    Removing the constant position and linear velocity terms leaves the
+    light-second displacement
+
+    ``delta_r/c = 1/2 (a/c) dt^2 + 1/6 (j/c) dt^3``.
+
+    The returned detector delay is ``-n . delta_r/c``, matching the sign of
+    :func:`delay_from_geocenter`.  Consequently the frequency-domain response
+    contains ``exp(+2 pi i f n . delta_r/c)``.
+
+    The coefficient vectors must have exactly three inertial Cartesian
+    components.  Finite-value validation belongs to the detector configuration
+    boundary so this primitive remains JIT compatible.
+    """
+
+    acceleration_over_c = jnp.asarray(acceleration_over_c)
+    jerk_over_c = jnp.asarray(jerk_over_c)
+    if acceleration_over_c.shape != (3,):
+        raise ValueError("acceleration_over_c must have exactly three components")
+    if jerk_over_c.shape != (3,):
+        raise ValueError("jerk_over_c must have exactly three components")
+
+    ra, dec, emission_offset = jnp.broadcast_arrays(ra, dec, emission_offset)
+    vector_shape = (3,) + (1,) * emission_offset.ndim
+    acceleration_over_c = jnp.reshape(acceleration_over_c, vector_shape)
+    jerk_over_c = jnp.reshape(jerk_over_c, vector_shape)
+    displacement_over_c = (
+        0.5 * acceleration_over_c * emission_offset**2
+        + (1.0 / 6.0) * jerk_over_c * emission_offset**3
+    )
+    source_direction = inertial_source_direction(ra, dec)
+    return -jnp.sum(source_direction * displacement_over_c, axis=0)
+
+
 def time_to_coalescence_2pn(
     frequency: Float[Array, "..."],
     mass_1: Float[Array, ""] | float,

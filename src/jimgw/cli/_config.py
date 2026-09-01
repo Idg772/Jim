@@ -180,7 +180,18 @@ def xg_runtime_environment_sha256() -> str:
     import jax
 
     package_versions = {}
-    for package_name in ("jax", "jaxlib", "numpy", "scipy", "ripplegw", "equinox"):
+    for package_name in (
+        "jax",
+        "jaxlib",
+        "numpy",
+        "scipy",
+        "ripplegw",
+        "equinox",
+        "lalsuite",
+        "astropy",
+        "bilby",
+        "gwpy",
+    ):
         try:
             package_versions[package_name] = version(package_name)
         except PackageNotFoundError:
@@ -817,7 +828,7 @@ class XGIndependentResponseReceipt(XGReceiptEvidence):
 
 
 class XGOrbitalValidationReceipt(XGReceiptEvidence):
-    """Profiled full-ephemeris orbital-omission receipt."""
+    """Profiled full-ephemeris orbital-response receipt."""
 
     model_config = {"extra": "forbid", "strict": True}
     schema_version: Literal[1]
@@ -911,6 +922,7 @@ class XGQualificationManifest(BaseModel):
     n_bins: int = Field(ge=1, strict=True)
     time_dependent_response: bool
     finite_arm_response: bool
+    orbital_motion_response: bool = False
     max_network_snr: float = Field(gt=0.0)
     max_component_delta_log_l: float = Field(ge=0.0, le=0.01)
     max_combined_delta_log_l: float = Field(ge=0.0, le=0.05)
@@ -962,6 +974,13 @@ class LikelihoodConfig(BaseModel):
     fixed_parameters: dict[str, float] = Field(default_factory=dict)
     time_dependent_response: bool = False
     finite_arm_response: bool = False
+    orbital_motion_response: bool = False
+    orbital_reference_time: Optional[float] = None
+    orbital_validity_s: Optional[tuple[float, float]] = None
+    orbital_acceleration_over_c: Optional[tuple[float, float, float]] = None
+    orbital_jerk_over_c: Optional[tuple[float, float, float]] = None
+    orbital_earth_ephemeris_file: Optional[Path] = None
+    orbital_sun_ephemeris_file: Optional[Path] = None
     phase_marginalization: bool = False
     time_marginalization: Optional[CLITimeMargConfig] = None
     distance_marginalization: Optional[CLIDistanceMargConfig] = None
@@ -970,6 +989,46 @@ class LikelihoodConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_marginalization_conflicts(self) -> "LikelihoodConfig":
+        orbital_fields = (
+            self.orbital_reference_time,
+            self.orbital_validity_s,
+            self.orbital_acceleration_over_c,
+            self.orbital_jerk_over_c,
+            self.orbital_earth_ephemeris_file,
+            self.orbital_sun_ephemeris_file,
+        )
+        if self.orbital_motion_response:
+            if not self.time_dependent_response:
+                raise ValueError(
+                    "orbital_motion_response requires time_dependent_response"
+                )
+            if any(value is None for value in orbital_fields):
+                raise ValueError(
+                    "orbital_motion_response requires a reference epoch, validity "
+                    "interval, acceleration, jerk, and pinned Earth/Sun ephemerides"
+                )
+            assert self.orbital_validity_s is not None
+            assert self.orbital_acceleration_over_c is not None
+            assert self.orbital_jerk_over_c is not None
+            numeric_values = (
+                self.orbital_reference_time,
+                *self.orbital_validity_s,
+                *self.orbital_acceleration_over_c,
+                *self.orbital_jerk_over_c,
+            )
+            if not all(
+                value is not None and math.isfinite(value) for value in numeric_values
+            ):
+                raise ValueError("orbital response coefficients must be finite")
+            lower, upper = self.orbital_validity_s
+            if not lower < 0.0 < upper:
+                raise ValueError(
+                    "orbital_validity_s must be an ordered interval containing zero"
+                )
+        elif any(value is not None for value in orbital_fields):
+            raise ValueError(
+                "orbital response fields require orbital_motion_response = true"
+            )
         if self.heterodyne is not None and self.multiband is not None:
             raise ValueError("heterodyne and multiband cannot both be set")
         if self.heterodyne is not None and self.distance_marginalization is not None:
@@ -1121,6 +1180,7 @@ class PipelineConfig(BaseModel):
     _verified_xg_manifest_path: Optional[Path] = PrivateAttr(default=None)
     _verified_xg_manifest_sha256: Optional[str] = PrivateAttr(default=None)
     _verified_xg_artifact_hashes: dict[Path, str] = PrivateAttr(default_factory=dict)
+    _xg_qualification_preflight: bool = PrivateAttr(default=False)
 
     seed: int = 0
     data: DataConfig
@@ -1138,6 +1198,12 @@ class PipelineConfig(BaseModel):
         if self._verified_xg_manifest is None:
             return None
         return self._verified_xg_manifest.model_copy(deep=True)
+
+    @property
+    def is_xg_qualification_preflight(self) -> bool:
+        """Return whether validation explicitly authorized qualification work."""
+
+        return self._xg_qualification_preflight
 
     def _issue_verified_xg_plan(self) -> Any:
         """Issue the core capability only from a still-matching pipeline."""
@@ -1217,7 +1283,20 @@ class PipelineConfig(BaseModel):
     def xg_input_files_sha256(self) -> dict[str, str]:
         """Return hashes for the immutable local inputs in this run."""
 
-        return _xg_input_files_sha256(self.data)
+        hashes = _xg_input_files_sha256(self.data)
+        if self.likelihood.orbital_motion_response:
+            earth = self.likelihood.orbital_earth_ephemeris_file
+            sun = self.likelihood.orbital_sun_ephemeris_file
+            assert earth is not None
+            assert sun is not None
+            try:
+                hashes["ephemeris:earth"] = _file_sha256(earth)
+                hashes["ephemeris:sun"] = _file_sha256(sun)
+            except OSError as error:
+                raise ValueError(
+                    f"cannot hash XG ephemeris file: {error.filename}"
+                ) from error
+        return hashes
 
     @model_validator(mode="after")
     def _validate_time_marginalization_parameters(self) -> "PipelineConfig":
@@ -1265,6 +1344,25 @@ class PipelineConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _validate_orbital_response_epoch(self) -> "PipelineConfig":
+        if not self.likelihood.orbital_motion_response:
+            return self
+        reference_time = self.likelihood.orbital_reference_time
+        validity = self.likelihood.orbital_validity_s
+        assert reference_time is not None
+        assert validity is not None
+        if reference_time != self.data.trigger_time:
+            raise ValueError(
+                "orbital_reference_time must equal data.trigger_time exactly"
+            )
+        duration = getattr(self.data, "duration", None)
+        if duration is not None and -float(duration) < validity[0]:
+            raise ValueError(
+                "orbital_validity_s does not cover the complete data duration"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_xg_qualification_manifest(
         self,
         info: ValidationInfo,
@@ -1287,6 +1385,7 @@ class PipelineConfig(BaseModel):
 
         if info.context and info.context.get("prepare_xg_qualification", False):
             self.xg_input_files_sha256()
+            self._xg_qualification_preflight = True
             return self
         if manifest_path is None or expected_digest is None:
             raise ValueError(
@@ -1657,6 +1756,7 @@ class PipelineConfig(BaseModel):
             "n_bins": heterodyne.n_bins,
             "time_dependent_response": self.likelihood.time_dependent_response,
             "finite_arm_response": self.likelihood.finite_arm_response,
+            "orbital_motion_response": self.likelihood.orbital_motion_response,
             "source_revision": xg_source_revision(),
             "implementation_sha256": xg_implementation_sha256(),
             "runtime_environment_sha256": xg_runtime_environment_sha256(),

@@ -21,7 +21,10 @@ from jimgw.core.constants import (
 )
 from jimgw.core.single_event.data import Data, PowerSpectrum
 from jimgw.core.single_event.polarization import Polarization
-from jimgw.core.single_event.time_dependent_response import emission_gmst
+from jimgw.core.single_event.time_dependent_response import (
+    earth_orbital_curvature_delay,
+    emission_gmst,
+)
 from jimgw.core.single_event.time_utils import (
     greenwich_mean_sidereal_time as compute_gmst,
 )
@@ -293,6 +296,11 @@ class GroundBased2G(Detector):
     arm_length_m: Optional[float] = None
     finite_arm_response: bool = False
     time_dependent_response: bool = False
+    orbital_motion_response: bool = False
+    orbital_acceleration_over_c: Optional[tuple[float, float, float]] = None
+    orbital_jerk_over_c: Optional[tuple[float, float, float]] = None
+    orbital_reference_time: Optional[float] = None
+    orbital_validity_s: Optional[tuple[float, float]] = None
     optimal_snr: Optional[FloatScalar] = None
     match_filtered_snr: Optional[Complex] = None
 
@@ -314,6 +322,11 @@ class GroundBased2G(Detector):
         arm_length_m: Optional[float] = None,
         finite_arm_response: bool = False,
         time_dependent_response: bool = False,
+        orbital_motion_response: bool = False,
+        orbital_acceleration_over_c: Optional[tuple[float, float, float]] = None,
+        orbital_jerk_over_c: Optional[tuple[float, float, float]] = None,
+        orbital_reference_time: Optional[float] = None,
+        orbital_validity_s: Optional[tuple[float, float]] = None,
     ):
         """Initialize a ground-based detector.
 
@@ -336,6 +349,23 @@ class GroundBased2G(Detector):
                 orientation and delay at the waveform's frequency-dependent
                 emission time. The waveform must provide a ``__tau__`` leaf.
                 Defaults to False.
+            orbital_motion_response (bool, optional): Add the nonlinear
+                Earth-orbital delay at the waveform's emission time. This
+                requires ``time_dependent_response`` and both orbital Taylor
+                coefficient vectors. Defaults to False.
+            orbital_acceleration_over_c (tuple[float, float, float], optional):
+                Effective inertial Earth-centre acceleration coefficient divided
+                by the speed of light, in ``s^-1``. It may be an
+                ephemeris-fitted cubic-surrogate coefficient.
+            orbital_jerk_over_c (tuple[float, float, float], optional): Inertial
+                Earth-centre cubic coefficient divided by the speed of light,
+                in ``s^-2``. It may be fitted over the declared validity window.
+            orbital_reference_time (float, optional): GPS epoch at which the
+                orbital coefficients were derived. It must equal the analysis
+                trigger time when the response is enabled.
+            orbital_validity_s (tuple[float, float], optional): Inclusive
+                emission-offset interval, in seconds relative to
+                ``orbital_reference_time``, qualified for the Taylor model.
         """
         super().__init__()
 
@@ -357,11 +387,168 @@ class GroundBased2G(Detector):
         self.arm_length_m = arm_length_m
         self.finite_arm_response = finite_arm_response
         self.time_dependent_response = time_dependent_response
+        self.orbital_motion_response = orbital_motion_response
+        self.orbital_acceleration_over_c = self._orbital_coefficient_tuple(
+            "orbital_acceleration_over_c", orbital_acceleration_over_c
+        )
+        self.orbital_jerk_over_c = self._orbital_coefficient_tuple(
+            "orbital_jerk_over_c", orbital_jerk_over_c
+        )
+        if orbital_reference_time is not None and not math.isfinite(
+            orbital_reference_time
+        ):
+            raise ValueError("orbital_reference_time must be finite")
+        self.orbital_reference_time = orbital_reference_time
+        self.orbital_validity_s = self._orbital_validity_tuple(orbital_validity_s)
+        self._validate_orbital_motion_configuration()
         self.input_provenance_sha256 = None
 
         self.polarization_mode = [Polarization(m) for m in modes]
         self.data = Data()
         self.psd = PowerSpectrum()
+
+    @staticmethod
+    def _orbital_coefficient_tuple(
+        name: str,
+        coefficient: Optional[tuple[float, float, float]],
+    ) -> Optional[tuple[float, float, float]]:
+        """Validate and normalize one inertial orbital Taylor coefficient."""
+
+        if coefficient is None:
+            return None
+        try:
+            array = np.asarray(coefficient, dtype=float)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{name} must contain three finite values") from error
+        if array.shape != (3,) or not np.all(np.isfinite(array)):
+            raise ValueError(f"{name} must contain three finite values")
+        return float(array[0]), float(array[1]), float(array[2])
+
+    @staticmethod
+    def _orbital_validity_tuple(
+        validity: Optional[tuple[float, float]],
+    ) -> Optional[tuple[float, float]]:
+        """Validate and normalize the qualified emission-offset interval."""
+
+        if validity is None:
+            return None
+        try:
+            array = np.asarray(validity, dtype=float)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "orbital_validity_s must contain two ordered finite values"
+            ) from error
+        if (
+            array.shape != (2,)
+            or not np.all(np.isfinite(array))
+            or not array[0] < 0.0 < array[1]
+        ):
+            raise ValueError(
+                "orbital_validity_s must contain two ordered finite values "
+                "bracketing zero"
+            )
+        return float(array[0]), float(array[1])
+
+    def _validate_orbital_motion_configuration(self) -> None:
+        """Fail closed when the optional orbital response is incomplete."""
+
+        acceleration = self._orbital_coefficient_tuple(
+            "orbital_acceleration_over_c", self.orbital_acceleration_over_c
+        )
+        jerk = self._orbital_coefficient_tuple(
+            "orbital_jerk_over_c", self.orbital_jerk_over_c
+        )
+        validity = self._orbital_validity_tuple(self.orbital_validity_s)
+        reference_time = self.orbital_reference_time
+        if reference_time is not None and not math.isfinite(reference_time):
+            raise ValueError("orbital_reference_time must be finite")
+        metadata_present = (
+            acceleration is not None,
+            jerk is not None,
+            reference_time is not None,
+            validity is not None,
+        )
+        if any(metadata_present) and not all(metadata_present):
+            raise ValueError(
+                "orbital coefficients, reference time, and validity must be "
+                "provided together"
+            )
+        if not self.orbital_motion_response:
+            return
+        if not self.time_dependent_response:
+            raise ValueError(
+                "orbital_motion_response=True requires time_dependent_response=True"
+            )
+        if not all(metadata_present):
+            raise ValueError(
+                "orbital_motion_response=True requires orbital coefficients, "
+                "reference time, and validity"
+            )
+
+    def validate_orbital_motion_for_trigger(self, trigger_time: float) -> None:
+        """Validate that orbital coefficients are anchored to ``trigger_time``."""
+
+        self._validate_orbital_motion_configuration()
+        if not self.orbital_motion_response:
+            return
+        if not math.isfinite(trigger_time):
+            raise ValueError("trigger_time must be finite for orbital motion response")
+        if trigger_time != self.orbital_reference_time:
+            raise ValueError(
+                "orbital_reference_time must exactly match the analysis trigger_time"
+            )
+
+    def configure_orbital_motion_response(
+        self,
+        *,
+        enabled: bool,
+        reference_time: Optional[float] = None,
+        validity_s: Optional[tuple[float, float]] = None,
+        acceleration_over_c: Optional[tuple[float, float, float]] = None,
+        jerk_over_c: Optional[tuple[float, float, float]] = None,
+    ) -> None:
+        """Atomically configure the qualified Earth-orbital response.
+
+        Calling this with ``enabled=False`` and no metadata clears a previous
+        configuration.  Complete metadata may be installed while disabled,
+        but partial metadata is always rejected.
+        """
+
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be a bool")
+        acceleration = self._orbital_coefficient_tuple(
+            "orbital_acceleration_over_c", acceleration_over_c
+        )
+        jerk = self._orbital_coefficient_tuple("orbital_jerk_over_c", jerk_over_c)
+        validity = self._orbital_validity_tuple(validity_s)
+        if reference_time is not None and not math.isfinite(reference_time):
+            raise ValueError("orbital_reference_time must be finite")
+        metadata_present = (
+            acceleration is not None,
+            jerk is not None,
+            reference_time is not None,
+            validity is not None,
+        )
+        if any(metadata_present) and not all(metadata_present):
+            raise ValueError(
+                "orbital coefficients, reference time, and validity must be "
+                "provided together"
+            )
+        if enabled and not self.time_dependent_response:
+            raise ValueError(
+                "orbital_motion_response=True requires time_dependent_response=True"
+            )
+        if enabled and not all(metadata_present):
+            raise ValueError(
+                "orbital_motion_response=True requires orbital coefficients, "
+                "reference time, and validity"
+            )
+
+        self.orbital_motion_response = enabled
+        self.orbital_acceleration_over_c = acceleration
+        self.orbital_jerk_over_c = jerk
+        self.orbital_reference_time = reference_time
+        self.orbital_validity_s = validity
 
     @staticmethod
     def _get_arm(
@@ -487,6 +674,7 @@ class GroundBased2G(Detector):
             Array: Complex strain measured by the detector in frequency domain, obtained by
                   combining the antenna patterns for each polarization mode.
         """
+        self._validate_orbital_motion_configuration()
         ra, dec, psi, gmst = params["ra"], params["dec"], params["psi"], params["gmst"]
         tau = h_sky.get("__tau__")
         if self.time_dependent_response:
@@ -526,6 +714,30 @@ class GroundBased2G(Detector):
         else:
             antenna_pattern = self.antenna_pattern(ra, dec, psi, gmst)
             time_shift = self.delay_from_geocenter(ra, dec, gmst)
+        if self.orbital_motion_response:
+            trigger_time = params["trigger_time"]
+            if isinstance(trigger_time, (int, float, np.integer, np.floating)):
+                self.validate_orbital_motion_for_trigger(float(trigger_time))
+            emission_offset = params["t_c"] - tau
+            acceleration = self.orbital_acceleration_over_c
+            jerk = self.orbital_jerk_over_c
+            validity = self.orbital_validity_s
+            if acceleration is None or jerk is None or validity is None:
+                raise RuntimeError("validated orbital response metadata is missing")
+            orbital_delay = earth_orbital_curvature_delay(
+                ra,
+                dec,
+                emission_offset,
+                acceleration,
+                jerk,
+            )
+            validity_min, validity_max = validity
+            valid = (
+                (jnp.asarray(trigger_time) == self.orbital_reference_time)
+                & (emission_offset >= validity_min)
+                & (emission_offset <= validity_max)
+            )
+            time_shift += jnp.where(valid, orbital_delay, jnp.nan)
         time_shift += params["trigger_time"] - self.start_time + params["t_c"]
 
         h_detector = jax.tree_util.tree_map(

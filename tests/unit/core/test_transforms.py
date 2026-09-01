@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import jax.scipy.special
 import numpy as np
 
+from jimgw.core.prior import SinePrior
 from jimgw.core.transforms import (
     BoundToBound,
     BoundToUnbound,
@@ -164,6 +165,26 @@ class TestBasicTransforms:
         jitted_recovered, jitted_inv_log_det = jit_inverse(jitted_output)
         assert np.allclose(jitted_recovered["theta"], angle)
         assert np.isfinite(jitted_inv_log_det)
+
+    def test_cosine_transform_has_a_finite_bounded_sampling_density(self):
+        transform = CosineTransform((["iota"], ["cos_iota"]))
+        prior = SinePrior(["iota"])
+
+        def transformed_log_prior(cos_iota):
+            physical, inverse_log_det = transform.inverse({"cos_iota": cos_iota})
+            return physical["iota"], prior.log_prob(physical) + inverse_log_det
+
+        values = jnp.asarray([-1.1, -1.0, -0.75, 0.0, 0.75, 1.0, 1.1])
+        inclinations, log_probabilities = jax.vmap(transformed_log_prior)(values)
+
+        assert np.all(np.isfinite(np.asarray(inclinations)))
+        assert np.all(np.isneginf(np.asarray(log_probabilities)[[0, -1]]))
+        np.testing.assert_allclose(
+            np.asarray(log_probabilities)[1:-1],
+            -np.log(2.0),
+            rtol=2e-6,
+            atol=2e-6,
+        )
 
     def test_bound_to_bound(self):
         name_mapping = (["x"], ["x_mapped"])

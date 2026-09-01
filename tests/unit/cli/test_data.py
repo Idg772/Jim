@@ -59,6 +59,49 @@ def test_response_flags_are_set_before_data_or_injection_loading(monkeypatch):
     assert detectors[0].finite_arm_response is True
 
 
+def test_orbital_response_is_configured_before_data_loading(monkeypatch):
+    observed = {}
+
+    def capture_flags(ifos, config, **kwargs):
+        del config, kwargs
+        detector = ifos[0]
+        observed.update(
+            enabled=detector.orbital_motion_response,
+            reference=detector.orbital_reference_time,
+            validity=detector.orbital_validity_s,
+            acceleration=detector.orbital_acceleration_over_c,
+            jerk=detector.orbital_jerk_over_c,
+        )
+        detector.set_data(Data(jnp.zeros(8), 0.25))
+        detector.set_psd(PowerSpectrum(jnp.ones(5), jnp.arange(5, dtype=float) * 0.5))
+
+    monkeypatch.setattr(_data, "_load_files", capture_flags)
+    waveform = DominantModeTimeCachedWaveform(RippleIMRPhenomD(f_ref=20.0))
+    reference = _file_config().trigger_time
+
+    detectors = _data.build_data(
+        _file_config(),
+        f_min=0.5,
+        f_max=2.0,
+        waveform=waveform,
+        time_dependent_response=True,
+        orbital_motion_response=True,
+        orbital_reference_time=reference,
+        orbital_validity_s=(-10.0, 0.2),
+        orbital_acceleration_over_c=(1.0e-11, 2.0e-11, 3.0e-11),
+        orbital_jerk_over_c=(1.0e-18, 2.0e-18, 3.0e-18),
+    )
+
+    assert observed == {
+        "enabled": True,
+        "reference": reference,
+        "validity": (-10.0, 0.2),
+        "acceleration": (1.0e-11, 2.0e-11, 3.0e-11),
+        "jerk": (1.0e-18, 2.0e-18, 3.0e-18),
+    }
+    assert detectors[0].orbital_motion_response is True
+
+
 def test_detector_metadata_receipt_changes_with_physical_geometry():
     detector = get_H1()
     baseline = detector_metadata_sha256([detector])

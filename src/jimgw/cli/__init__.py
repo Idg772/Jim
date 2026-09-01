@@ -126,8 +126,10 @@ def run(
     logger.info("Loaded config from %s", config)
 
     likelihood_raw = raw.get("likelihood", {})
-    if likelihood_raw.get("time_dependent_response", False) or likelihood_raw.get(
-        "finite_arm_response", False
+    if (
+        likelihood_raw.get("time_dependent_response", False)
+        or likelihood_raw.get("finite_arm_response", False)
+        or likelihood_raw.get("orbital_motion_response", False)
     ):
         import jax
 
@@ -185,6 +187,11 @@ def run(
         time_frame=cfg.sampling.time_frame,
         time_dependent_response=cfg.likelihood.time_dependent_response,
         finite_arm_response=cfg.likelihood.finite_arm_response,
+        orbital_motion_response=cfg.likelihood.orbital_motion_response,
+        orbital_reference_time=cfg.likelihood.orbital_reference_time,
+        orbital_validity_s=cfg.likelihood.orbital_validity_s,
+        orbital_acceleration_over_c=(cfg.likelihood.orbital_acceleration_over_c),
+        orbital_jerk_over_c=cfg.likelihood.orbital_jerk_over_c,
         seed=cfg.seed,
         input_provenance_sha256=(
             cfg.verified_xg_manifest.input_files_sha256
