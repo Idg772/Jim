@@ -85,6 +85,9 @@ def _fake_repository(tmp_path: Path) -> Path:
         destination = repository.joinpath(*relative.parts)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(REPOSITORY.joinpath(*relative.parts), destination)
+    (repository / "order/branch/file.txt").parent.mkdir(parents=True)
+    (repository / "order/branch/file.txt").write_text("nested\n")
+    (repository / "order-branch.txt").write_text("sibling\n")
     _git(repository, "init")
     _git(repository, "add", ".")
     _git(

@@ -192,7 +192,9 @@ def _tree_entries(
 ) -> tuple[list[dict[str, Any]], str]:
     entries: list[dict[str, Any]] = []
     aggregate = hashlib.sha256()
-    for path in sorted(root.rglob("*")):
+    for path in sorted(
+        root.rglob("*"), key=lambda candidate: candidate.relative_to(root).as_posix()
+    ):
         if path.is_symlink():
             raise ValueError(f"artifact tree contains a forbidden symlink: {path}")
         if path.is_dir():
