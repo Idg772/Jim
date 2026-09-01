@@ -126,7 +126,7 @@ nvidia-smi \
 
 export PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
 export UV_CACHE_DIR="/root/.cache/uv"
-export UV_PROJECT_ENVIRONMENT="/workspace/jim-xg-venv-${source_revision:0:12}"
+export UV_PROJECT_ENVIRONMENT="/root/jim-xg-venv-${source_revision:0:12}"
 export UV_HTTP_TIMEOUT=300
 export UV_HTTP_RETRIES=10
 export UV_CONCURRENT_DOWNLOADS=4
@@ -149,7 +149,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=true
 export JAX_ENABLE_COMPILATION_CACHE=1
-export JAX_COMPILATION_CACHE_DIR="/workspace/jim-xg-jax-cache-${source_revision:0:12}"
+export JAX_COMPILATION_CACHE_DIR="/root/jim-xg-jax-cache-${source_revision:0:12}"
 export JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0
 export JAX_USE_SIMPLIFIED_JAXPR_CONSTANTS=True
 export JAX_EMBEDDED_CONSTANTS_MAX_BYTES=32

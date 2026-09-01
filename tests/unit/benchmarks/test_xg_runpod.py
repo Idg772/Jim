@@ -399,6 +399,8 @@ def test_remote_runner_orders_every_fail_closed_gate_before_sampling() -> None:
     assert "trap 'publish_results $?' EXIT" in script
     assert "Expected exactly four JAX CUDA devices" in script
     assert script.count('[[ "$(uv --version)" != "uv 0.11.2"* ]]') == 2
+    assert 'UV_PROJECT_ENVIRONMENT="/root/jim-xg-venv-' in script
+    assert 'JAX_COMPILATION_CACHE_DIR="/root/jim-xg-jax-cache-' in script
     assert "compile(source.read_bytes()" in script
     assert 'archive_python="$UV_PROJECT_ENVIRONMENT/bin/python"' in script
     assert "Qualification manifest changed during science sampling" in script
