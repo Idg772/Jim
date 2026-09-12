@@ -1,0 +1,111 @@
+{
+  "qualification": false,
+  "args": {
+    "output": "/workspace/xg-deferred-sampling8",
+    "mode": "sample",
+    "variants": [
+      "endpoint_skip",
+      "deferred_skip"
+    ],
+    "sampler_seed": 2,
+    "sweeps": 8,
+    "repeats": 15,
+    "warmups": 3,
+    "compile_workers": 1,
+    "sample_best": false,
+    "longer_sweeps": null,
+    "contour_drops": [
+      10,
+      100,
+      1000
+    ],
+    "config": "benchmarks/xg/xg-ce-carrier-adaptive.toml",
+    "duration": 8192.0,
+    "noise_seed": 1,
+    "devices": 4,
+    "live_points": 4096,
+    "prefix_fraction": 0.0,
+    "minimum_batch": 32,
+    "precompile_outer": true
+  },
+  "slice_controls": {
+    "bracket_mode": "stepping-out",
+    "max_expansions": 10,
+    "max_shrinkage": 100
+  },
+  "resolved_segments_per_sweep": [
+    [
+      true,
+      9
+    ],
+    [
+      false,
+      3
+    ]
+  ],
+  "prefetch_scope": "Nine-slice R segments; three-slice H segments use the baseline (endpoint skip for the combined variant).",
+  "sampler": {
+    "n_devices": 4,
+    "n_live": 4096,
+    "n_delete_frac": 0.125,
+    "checkpoint_dir": null,
+    "checkpoint_interval": 0.0,
+    "type": "blackjax-swig",
+    "blocks": [
+      [
+        "M_hat",
+        "q",
+        "lambda_1",
+        "lambda_2",
+        "s1_z",
+        "s2_z",
+        "t_det"
+      ],
+      [
+        "ra",
+        "dec"
+      ],
+      [
+        "psi"
+      ],
+      [
+        "cos_iota",
+        "d_hat"
+      ]
+    ],
+    "fold_symmetry": null,
+    "bridge_blocks": [],
+    "block_kernel_modes": null,
+    "scheduler": "fsm",
+    "scalar_extrinsic_cache": true,
+    "likelihood_screen_fraction": 0.0,
+    "likelihood_screen_minimum_batch": 32,
+    "num_gibbs_sweeps": 8,
+    "num_inner_steps_per_dim": 1,
+    "num_slice_steps_by_block": null,
+    "max_steps": 10,
+    "max_shrinkage": 100,
+    "termination_dlogz": 0.0485873516,
+    "direction_mode": "covariance",
+    "periodic_wrapped_covariance": true,
+    "de_fraction": 0.5,
+    "num_de_jumps": 0,
+    "de_jump_blocks": [],
+    "complementary_de_jump_block": null,
+    "adaptive_slice_widths": true,
+    "width_adaptation_rate": 0.25,
+    "width_target_expansions": 1.0,
+    "width_target_shrinks": 3.0,
+    "bracket_mode": "stepping-out"
+  },
+  "likelihood": "Factored arms and even/odd phasors, 15 anchors / M16 / K8",
+  "source_sha256": {
+    "/workspace/jim-xg-next/benchmarks/xg/run_stepping_prefetch.py": "adfb93a5597e96a8fd86bdab4b6c1fa518d3f8033c50ca8d08e79415c87ced87",
+    "/workspace/jim-xg-next/benchmarks/xg/benchmark_lvk_cache_translation.py": "7ba1670987a3421e0938bad37a9bc336f35ca18aa4811f3eae2cebd0d854bf4f",
+    "benchmarks/xg/tuned_endpoint_skip.py": "48572ec9c606e95f481ac449bde07922e443ee49d042495bf7e3a71e22447588",
+    "benchmarks/xg/tuned_shrink_prefetch.py": "1a5c0f9c7b93c292d213684c3e022cb9b9db57e54e1cb0b1fafceb170baef527",
+    "benchmarks/xg/tuned_endpoint_borrow.py": "278707e9144448909e7c7a559ab597b4b586a6e192090ae4938e65cb690e834a",
+    "benchmarks/xg/tuned_deferred_cache.py": "22fbcc554ce3e61bf44ad14fe8759ac4661858a3aaaa9d22bbdd01094ee7dfb0"
+  },
+  "physical_counter_scope": "Unchanged legacy E+S+2*n_slices is logical reference work, not actual requests of skip/compaction/prefetch prototypes."
+}

@@ -1,0 +1,421 @@
+{
+  "versions": {
+    "JimGW": "0.0.dev0+network.ae583ebe5eec",
+    "rippleGW": "0.3.0"
+  },
+  "n_likelihood_evaluations": 100562217.0,
+  "n_iterations": 650.0,
+  "n_likelihood_evaluations_stepping_out": 30613471.0,
+  "n_likelihood_evaluations_shrinking": 69948746.0,
+  "log_Z": 3354358.6042179167,
+  "log_Z_error": 0.14923517968562153,
+  "sample_phase_seconds": {
+    "init_total": 18.52680564671755,
+    "likelihood_jit": 10.505847507156432,
+    "initial_likelihood_eval": 1.093027419410646,
+    "sampler_kernel_jit": 150.35515372175723,
+    "ns_loop": 481.5734529644251,
+    "finalise": 14.080319002270699,
+    "init_particle_replication": 0.7103850757703185,
+    "init_adaptive_init": 6.170506070367992,
+    "init_state_placement": 0.0015308931469917297
+  },
+  "n_likelihood_evaluations_de_jumps": 0.0,
+  "n_de_jump_attempts": 0.0,
+  "n_de_jump_acceptances": 0.0,
+  "de_jump_acceptance_rate": null,
+  "n_slice_updates": 31948800.0,
+  "n_likelihood_evaluations_physical": 164459817.0,
+  "sampling_time": 665.275961201638,
+  "likelihood_construction": {
+    "source_construction": {
+      "summary_backend": "jax",
+      "evaluation": {
+        "requested_mode": "auto",
+        "implementation": "factored-carrier-network-v2",
+        "fallback_reason": null,
+        "waveform_nodes": 18432.0,
+        "detector_channels": 4.0,
+        "node_frequency_prefix": null,
+        "native_summaries_unchanged": 1.0,
+        "scalar_summary": "factored-two-mode",
+        "network_kernel": {
+          "implementation": "batched-anchored-network-v1",
+          "trim_zero_bins": 1.0,
+          "reuse_opposite_arms": 1.0,
+          "norm_method": "gram",
+          "source_nodes": 18432.0,
+          "full_detector_response_nodes": 73728.0,
+          "active_detector_response_nodes": 69147.0,
+          "active_bins_by_detector": {
+            "CE": 1539.0,
+            "ET1": 2048.0,
+            "ET2": 2048.0,
+            "ET3": 2048.0
+          },
+          "entirely_zero_channels": [],
+          "groups": [
+            {
+              "detector_indices": [
+                0.0
+              ],
+              "detectors": [
+                "CE"
+              ],
+              "active_bins": 1539.0,
+              "skipped_bins": 509.0,
+              "nodes_per_detector": 13851.0
+            },
+            {
+              "detector_indices": [
+                1.0,
+                2.0,
+                3.0
+              ],
+              "detectors": [
+                "ET1",
+                "ET2",
+                "ET3"
+              ],
+              "active_bins": 2048.0,
+              "skipped_bins": 0.0,
+              "nodes_per_detector": 18432.0
+            }
+          ],
+          "response": {
+            "shared_emission_frame": 1.0,
+            "orbital_contract_groups": 1.0,
+            "opposite_arm_reuse": 1.0,
+            "opposite_arm_tolerance": 1.7763568394002505e-15,
+            "groups": [
+              {
+                "detector_indices": [
+                  0.0
+                ],
+                "nodes": 13851.0,
+                "directed_arms": 2.0,
+                "independent_arm_pairs": 2.0,
+                "reused_opposite_arms": 0.0,
+                "maximum_opposite_pair_error": 0.0
+              },
+              {
+                "detector_indices": [
+                  1.0,
+                  2.0,
+                  3.0
+                ],
+                "nodes": 18432.0,
+                "directed_arms": 6.0,
+                "independent_arm_pairs": 3.0,
+                "reused_opposite_arms": 3.0,
+                "maximum_opposite_pair_error": 5.551115123125783e-16
+              }
+            ]
+          },
+          "native_summaries_unchanged": 1.0,
+          "full_clock_validity": 1.0
+        },
+        "network_fallback_reason": null
+      },
+      "wall_seconds_including_compilation": 73.0823996514082,
+      "detectors": {
+        "CE": {
+          "backend": "jax",
+          "reducer": "bin-aligned-fp64-gemm-deterministic-combine-with-segment-fallback",
+          "device": "cuda:0",
+          "native_frequency_samples": 267780097.0,
+          "chunk_size": 131072.0,
+          "chunks": 2044.0,
+          "tiled_chunks": 2044.0,
+          "tile_size": 512.0,
+          "tile_descriptor_shapes": [
+            [
+              512.0,
+              281.0
+            ]
+          ],
+          "padded_local_bins": 64.0,
+          "max_padded_tile_slots": 143872.0,
+          "max_tile_matrix_elements": 10089024.0,
+          "tile_power_weight_elements": 10071040.0,
+          "tile_combine_elements": 17984.0,
+          "tile_matrix_element_budget": 16777216.0,
+          "requested_chunk_size": 131072.0,
+          "compiled_executables": 1.0,
+          "time_anchors": 21.0,
+          "data_order": 24.0,
+          "norm_order": 16.0,
+          "wall_seconds_including_compilation": 56.40473776962608,
+          "native_probe_compiled_executables": 1.0,
+          "native_probe_count": 3.0,
+          "native_probe_max_waveform_samples": 131074.0,
+          "native_probe_parameter_frequency_elements": 393222.0,
+          "native_probes": {
+            "frequency_min": 5.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 267780097.0,
+            "chunks": 2044.0,
+            "chunk_size": 131072.0,
+            "sums": [
+              [
+                4253513.436936482,
+                -3684114.9254482063,
+                5630365.029892937
+              ],
+              [
+                4275599.251001871,
+                -3659140.611128059,
+                5631623.495873024
+              ],
+              [
+                4560974.559266364,
+                -1356006.1836963578,
+                5493991.855506215
+              ]
+            ]
+          }
+        },
+        "ET1": {
+          "backend": "jax",
+          "reducer": "bin-aligned-fp64-gemm-deterministic-combine-with-segment-fallback",
+          "device": "cuda:1",
+          "native_frequency_samples": 268173313.0,
+          "chunk_size": 131072.0,
+          "chunks": 2047.0,
+          "tiled_chunks": 2047.0,
+          "tile_size": 512.0,
+          "tile_descriptor_shapes": [
+            [
+              512.0,
+              385.0
+            ]
+          ],
+          "padded_local_bins": 512.0,
+          "max_padded_tile_slots": 197120.0,
+          "max_tile_matrix_elements": 13995520.0,
+          "tile_power_weight_elements": 13798400.0,
+          "tile_combine_elements": 197120.0,
+          "tile_matrix_element_budget": 16777216.0,
+          "requested_chunk_size": 131072.0,
+          "compiled_executables": 1.0,
+          "time_anchors": 21.0,
+          "data_order": 24.0,
+          "norm_order": 16.0,
+          "wall_seconds_including_compilation": 56.16150832735002,
+          "native_probe_compiled_executables": 1.0,
+          "native_probe_count": 3.0,
+          "native_probe_max_waveform_samples": 131074.0,
+          "native_probe_parameter_frequency_elements": 393222.0,
+          "native_probes": {
+            "frequency_min": 2.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 268173313.0,
+            "chunks": 2047.0,
+            "chunk_size": 131072.0,
+            "sums": [
+              [
+                262420.9228435667,
+                -227815.1999884648,
+                346919.9948300737
+              ],
+              [
+                263428.8763771789,
+                -225980.21579890556,
+                346224.63351586193
+              ],
+              [
+                109760.28522315276,
+                -74841.88615787265,
+                317983.5895209808
+              ]
+            ]
+          }
+        },
+        "ET2": {
+          "backend": "jax",
+          "reducer": "bin-aligned-fp64-gemm-deterministic-combine-with-segment-fallback",
+          "device": "cuda:2",
+          "native_frequency_samples": 268173313.0,
+          "chunk_size": 131072.0,
+          "chunks": 2047.0,
+          "tiled_chunks": 2047.0,
+          "tile_size": 512.0,
+          "tile_descriptor_shapes": [
+            [
+              512.0,
+              385.0
+            ]
+          ],
+          "padded_local_bins": 512.0,
+          "max_padded_tile_slots": 197120.0,
+          "max_tile_matrix_elements": 13995520.0,
+          "tile_power_weight_elements": 13798400.0,
+          "tile_combine_elements": 197120.0,
+          "tile_matrix_element_budget": 16777216.0,
+          "requested_chunk_size": 131072.0,
+          "compiled_executables": 1.0,
+          "time_anchors": 21.0,
+          "data_order": 24.0,
+          "norm_order": 16.0,
+          "wall_seconds_including_compilation": 55.3321794802323,
+          "native_probe_compiled_executables": 1.0,
+          "native_probe_count": 3.0,
+          "native_probe_max_waveform_samples": 131074.0,
+          "native_probe_parameter_frequency_elements": 393222.0,
+          "native_probes": {
+            "frequency_min": 2.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 268173313.0,
+            "chunks": 2047.0,
+            "chunk_size": 131072.0,
+            "sums": [
+              [
+                328071.9618706733,
+                -284174.15994760796,
+                433194.6370860019
+              ],
+              [
+                328813.18988571403,
+                -281812.07236604695,
+                431476.02959459525
+              ],
+              [
+                130429.22085060661,
+                -83470.01255410643,
+                369938.76612188044
+              ]
+            ]
+          }
+        },
+        "ET3": {
+          "backend": "jax",
+          "reducer": "bin-aligned-fp64-gemm-deterministic-combine-with-segment-fallback",
+          "device": "cuda:3",
+          "native_frequency_samples": 268173313.0,
+          "chunk_size": 131072.0,
+          "chunks": 2047.0,
+          "tiled_chunks": 2047.0,
+          "tile_size": 512.0,
+          "tile_descriptor_shapes": [
+            [
+              512.0,
+              385.0
+            ]
+          ],
+          "padded_local_bins": 512.0,
+          "max_padded_tile_slots": 197120.0,
+          "max_tile_matrix_elements": 13995520.0,
+          "tile_power_weight_elements": 13798400.0,
+          "tile_combine_elements": 197120.0,
+          "tile_matrix_element_budget": 16777216.0,
+          "requested_chunk_size": 131072.0,
+          "compiled_executables": 1.0,
+          "time_anchors": 21.0,
+          "data_order": 24.0,
+          "norm_order": 16.0,
+          "wall_seconds_including_compilation": 52.18482082057744,
+          "native_probe_compiled_executables": 1.0,
+          "native_probe_count": 3.0,
+          "native_probe_max_waveform_samples": 131074.0,
+          "native_probe_parameter_frequency_elements": 393222.0,
+          "native_probes": {
+            "frequency_min": 2.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 268173313.0,
+            "chunks": 2047.0,
+            "chunk_size": 131072.0,
+            "sums": [
+              [
+                228525.8669280718,
+                -197843.3711276726,
+                302606.8977268329
+              ],
+              [
+                229470.1471059992,
+                -195661.0090187148,
+                301322.1654723775
+              ],
+              [
+                105980.62374021525,
+                -53456.63223594445,
+                252168.53374130063
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "rebin": {
+      "method": "exact-affine-moment-coarsening-v1",
+      "source_bin_edges_sha256": "29df2a95301f57ebd8938fb3f46d86ed2edb0cd8ed41dedc09d069ed93945d55",
+      "bin_edges_sha256": "21df3f8ba1b79a29fb0b17a071d80ce4fe30f32d9537230aba3a1dd239f18ff0",
+      "source_n_bins": 2048.0,
+      "n_bins": 256.0,
+      "native_samples_read": 0.0,
+      "qualification": 0.0,
+      "node_frequency_prefix": [
+        2.0,
+        2.0020898047582847
+      ]
+    }
+  },
+  "pipeline_timing": {
+    "preparation_seconds_including_compilation": 98.97708580177277,
+    "construction_seconds_including_compilation": 195.50578134320676,
+    "native_validation_seconds_including_compilation": 4.773015827871859,
+    "sampler_construction_seconds_including_compilation": 45.22333178855479,
+    "sample_call_seconds_including_compilation": 668.6626774454489,
+    "heterodyning_to_sample_return_seconds_including_compilation": 914.1834904523566
+  },
+  "native_data_storage": {
+    "host_allocation_count": 3,
+    "host_allocation_bytes": 6442450968,
+    "mapped_file_count": 4,
+    "mapped_file_logical_bytes": 17179869248,
+    "device_array_object_count": 0,
+    "device_array_logical_bytes": 0,
+    "unclassified_array_object_count": 0
+  },
+  "data_preparation": {
+    "CE": {
+      "host_storage": "mmap",
+      "noise_generation": "indexed-v1",
+      "noise_algorithm": "indexed-threefry2x32-fold64-hi-lo-normal2-f64-v1",
+      "zero_noise": 0.0,
+      "waveform_chunk_size": 262144.0,
+      "full_length_device_noise": 0.0,
+      "native_fd_storage_bytes": 4294967312.0
+    },
+    "ET1": {
+      "host_storage": "mmap",
+      "noise_generation": "indexed-v1",
+      "noise_algorithm": "indexed-threefry2x32-fold64-hi-lo-normal2-f64-v1",
+      "zero_noise": 0.0,
+      "waveform_chunk_size": 262144.0,
+      "full_length_device_noise": 0.0,
+      "native_fd_storage_bytes": 4294967312.0
+    },
+    "ET2": {
+      "host_storage": "mmap",
+      "noise_generation": "indexed-v1",
+      "noise_algorithm": "indexed-threefry2x32-fold64-hi-lo-normal2-f64-v1",
+      "zero_noise": 0.0,
+      "waveform_chunk_size": 262144.0,
+      "full_length_device_noise": 0.0,
+      "native_fd_storage_bytes": 4294967312.0
+    },
+    "ET3": {
+      "host_storage": "mmap",
+      "noise_generation": "indexed-v1",
+      "noise_algorithm": "indexed-threefry2x32-fold64-hi-lo-normal2-f64-v1",
+      "zero_noise": 0.0,
+      "waveform_chunk_size": 262144.0,
+      "full_length_device_noise": 0.0,
+      "native_fd_storage_bytes": 4294967312.0
+    }
+  }
+}

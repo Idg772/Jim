@@ -1,0 +1,176 @@
+{
+  "schema": "weighted-local-sky-joint-audit-v1",
+  "qualification": false,
+  "source": "benchmark-results/xg-allocator-trial-20260911/verified-adaptive/jim-adaptive-chebyshev-20260911/inference/results/nested_samples.npz",
+  "configuration_sha256": "68686ed573a72313d923350cc218100723c8af97eadd3c47565c5cd1a94082b8",
+  "weighted_point_count": 336896,
+  "weight_effective_sample_size": 30564.394364070897,
+  "injection_sky_radians": {
+    "ra": 6.052874807646849,
+    "dec": 0.17257877754217157
+  },
+  "coordinates": [
+    "wrapped(ra - ra_truth) * cos(dec_truth)",
+    "dec - dec_truth"
+  ],
+  "units": "radians",
+  "range_method": "Weighted 0.05th and 99.95th marginal percentiles separately on each local coordinate; uniform equal-area histogram cells. Rectangle does not necessarily contain exactly 99.9% joint mass.",
+  "coordinate_ranges_radians": [
+    [
+      -0.0008904230241147176,
+      0.000767126792822514
+    ],
+    [
+      -0.0018039237233548056,
+      0.002440454229328759
+    ]
+  ],
+  "histograms": [
+    {
+      "bins_per_axis": 32,
+      "truth_cell_indices": [
+        17,
+        13
+      ],
+      "truth_cell_probability": 0.009758115215866617,
+      "truth_cell_density_per_radian2": 1420316.9126227517,
+      "rectangle_posterior_mass": 0.9983663636954108,
+      "omitted_posterior_mass": 0.0016336363045892366,
+      "posterior_mass_in_cells_density_at_least_truth": 0.2548244973124801,
+      "posterior_mass_in_cells_density_strictly_above_truth": 0.24506638209661344,
+      "upper_bound_after_counting_all_omitted_mass_as_higher_density": 0.25645813361706926,
+      "truth_within_histogram_90_percent_density_region": true,
+      "bin_widths_arcmin": [
+        0.1780698915809729,
+        0.4559717687758974
+      ]
+    },
+    {
+      "bins_per_axis": 64,
+      "truth_cell_indices": [
+        34,
+        27
+      ],
+      "truth_cell_probability": 0.002443565834518526,
+      "truth_cell_density_per_radian2": 1422667.310273424,
+      "rectangle_posterior_mass": 0.9983663636954108,
+      "omitted_posterior_mass": 0.0016336363045892366,
+      "posterior_mass_in_cells_density_at_least_truth": 0.26534348000847036,
+      "posterior_mass_in_cells_density_strictly_above_truth": 0.2628999141739518,
+      "upper_bound_after_counting_all_omitted_mass_as_higher_density": 0.26697711631305965,
+      "truth_within_histogram_90_percent_density_region": true,
+      "bin_widths_arcmin": [
+        0.08903494579048664,
+        0.2279858843879487
+      ]
+    },
+    {
+      "bins_per_axis": 128,
+      "truth_cell_indices": [
+        68,
+        54
+      ],
+      "truth_cell_probability": 0.0005635899460340685,
+      "truth_cell_density_per_radian2": 1312509.745053654,
+      "rectangle_posterior_mass": 0.9983663636954108,
+      "omitted_posterior_mass": 0.0016336363045892366,
+      "posterior_mass_in_cells_density_at_least_truth": 0.3516669281628154,
+      "posterior_mass_in_cells_density_strictly_above_truth": 0.3511033382167813,
+      "upper_bound_after_counting_all_omitted_mass_as_higher_density": 0.35330056446740454,
+      "truth_within_histogram_90_percent_density_region": true,
+      "bin_widths_arcmin": [
+        0.04451747289524332,
+        0.11399294219397435
+      ]
+    }
+  ],
+  "covariance_approximation": {
+    "weighted_mean_offset_radians": [
+      -6.458448216120497e-05,
+      0.000341517544329871
+    ],
+    "weighted_mean_offset_arcmin": [
+      -0.2220250949924999,
+      1.1740508351864163
+    ],
+    "weighted_population_covariance_radian2": [
+      [
+        6.325792647863436e-08,
+        -1.409574995396718e-07
+      ],
+      [
+        -1.4095749953967176e-07,
+        4.1847051672520286e-07
+      ]
+    ],
+    "truth_mahalanobis_squared": 0.4400446150779665,
+    "truth_mahalanobis_radius": 0.6633585870989887,
+    "gaussian_2d_mass_inside_truth_radius": 0.1974991040572161,
+    "gaussian_90_percent_mahalanobis_squared": 4.605170185988091,
+    "truth_inside_gaussian_90_percent_ellipse": true
+  },
+  "caveats": [
+    "Histogram density ranks depend on grid resolution and bin origin; these are descriptive joint checks, not a calibrated sky-coverage measurement.",
+    "The small-angle local chart uses cos(dec_truth); the sampled high-weight sky patch is small, but this is not a full-sphere density estimator.",
+    "Using normalized nested weights is essential; the unweighted prior-like low-likelihood points are not posterior density.",
+    "The covariance ellipse is a Gaussian descriptive approximation and cannot exclude unobserved modes or establish sampler mixing.",
+    "No KDE, new likelihood evaluation, or GPU work was performed.",
+    "The added termination and polarization checks use only the saved posterior and configuration; no new likelihood is evaluated.",
+    "The exact polarization symmetry motivates equal target branch mass but does not establish a Monte Carlo significance for the observed imbalance."
+  ],
+  "weight_diagnostics": {
+    "method": "Normalize all retained nested log_weights with scipy.special.logsumexp, then evaluate weighted quantities. No equal-weight resampled posterior is used.",
+    "logsumexp_input_log_weights": -1.885851474980882e-10,
+    "normalized_weight_sum": 0.9999999999999992,
+    "all_log_weights_finite": true,
+    "all_saved_log_likelihoods_finite": true,
+    "kish_weight_effective_sample_size": 30564.394364070897,
+    "receipt_weight_ess": 30564.394364070897,
+    "maximum_individual_weight": 5.038999427282263e-05,
+    "largest100_weights_total_mass": 0.004987598900518319,
+    "not_a_chain_mixing_effective_sample_size": true
+  },
+  "termination_cross_check": {
+    "method": "The sorted retained table has 650 batches of 512 dead points followed by 4096 final live points. Last dead logL equals the maximum birth contour; final live points all exceed it. Sum their normalized saved posterior weights and convert fraction f to -log(1-f). This reconstructs an indicative remaining-evidence increment from exported weights, not the original online integrator statistic.",
+    "n_iterations": 650,
+    "n_dead_points": 332800,
+    "n_final_live_points": 4096,
+    "n_retained_points": 336896,
+    "saved_log_likelihoods_sorted": true,
+    "last_dead_log_likelihood": 3354441.986784797,
+    "first_final_live_log_likelihood": 3354441.986802793,
+    "maximum_birth_log_likelihood": 3354441.986784797,
+    "initial_points_with_negative_infinite_birth": 4096,
+    "final_live_posterior_weight": 0.0435489500782668,
+    "equivalent_remaining_log_evidence_increment": 0.04452566765629904,
+    "configured_termination_dlogz": 0.0485873516,
+    "cross_check_below_configured_threshold": true,
+    "terminal_online_integrator_statistic_saved": false,
+    "interpretation": "Consistent with normal evidence-based termination; exact online stopping statistic cannot be independently reproduced from these summaries alone."
+  },
+  "polarization_symmetry_audit": {
+    "method": "In the configured phase-marginalized dominant-mode likelihood, shifting psi by pi/2 changes the sign of detector strain; |complex overlap| and waveform norm remain unchanged. With uniform psi on [0, pi], the two symmetry branches have equal target mass. Assign branches by nearest injected orientation modulo pi and also fold offsets modulo pi/2.",
+    "configured_phase_marginalization": true,
+    "psi_prior": {
+      "type": "uniform",
+      "min": 0.0,
+      "max": 3.141592653589793
+    },
+    "injection_psi_radians": 1.6782976747256861,
+    "posterior_symmetry_period_radians": 1.5707963267948966,
+    "mass_in_injection_branch": 0.5504861826087566,
+    "mass_in_shifted_branch": 0.44951381739124263,
+    "folded_offset_quantiles_radians": {
+      "0.005": -0.001778540685140273,
+      "0.025": -0.0009771145252950308,
+      "0.05": -0.0005677040506686382,
+      "0.5": 0.0015387243002609186,
+      "0.95": 0.0036342465698728788,
+      "0.975": 0.004069075073767525,
+      "0.995": 0.004832363750821189
+    },
+    "folded_truth_cdf": 0.11264069559855625,
+    "mass_more_than0.03_radians_from_both_branches": 3.659072250594077e-126,
+    "interpretation": "Both symmetry modes are populated. Full-pi equal-tail intervals misleadingly span two narrow modes; present both modes or use the folded orientation. Observed 55/45 branch weights do not prove correct mode mixing; weight ESS cannot calibrate their uncertainty."
+  }
+}

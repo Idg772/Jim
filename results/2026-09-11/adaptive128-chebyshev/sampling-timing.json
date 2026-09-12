@@ -1,0 +1,32 @@
+{
+  "qualification": false,
+  "timings": {
+    "preparation_seconds_including_compilation": 90.0889044450596,
+    "construction_seconds_including_compilation": 131.66534914635122,
+    "native_validation_seconds_including_compilation": 3.848441262729466,
+    "sampler_construction_seconds_including_compilation": 38.88763472251594,
+    "sample_call_seconds_including_compilation": 350.3896891800687,
+    "heterodyning_to_sample_return_seconds_including_compilation": 524.8445903658867
+  },
+  "pipeline_runtime": {
+    "qualification": false,
+    "status": "complete",
+    "metric": "heterodyning_to_sample_return_seconds_including_compilation",
+    "wall_seconds": 524.8445903658867,
+    "target_seconds": 300.0,
+    "target_met": false,
+    "scope": "Continuous wall time immediately before construct_candidate through jim.sample return and synchronization; includes bin planning, native moments, automatic selection, intermediate receipts, native checks, Jim construction and all first-use compilation. Excludes completed data preparation and post-sampling diagnostics, output and recovery."
+  },
+  "sample_phase_seconds": {
+    "init_total": 15.355539686977863,
+    "likelihood_jit": 8.422295722179115,
+    "initial_likelihood_eval": 0.7944515524432063,
+    "sampler_kernel_jit": 107.09162852354348,
+    "ns_loop": 220.86516108270735,
+    "finalise": 3.518496467731893,
+    "init_particle_replication": 0.7045688107609749,
+    "init_adaptive_init": 5.389527113176882,
+    "init_state_placement": 0.001400127075612545
+  },
+  "stepping_out_evaluations": 30642088
+}

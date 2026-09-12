@@ -1,0 +1,8 @@
+{
+  "retained_run": "previous1024-taylor",
+  "duplicate_source": "benchmark-results/xg-network-pod-20260910/extracted-attempt-8/jim-network-run-20260910-8/inference/results/nested_samples.npz",
+  "source_sha256": "66f39b6b08df5c9cc254613e254a2739b27ab2b5cb5129455be62bce67256254",
+  "byte_identical": false,
+  "independent_run": false,
+  "note": "Physical parameter arrays agree exactly; likelihood and weight arrays differ. Both outputs are retained."
+}

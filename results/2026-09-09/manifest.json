@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "scope": "One CE injection from 5 Hz, with Gaussian noise, rotation, orbital motion, and finite arms.",
+  "qualification": false,
+  "notes": [
+    "The eight-sweep run is the main timing result. The six-sweep runs test seed sensitivity.",
+    "All CE runs reuse noise seed 1. The seed in config.final.toml is the sampler seed.",
+    "Native posterior checks were made on earlier two- and six-sweep runs, not the final eight-sweep posterior.",
+    "Exact paired array agreement tests execution, not independent-chain mixing.",
+    "Historical configuration and provenance files retain their original external paths and options."
+  ],
+  "storage_policy": {
+    "keep": [
+      "weighted nested points",
+      "posterior draws",
+      "exact run configurations",
+      "scientific timing and validation records",
+      "summary plots"
+    ],
+    "omit": [
+      "strain arrays",
+      "native moment banks",
+      "per-slice diagnostics",
+      "compiler caches and profiles",
+      "pod tools and logs"
+    ],
+    "npz": "Lossless ZIP compression; index.json records source, archive, and member hashes."
+  },
+  "timing": {
+    "loop": "Nested sampling loop, excluding measured compilation.",
+    "finalise": "Final live-point processing after the loop.",
+    "sample_call": "Observed call wall time, including first-use compilation.",
+    "pipeline": "Observed heterodyning start to synchronized sampler return; blank if not measured.",
+    "warm_pipeline": "Not measured. Loop time alone does not establish event latency."
+  }
+}

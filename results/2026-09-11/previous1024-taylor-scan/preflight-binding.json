@@ -1,0 +1,15 @@
+{
+  "path": "/workspace/jim-network-run-20260910-8/network-preflight.json",
+  "sha256": "7c35d2de356ca59eb6d425c5686f9803a085af6d65980efc21f45013cfa66dc8",
+  "config_sha256": "6034a30739a8a99bae8b25808b72bd174968cb59166917f0bea737a3414c0b8b",
+  "analysis_contract_sha256": "c26ec60c1b96a64ee1ea25bb367c6b0b0f5b2ca326f2bb21e0220a19cd1d6ab5",
+  "input_files_sha256": {
+    "psd:CE": "a8934610ae6395a86129a70bf913d2b3469a477f872fec18c626b49dc7aa3f49",
+    "psd:ET1": "92089fb91b5a22aec20a63114da84cf1e494b7507fb7c41e601e070c95792cd6",
+    "psd:ET2": "92089fb91b5a22aec20a63114da84cf1e494b7507fb7c41e601e070c95792cd6",
+    "psd:ET3": "92089fb91b5a22aec20a63114da84cf1e494b7507fb7c41e601e070c95792cd6",
+    "ephemeris:earth": "4995647b2c47617c90804ad0bc814ce42b426f1e5015a90cf939bcdd0c20ea67",
+    "ephemeris:sun": "0b132dc5a712ebc16661a10cb88409e2577c16723c64f98e9b9b4d265510700f"
+  },
+  "detector_metadata_sha256": "83971bfcbace26a58560cd752749ca31954591f892f08b450f823106bb439d1c"
+}

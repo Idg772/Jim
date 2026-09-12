@@ -1,0 +1,276 @@
+{
+  "qualification": false,
+  "scope": "Finite native-grid delta-logL spot checks; no prior-wide or posterior qualification",
+  "tolerance_delta_log_likelihood_nats": 0.05,
+  "passed": true,
+  "points": [
+    {
+      "name": "injection",
+      "physical_parameters": {
+        "M_c": 1.1802650981093186,
+        "q": 0.9724191074091124,
+        "s1_z": -0.014169601016451747,
+        "s2_z": -0.02350583516601907,
+        "lambda_1": 483.1557044220429,
+        "lambda_2": 771.0436351634714,
+        "d_L": 20.0,
+        "iota": 2.016083447361016,
+        "ra": 6.052874807646849,
+        "dec": 0.17257877754217157,
+        "psi": 1.6782976747256861,
+        "phase_c": 2.7844901856551694,
+        "t_c": 0.03512602655783986
+      },
+      "native": {
+        "log_likelihood": 3354435.85793616,
+        "complex_overlap": {
+          "real": 5072532.188594783,
+          "imag": -4393947.656493498
+        },
+        "waveform_norm": 6713086.559535847,
+        "marginalization": "phase",
+        "chunk_size": 131072,
+        "native_prefix": [
+          2.0,
+          2.0000076293945312
+        ],
+        "detector_phasor_optimized": false,
+        "wall_seconds_including_first_use_compile": 62.665021389722824,
+        "channels": {
+          "CE": {
+            "frequency_min": 5.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 267780097,
+            "chunks": 2044,
+            "complex_overlap": {
+              "real": 4253513.436949885,
+              "imag": -3684114.9254327337
+            },
+            "waveform_norm": 5630365.029892938
+          },
+          "ET1": {
+            "frequency_min": 2.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 268173313,
+            "chunks": 2047,
+            "complex_overlap": {
+              "real": 262420.9228443977,
+              "imag": -227815.1999875079
+            },
+            "waveform_norm": 346919.99483007373
+          },
+          "ET2": {
+            "frequency_min": 2.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 268173313,
+            "chunks": 2047,
+            "complex_overlap": {
+              "real": 328071.96187170886,
+              "imag": -284174.15994641546
+            },
+            "waveform_norm": 433194.63708600204
+          },
+          "ET3": {
+            "frequency_min": 2.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 268173313,
+            "chunks": 2047,
+            "complex_overlap": {
+              "real": 228525.86692879096,
+              "imag": -197843.37112684053
+            },
+            "waveform_norm": 302606.89772683295
+          }
+        },
+        "qualification": false
+      },
+      "heterodyne_log_likelihood": 3354435.8579361704,
+      "wall_seconds_including_compilation": 74.21028163470328,
+      "absolute_difference_nats": 1.0244548320770264e-08,
+      "delta_difference_nats": 0.0
+    },
+    {
+      "name": "local-coupled",
+      "physical_parameters": {
+        "M_c": 1.1802652981093185,
+        "q": 0.9722191074091124,
+        "s1_z": -0.014169601016451747,
+        "s2_z": -0.02350583516601907,
+        "lambda_1": 483.1557044220429,
+        "lambda_2": 771.0436351634714,
+        "d_L": 20.0,
+        "iota": 2.016083447361016,
+        "ra": 6.053874807646849,
+        "dec": 0.17157877754217157,
+        "psi": 1.6782976747256861,
+        "phase_c": 2.7844901856551694,
+        "t_c": 0.03512702655783986
+      },
+      "native": {
+        "log_likelihood": 3353975.756376653,
+        "complex_overlap": {
+          "real": 5097311.464339029,
+          "imag": -4362593.908348806
+        },
+        "waveform_norm": 6710646.324455859,
+        "marginalization": "phase",
+        "chunk_size": 131072,
+        "native_prefix": [
+          2.0,
+          2.0000076293945312
+        ],
+        "detector_phasor_optimized": false,
+        "wall_seconds_including_first_use_compile": 34.40121407434344,
+        "channels": {
+          "CE": {
+            "frequency_min": 5.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 267780097,
+            "chunks": 2044,
+            "complex_overlap": {
+              "real": 4275599.2509752475,
+              "imag": -3659140.6111591677
+            },
+            "waveform_norm": 5631623.495873025
+          },
+          "ET1": {
+            "frequency_min": 2.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 268173313,
+            "chunks": 2047,
+            "complex_overlap": {
+              "real": 263428.8763755369,
+              "imag": -225980.21580082105
+            },
+            "waveform_norm": 346224.633515862
+          },
+          "ET2": {
+            "frequency_min": 2.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 268173313,
+            "chunks": 2047,
+            "complex_overlap": {
+              "real": 328813.189883667,
+              "imag": -281812.0723684332
+            },
+            "waveform_norm": 431476.0295945953
+          },
+          "ET3": {
+            "frequency_min": 2.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 268173313,
+            "chunks": 2047,
+            "complex_overlap": {
+              "real": 229470.14710457722,
+              "imag": -195661.00902038396
+            },
+            "waveform_norm": 301322.16547237756
+          }
+        },
+        "qualification": false
+      },
+      "heterodyne_log_likelihood": 3353975.756376993,
+      "wall_seconds_including_compilation": 34.40345510095358,
+      "absolute_difference_nats": 3.3993273973464966e-07,
+      "delta_difference_nats": 3.296881914138794e-07
+    },
+    {
+      "name": "broader-interior",
+      "physical_parameters": {
+        "M_c": 1.1802850981093185,
+        "q": 0.9624191074091124,
+        "s1_z": -0.014169601016451747,
+        "s2_z": -0.02350583516601907,
+        "lambda_1": 493.1557044220429,
+        "lambda_2": 761.0436351634714,
+        "d_L": 20.0,
+        "iota": 2.016083447361016,
+        "ra": 6.102874807646849,
+        "dec": 0.14257877754217158,
+        "psi": 1.6782976747256861,
+        "phase_c": 2.7844901856551694,
+        "t_c": 0.03612602655783986
+      },
+      "native": {
+        "log_likelihood": 1934453.3108667159,
+        "complex_overlap": {
+          "real": 4907144.689076198,
+          "imag": -1567774.7146405075
+        },
+        "waveform_norm": 6434082.744890378,
+        "marginalization": "phase",
+        "chunk_size": 131072,
+        "native_prefix": [
+          2.0,
+          2.0000076293945312
+        ],
+        "detector_phasor_optimized": false,
+        "wall_seconds_including_first_use_compile": 31.050207430496812,
+        "channels": {
+          "CE": {
+            "frequency_min": 5.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 267780097,
+            "chunks": 2044,
+            "complex_overlap": {
+              "real": 4560974.559263927,
+              "imag": -1356006.1836937498
+            },
+            "waveform_norm": 5493991.855506216
+          },
+          "ET1": {
+            "frequency_min": 2.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 268173313,
+            "chunks": 2047,
+            "complex_overlap": {
+              "real": 109760.28522254972,
+              "imag": -74841.88615745709
+            },
+            "waveform_norm": 317983.58952098084
+          },
+          "ET2": {
+            "frequency_min": 2.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 268173313,
+            "chunks": 2047,
+            "complex_overlap": {
+              "real": 130429.22084998789,
+              "imag": -83470.01255359425
+            },
+            "waveform_norm": 369938.7661218805
+          },
+          "ET3": {
+            "frequency_min": 2.0,
+            "frequency_max": 2048.0,
+            "df": 7.62939453125e-06,
+            "native_samples": 268173313,
+            "chunks": 2047,
+            "complex_overlap": {
+              "real": 105980.62373973335,
+              "imag": -53456.63223570623
+            },
+            "waveform_norm": 252168.5337413007
+          }
+        },
+        "qualification": false
+      },
+      "heterodyne_log_likelihood": 1934453.3108755853,
+      "wall_seconds_including_compilation": 31.05276668444276,
+      "absolute_difference_nats": 8.86945053935051e-06,
+      "delta_difference_nats": 8.85920599102974e-06
+    }
+  ],
+  "maximum_absolute_delta_error_nats": 8.85920599102974e-06
+}

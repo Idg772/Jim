@@ -1,0 +1,312 @@
+{
+  "schema_version": 1,
+  "runs": [
+    {
+      "id": "ce-eight-sweeps",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/deferred_skip",
+      "gpu": "H100 SXM",
+      "devices": 4,
+      "sampler_seed": 2,
+      "noise_seed": 1,
+      "num_gibbs_sweeps": 8,
+      "n_bins": 136,
+      "qualification": false
+    },
+    {
+      "id": "ce-eight-sweeps-endpoint",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/endpoint_skip",
+      "gpu": "H100 SXM",
+      "devices": 4,
+      "sampler_seed": 2,
+      "noise_seed": 1,
+      "num_gibbs_sweeps": 8,
+      "n_bins": 136,
+      "qualification": false
+    },
+    {
+      "id": "ce-six-sweeps-seed2",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/xg-stepping-replicates/seed2_sweeps6_tuned",
+      "gpu": "H100 SXM",
+      "devices": 4,
+      "sampler_seed": 2,
+      "noise_seed": 1,
+      "num_gibbs_sweeps": 6,
+      "n_bins": 136,
+      "qualification": false,
+      "posterior_draws": "Not present in retained source; weighted nested points are retained."
+    },
+    {
+      "id": "ce-six-sweeps-seed3",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/xg-stepping-replicates/seed3_sweeps6_tuned",
+      "gpu": "H100 SXM",
+      "devices": 4,
+      "sampler_seed": 3,
+      "noise_seed": 1,
+      "num_gibbs_sweeps": 6,
+      "n_bins": 136,
+      "qualification": false,
+      "posterior_draws": "Not present in retained source; weighted nested points are retained."
+    }
+  ],
+  "files": [
+    {
+      "path": "ce-eight-sweeps/config.final.toml",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/deferred_skip/results/config.final.toml",
+      "source_sha256": "283a41f2d34249ac5ed8b46f808378b40e2afef17d4e6ffd869935535621dda6",
+      "sha256": "283a41f2d34249ac5ed8b46f808378b40e2afef17d4e6ffd869935535621dda6",
+      "bytes": 7043
+    },
+    {
+      "path": "ce-eight-sweeps/diagnostics.json",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/deferred_skip/results/diagnostics.json",
+      "source_sha256": "c1203c445f211bc959d19071c7cea024afdb5bb10c44737a5ab284e50292a523",
+      "sha256": "c1203c445f211bc959d19071c7cea024afdb5bb10c44737a5ab284e50292a523",
+      "bytes": 1011
+    },
+    {
+      "path": "ce-eight-sweeps/nested/samples.npz",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/deferred_skip/results/nested_samples.npz",
+      "source_sha256": "2fdf0c2e4c894380e401e0dcd5cd75626136f416ea16b2378be098b0ca8beae0",
+      "storage": "ZIP compression only; all NPY member bytes are unchanged",
+      "array_member_sha256": {
+        "M_c.npy": "fee69aeaae62130e308e8a747ea9e50f6eb010340b4ea6bb7bc88e3ce8b92b2a",
+        "q.npy": "205e23581dec8229d0b43adf709a1a0bbe4dc3f9eabb5b65ec6d5e757bea9e36",
+        "s1_z.npy": "33d0a2876a00d950a45f27a93bc97c00eb98b4059d7a22a745527140d6b5e5f5",
+        "s2_z.npy": "f168bd88a135e0d1f59c209f4e893bc02e481c4956c82ba9c49eea81bd0c8dc2",
+        "lambda_1.npy": "14fe7bc1c942ace04ca3236a2fd338f40789ee3c1491f81293068c6f1e8b4fbd",
+        "lambda_2.npy": "775fa79efe6ba8a9779add507243d3a0c773d9a9efe670cac546e479ab0a5419",
+        "d_L.npy": "2a0a6131e2fd0ff92643b8deaa7c297ec73f1ac6a8f9ae17f37d19221f618e41",
+        "iota.npy": "035751ae3c6a2519ea64b5562295bbd2dfd83804b96bf09ec4d40bc9e1d14245",
+        "ra.npy": "0aad92b3313cdc776eba5a09972bdb27b1c7ce0f20e0551e1db9b0dd90b30a02",
+        "dec.npy": "46110367d32a8329a1816a75241bff6057dcff95d84e698603613dfa096320f2",
+        "psi.npy": "f09b50b4d1ea35771dc3e1966aac0c354c89e370fb2e28a6c35a6b4071656586",
+        "t_c.npy": "c79bd96ab2f52c5547908b95aa6e9636fe67dff20dd1dd90899b7e2ceddb2eff",
+        "log_likelihood.npy": "c25ff6f9bd7f0c9f293db043c81b2ae8138ea6efd1241d1369a8d981a46193b7",
+        "log_likelihood_birth.npy": "bde825f3140c812fbcc2d82b66f24fd4ef0b7fc8968e86b51c7dc5fbe9350734",
+        "log_weights.npy": "486ae4f00eab81e78d93e13115a451b2331ab1f50d3acac931f7a95bd75d673e"
+      },
+      "sha256": "a44d0bf3d0728e1345a0cd257118798af30bca3ff4a947c77546f3585183b8d4",
+      "bytes": 24798003
+    },
+    {
+      "path": "ce-eight-sweeps/posterior/samples.npz",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/deferred_skip/results/samples.npz",
+      "source_sha256": "6492fd01b2816e32731bb0a747b4b703a2e94ea99465560029e7206360007b2b",
+      "storage": "ZIP compression only; all NPY member bytes are unchanged",
+      "array_member_sha256": {
+        "M_c.npy": "02c397bb8cbf190c54f5b525d0e5bbd575f7985db7ddba8086cabab31c42ae0d",
+        "q.npy": "f00da792c5d0fa96773b1c4ea7bbc3f516a7001ce9145937c495c6b3b0f6f615",
+        "s1_z.npy": "c4a7122432cd322e4990ce35eae71443d3ca615ad8a35c72b0fbc723e79c545c",
+        "s2_z.npy": "d38ab66554d7e1a0ebb910d63758776464b8757a17165fb2ef3b4d17095ccfd4",
+        "lambda_1.npy": "d900d5ddd9a63a738c52c696774b2fec3b0d68dc3f75665136d49227e6a8285e",
+        "lambda_2.npy": "4251e51aee9decb35ce9885ca3a59fae2d606c3a11ae48aeabbc558defe8fec4",
+        "d_L.npy": "143070d6578b6c820bf64b2d4267495867e91826255feb3e7094562ac682bb39",
+        "iota.npy": "138de75b30f97565e8103735efe01f8599db0f86328ae3e198ce61d43d9d5680",
+        "ra.npy": "5da3a241d171afe69a3ed3574aec955ff39502ae9a020e85b6bf8473a44178fe",
+        "dec.npy": "5f90150568f91535fa67b23101df2ae8de4a999dfebee8b5e41b99b338777e0d",
+        "psi.npy": "f4c6cc208b44973bc03e75d9bf64dd7195e3cee827c7dbee349a439316954517",
+        "t_c.npy": "2e795480880653d920fe086ad0b8c256e818496ae0f4720af9e599db5443a8aa",
+        "log_likelihood.npy": "61b0ad395c3966b97495b2028e42afe88239a90cd24e82e1668d5109cb9d1564"
+      },
+      "sha256": "bad6ad6aba5ff6daede61ab459c6d6e48a97e566fc0f3490844c9c2969b839d9",
+      "bytes": 924480
+    },
+    {
+      "path": "ce-eight-sweeps/sampling-timing.json",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/deferred_skip/timing.json",
+      "source_sha256": "f713bcf0360d710cdf66711ef81e630a6f4a84d9c4e409b3784bbaec486a96ce",
+      "sha256": "f713bcf0360d710cdf66711ef81e630a6f4a84d9c4e409b3784bbaec486a96ce",
+      "bytes": 39791
+    },
+    {
+      "path": "ce-eight-sweeps-endpoint/config.final.toml",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/endpoint_skip/results/config.final.toml",
+      "source_sha256": "71c9e3f4e130e0d14f38d327122a176e099b96a9fc9b741428799d62c38549ad",
+      "sha256": "71c9e3f4e130e0d14f38d327122a176e099b96a9fc9b741428799d62c38549ad",
+      "bytes": 7043
+    },
+    {
+      "path": "ce-eight-sweeps-endpoint/diagnostics.json",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/endpoint_skip/results/diagnostics.json",
+      "source_sha256": "366af344b2e1a01d804924d750caec3656154e646b6534786aecd1a6c0c0a217",
+      "sha256": "366af344b2e1a01d804924d750caec3656154e646b6534786aecd1a6c0c0a217",
+      "bytes": 1006
+    },
+    {
+      "path": "ce-eight-sweeps-endpoint/sampling-timing.json",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/endpoint_skip/timing.json",
+      "source_sha256": "f07ef7b07750da55042240368899ccbfd8108fda0f0de8a61be449b6d531ec9c",
+      "sha256": "f07ef7b07750da55042240368899ccbfd8108fda0f0de8a61be449b6d531ec9c",
+      "bytes": 39791
+    },
+    {
+      "path": "ce-six-sweeps-seed2/config.final.toml",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/xg-stepping-replicates/seed2_sweeps6_tuned/results/config.final.toml",
+      "source_sha256": "9ca73ce373bf07959359a0955a99cced3bbbeba979e9450e7f0fa512e8acaf3a",
+      "sha256": "9ca73ce373bf07959359a0955a99cced3bbbeba979e9450e7f0fa512e8acaf3a",
+      "bytes": 7050
+    },
+    {
+      "path": "ce-six-sweeps-seed2/diagnostics.json",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/xg-stepping-replicates/seed2_sweeps6_tuned/results/diagnostics.json",
+      "source_sha256": "0fae7ea640c4a92aecd3d64688d7267bc9bc3eec54204b54991058ed69cb94a2",
+      "sha256": "0fae7ea640c4a92aecd3d64688d7267bc9bc3eec54204b54991058ed69cb94a2",
+      "bytes": 1008
+    },
+    {
+      "path": "ce-six-sweeps-seed2/nested/samples.npz",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/xg-stepping-replicates/seed2_sweeps6_tuned/results/nested_samples.npz",
+      "source_sha256": "8f9076f98502b2b7ee45e37bb0fcdd06c133c94c1de4eb203c85ca5180214c24",
+      "storage": "ZIP compression only; all NPY member bytes are unchanged",
+      "array_member_sha256": {
+        "M_c.npy": "b7787d39bc6989706d73a07e37d1f997243693ed19f5474cc3b1485572c04a0f",
+        "q.npy": "5e5b7636ede1a7247dd0a22394823af76687bd7f1cf275c4e1ce16c3a74b557a",
+        "s1_z.npy": "1dc836006c50b4bdbf1944080e2d78b04a26dc0a41157a737ed88adc096d3e5e",
+        "s2_z.npy": "1a17d0b5a785675c9172ca462309240d3320e7e51323610c3a05824157415529",
+        "lambda_1.npy": "32c0f248a88e2b73599b710fdd5be70d33770f45f7ad5749d7389de952bd01d2",
+        "lambda_2.npy": "3f2c3e7b4f2ec2651b08efe403316d31fe364a259d68555ea18dcaf49aa72c0d",
+        "d_L.npy": "c6a7b62d6f6a70f869deb97035d5fc63466a5645ede582b63448fdc5ab92531c",
+        "iota.npy": "523504ce8c2b28481c8ddc96420b60d1f421ce915a0bbda3bd38c23133f55bbe",
+        "ra.npy": "cd116697b0947291f8d447f3c8a8c9005d58c0160891b34dda450ccaeaa6f590",
+        "dec.npy": "ca5881bed822a52ce069a8c02f205164c5682ab603297eb0d5b6e51c5bf0c35e",
+        "psi.npy": "bd71e5aa43733b6d140025227aaddffc464278d39d31d9a29f966cccdaa39cd2",
+        "t_c.npy": "67a3278450f5c331160dd6ec1bcd35eed2560185532837d6406885c04482ed64",
+        "log_likelihood.npy": "2b7a67bdb1c8f0711a423459e405d6d9d9ee7a996326bd1ed55181007599f7c3",
+        "log_likelihood_birth.npy": "bf9850a474f77a445489f2fd729d8b6e8c5a630c01aaa0c7ecc280c28994ba20",
+        "log_weights.npy": "46a8b2357fb9775b2c4ecf63f98a90b8b1f13db49d0808419a4f6ca6787d32d5"
+      },
+      "sha256": "b1beaa0d798590ebf9efc4fbf16cd2f0c626533bfc06da7a9ca5ca9ef399f900",
+      "bytes": 24753140
+    },
+    {
+      "path": "ce-six-sweeps-seed2/sampling-timing.json",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/xg-stepping-replicates/seed2_sweeps6_tuned/timing.json",
+      "source_sha256": "b9165edef57caef9520faedd450f0a63de2b3631753d2f628062474130adda36",
+      "sha256": "b9165edef57caef9520faedd450f0a63de2b3631753d2f628062474130adda36",
+      "bytes": 38936
+    },
+    {
+      "path": "ce-six-sweeps-seed3/config.final.toml",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/xg-stepping-replicates/seed3_sweeps6_tuned/results/config.final.toml",
+      "source_sha256": "526e3ec5c2fde13a348ed8f7e1059ce4af267920438800deef03c2612e971724",
+      "sha256": "526e3ec5c2fde13a348ed8f7e1059ce4af267920438800deef03c2612e971724",
+      "bytes": 7050
+    },
+    {
+      "path": "ce-six-sweeps-seed3/diagnostics.json",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/xg-stepping-replicates/seed3_sweeps6_tuned/results/diagnostics.json",
+      "source_sha256": "598dd999840c14aa7f74882c1fb517568a6ae537c450d2dd56d343291e58bf75",
+      "sha256": "598dd999840c14aa7f74882c1fb517568a6ae537c450d2dd56d343291e58bf75",
+      "bytes": 1006
+    },
+    {
+      "path": "ce-six-sweeps-seed3/nested/samples.npz",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/xg-stepping-replicates/seed3_sweeps6_tuned/results/nested_samples.npz",
+      "source_sha256": "c6fb3e8c1d144e790fffa68deef2ad71b6778715c87f4025c7640fbd6c66f060",
+      "storage": "ZIP compression only; all NPY member bytes are unchanged",
+      "array_member_sha256": {
+        "M_c.npy": "43f6b85fe17a6047a5049844f8b5ff9efb878e3062b27ee8d8f3d44e41593a83",
+        "q.npy": "262cce408c943bf06fc8dc35cee6b8f92bcd1c70d62944fa88366cb5ae731a97",
+        "s1_z.npy": "8b78a055ca32746e2f40c7cf407a26a2ea2a1100ea3f2ab112979b772c967a95",
+        "s2_z.npy": "954a7e0860fc1c8d4b8fa5919b98dc63cad14685a611496bb49bc22805776fbb",
+        "lambda_1.npy": "11b3a3e82dcd4fd72f01104ff234adfa04e0c5844ab1982a31fd9e3f3f16be42",
+        "lambda_2.npy": "ff94eda398a04613db2962f58f9146db376020a373ada806e00d22bf95822a08",
+        "d_L.npy": "65324ce26d59bfabe381e91fb12425079ccea1111ed6f57b7eb51010cdd8e0eb",
+        "iota.npy": "560451521437d3921de4014508c204944e466cfed478e5c632534fc8f4280155",
+        "ra.npy": "d928bbef66e435aeab4e3f90891fff4359c2e372f38b41ce58b565c20b6d78fa",
+        "dec.npy": "a424120c4259e068eb1e7b723af5ed64c6fc3e87160d9794f34802963518ddd0",
+        "psi.npy": "3317cfa0566048a3dfe13f76cd5788ccbf08955c16f553cf8d39e3d6237cc18a",
+        "t_c.npy": "e9b8ce584e18315513051f4469d353ffc76b32d3d5d0491c8557d3d89fb148ce",
+        "log_likelihood.npy": "167303cd3bd3890bb3b0368bf128486dbc61c7c69c1efad2fd44f9c6acd74091",
+        "log_likelihood_birth.npy": "ffb486f15099f2e84b452a178e1681b4009cb1e42e488ab90aa09e9c1d9d0eb3",
+        "log_weights.npy": "f0791c134a551b90e4488e3a61de9bee7b3e4a67f9e45f48e0d9687f465c8ce0"
+      },
+      "sha256": "aa289e52045b8649658365af904ae0eb5aa23ebb888dad7e8ef88a993aec8ff9",
+      "bytes": 24545418
+    },
+    {
+      "path": "ce-six-sweeps-seed3/sampling-timing.json",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/xg-stepping-replicates/seed3_sweeps6_tuned/timing.json",
+      "source_sha256": "16b4e8bc0d46c1558740d7d7246a9918c69cda7417e16ae80c2d96bed727d2b1",
+      "sha256": "16b4e8bc0d46c1558740d7d7246a9918c69cda7417e16ae80c2d96bed727d2b1",
+      "bytes": 38643
+    },
+    {
+      "path": "comparison/experiment.json",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/experiment.json",
+      "source_sha256": "235bb69d317ea0da50e321dc87077927ec0398d6809d3fc5471891fe6fa337cb",
+      "sha256": "235bb69d317ea0da50e321dc87077927ec0398d6809d3fc5471891fe6fa337cb",
+      "bytes": 10132
+    },
+    {
+      "path": "comparison/scheduling-experiment.json",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/scheduling-experiment.json",
+      "source_sha256": "225a2af387a81e0ac053474330084f95f8b1f614d125c3470d63eabd27181def",
+      "sha256": "225a2af387a81e0ac053474330084f95f8b1f614d125c3470d63eabd27181def",
+      "bytes": 3211
+    },
+    {
+      "path": "comparison/full-sampling-assessment.json",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/full-sampling-assessment.json",
+      "source_sha256": "fb2f8507993442b8452b691eadb16f4123566506578fb71f46ea1ccf63922705",
+      "sha256": "fb2f8507993442b8452b691eadb16f4123566506578fb71f46ea1ccf63922705",
+      "bytes": 44367
+    },
+    {
+      "path": "comparison/full-sampling-assessment-recovery.json",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/full-sampling-assessment-recovery.json",
+      "source_sha256": "f00436ea1b38cf3bf73ff56002e730064615fbeed1b915363b6247d243b239be",
+      "sha256": "f00436ea1b38cf3bf73ff56002e730064615fbeed1b915363b6247d243b239be",
+      "bytes": 60266
+    },
+    {
+      "path": "comparison/full-sampling-assessment-recovery.csv",
+      "source": "benchmark-results/xg-stepping-prefetch-20260909/xg-deferred-sampling8/full-sampling-assessment-recovery.csv",
+      "source_sha256": "eadddf47c17ca0c324825136affb75b8296d9f0de55bb1fd1f4f3bedaa9ba7a0",
+      "sha256": "eadddf47c17ca0c324825136affb75b8296d9f0de55bb1fd1f4f3bedaa9ba7a0",
+      "bytes": 8947
+    },
+    {
+      "path": "comparison/six-sweep-experiment.json",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/xg-stepping-replicates/experiment.json",
+      "source_sha256": "2f5efd05b933889df74284643b6db0233d481a97c75d1a4083286d52da57e3c4",
+      "sha256": "2f5efd05b933889df74284643b6db0233d481a97c75d1a4083286d52da57e3c4",
+      "bytes": 9756
+    },
+    {
+      "path": "validation/native-posterior-validation.json",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/native-posterior-validation.json",
+      "source_sha256": "8692b0601ea4516ff39aabf9a4806c2966d32b914e54f5bfd4bfda4aa923d8c6",
+      "sha256": "8692b0601ea4516ff39aabf9a4806c2966d32b914e54f5bfd4bfda4aa923d8c6",
+      "bytes": 385316
+    },
+    {
+      "path": "validation/injection-recovery.json",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/injection-recovery.json",
+      "source_sha256": "28ae9d513eb1dce852423f731331e2eb4ff7faf9e2ebab73a65409c3648b9a81",
+      "sha256": "28ae9d513eb1dce852423f731331e2eb4ff7faf9e2ebab73a65409c3648b9a81",
+      "bytes": 336992
+    },
+    {
+      "path": "validation/injection-recovery.csv",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/injection-recovery.csv",
+      "source_sha256": "08dfdb0980875a8cf3aa4faeba70c557b3e25a00d8974905efd7427e52608e06",
+      "sha256": "08dfdb0980875a8cf3aa4faeba70c557b3e25a00d8974905efd7427e52608e06",
+      "bytes": 42598
+    },
+    {
+      "path": "validation/time-sky-mode-summary.json",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/time-sky-mode-summary.json",
+      "source_sha256": "5025a824419786b432e447cf3638f01850666b5e4723cb1ec3d9c8e65e3ab1a0",
+      "sha256": "5025a824419786b432e447cf3638f01850666b5e4723cb1ec3d9c8e65e3ab1a0",
+      "bytes": 5737
+    },
+    {
+      "path": "validation/time-sky-modes.png",
+      "source": "benchmark-results/xg-next-gpu-optimization-20260909/time-sky-modes.png",
+      "source_sha256": "5184b6be6ca2b39a604bef03901655572d7ebbf27cbe8a1cd28620dcfc443e9c",
+      "sha256": "5184b6be6ca2b39a604bef03901655572d7ebbf27cbe8a1cd28620dcfc443e9c",
+      "bytes": 114109
+    }
+  ]
+}

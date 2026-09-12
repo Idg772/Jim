@@ -1,0 +1,202 @@
+{
+  "versions": {
+    "JimGW": "0.0.dev0+network.8a70391f16b7",
+    "rippleGW": "0.3.0"
+  },
+  "n_likelihood_evaluations": 100785968.0,
+  "n_iterations": 651.0,
+  "n_likelihood_evaluations_stepping_out": 30669137.0,
+  "n_likelihood_evaluations_shrinking": 70116831.0,
+  "log_Z": 3354358.572096416,
+  "log_Z_error": 0.15282751440436249,
+  "sample_phase_seconds": {
+    "init_total": 24.749889869242907,
+    "likelihood_jit": 19.571533801034093,
+    "initial_likelihood_eval": 1.1766809578984976,
+    "sampler_kernel_jit": 400.05570729635656,
+    "ns_loop": 902.501799210906,
+    "finalise": 2.6006343755871058,
+    "init_particle_replication": 0.7184681557118893,
+    "init_adaptive_init": 3.228629434481263,
+    "init_state_placement": 0.0010939333587884903
+  },
+  "n_likelihood_evaluations_de_jumps": 0.0,
+  "n_de_jump_attempts": 0.0,
+  "n_de_jump_acceptances": 0.0,
+  "de_jump_acceptance_rate": null,
+  "n_slice_updates": 31997952.0,
+  "n_likelihood_evaluations_physical": 164781872.0,
+  "sampling_time": 1332.0046463385224,
+  "likelihood_construction": {
+    "summary_backend": "jax",
+    "wall_seconds_including_compilation": 49.20890447497368,
+    "detectors": {
+      "CE": {
+        "backend": "jax",
+        "reducer": "bin-aligned-fp64-gemm-deterministic-combine-with-segment-fallback",
+        "device": "cuda:0",
+        "native_frequency_samples": 267780097.0,
+        "chunk_size": 131072.0,
+        "chunks": 2044.0,
+        "tiled_chunks": 2044.0,
+        "tile_size": 512.0,
+        "tile_descriptor_shapes": [
+          [
+            512.0,
+            269.0
+          ]
+        ],
+        "padded_local_bins": 32.0,
+        "max_padded_tile_slots": 137728.0,
+        "max_tile_matrix_elements": 9649568.0,
+        "tile_power_weight_elements": 9640960.0,
+        "tile_combine_elements": 8608.0,
+        "tile_matrix_element_budget": 16777216.0,
+        "requested_chunk_size": 131072.0,
+        "compiled_executables": 1.0,
+        "time_anchors": 21.0,
+        "data_order": 24.0,
+        "norm_order": 16.0,
+        "wall_seconds_including_compilation": 37.60892132297158
+      },
+      "ET1": {
+        "backend": "jax",
+        "reducer": "bin-aligned-fp64-gemm-deterministic-combine-with-segment-fallback",
+        "device": "cuda:1",
+        "native_frequency_samples": 268173313.0,
+        "chunk_size": 131072.0,
+        "chunks": 2047.0,
+        "tiled_chunks": 2047.0,
+        "tile_size": 512.0,
+        "tile_descriptor_shapes": [
+          [
+            512.0,
+            342.0
+          ]
+        ],
+        "padded_local_bins": 256.0,
+        "max_padded_tile_slots": 175104.0,
+        "max_tile_matrix_elements": 12344832.0,
+        "tile_power_weight_elements": 12257280.0,
+        "tile_combine_elements": 87552.0,
+        "tile_matrix_element_budget": 16777216.0,
+        "requested_chunk_size": 131072.0,
+        "compiled_executables": 1.0,
+        "time_anchors": 21.0,
+        "data_order": 24.0,
+        "norm_order": 16.0,
+        "wall_seconds_including_compilation": 37.447890888899565
+      },
+      "ET2": {
+        "backend": "jax",
+        "reducer": "bin-aligned-fp64-gemm-deterministic-combine-with-segment-fallback",
+        "device": "cuda:2",
+        "native_frequency_samples": 268173313.0,
+        "chunk_size": 131072.0,
+        "chunks": 2047.0,
+        "tiled_chunks": 2047.0,
+        "tile_size": 512.0,
+        "tile_descriptor_shapes": [
+          [
+            512.0,
+            342.0
+          ]
+        ],
+        "padded_local_bins": 256.0,
+        "max_padded_tile_slots": 175104.0,
+        "max_tile_matrix_elements": 12344832.0,
+        "tile_power_weight_elements": 12257280.0,
+        "tile_combine_elements": 87552.0,
+        "tile_matrix_element_budget": 16777216.0,
+        "requested_chunk_size": 131072.0,
+        "compiled_executables": 1.0,
+        "time_anchors": 21.0,
+        "data_order": 24.0,
+        "norm_order": 16.0,
+        "wall_seconds_including_compilation": 36.41044580936432
+      },
+      "ET3": {
+        "backend": "jax",
+        "reducer": "bin-aligned-fp64-gemm-deterministic-combine-with-segment-fallback",
+        "device": "cuda:3",
+        "native_frequency_samples": 268173313.0,
+        "chunk_size": 131072.0,
+        "chunks": 2047.0,
+        "tiled_chunks": 2047.0,
+        "tile_size": 512.0,
+        "tile_descriptor_shapes": [
+          [
+            512.0,
+            342.0
+          ]
+        ],
+        "padded_local_bins": 256.0,
+        "max_padded_tile_slots": 175104.0,
+        "max_tile_matrix_elements": 12344832.0,
+        "tile_power_weight_elements": 12257280.0,
+        "tile_combine_elements": 87552.0,
+        "tile_matrix_element_budget": 16777216.0,
+        "requested_chunk_size": 131072.0,
+        "compiled_executables": 1.0,
+        "time_anchors": 21.0,
+        "data_order": 24.0,
+        "norm_order": 16.0,
+        "wall_seconds_including_compilation": 36.44207023829222
+      }
+    }
+  },
+  "pipeline_timing": {
+    "preparation_seconds_including_compilation": 154.17665791139007,
+    "construction_seconds_including_compilation": 59.77653202600777,
+    "native_validation_seconds_including_compilation": 131.97175185754895,
+    "sampler_construction_seconds_including_compilation": 15.36164384894073,
+    "sample_call_seconds_including_compilation": 1335.0351307019591
+  },
+  "native_data_storage": {
+    "host_allocation_count": 3,
+    "host_allocation_bytes": 6442450968,
+    "mapped_file_count": 4,
+    "mapped_file_logical_bytes": 17179869248,
+    "device_array_object_count": 0,
+    "device_array_logical_bytes": 0,
+    "unclassified_array_object_count": 0
+  },
+  "data_preparation": {
+    "CE": {
+      "host_storage": "mmap",
+      "noise_generation": "indexed-v1",
+      "noise_algorithm": "indexed-threefry2x32-fold64-hi-lo-normal2-f64-v1",
+      "zero_noise": 0.0,
+      "waveform_chunk_size": 262144.0,
+      "full_length_device_noise": 0.0,
+      "native_fd_storage_bytes": 4294967312.0
+    },
+    "ET1": {
+      "host_storage": "mmap",
+      "noise_generation": "indexed-v1",
+      "noise_algorithm": "indexed-threefry2x32-fold64-hi-lo-normal2-f64-v1",
+      "zero_noise": 0.0,
+      "waveform_chunk_size": 262144.0,
+      "full_length_device_noise": 0.0,
+      "native_fd_storage_bytes": 4294967312.0
+    },
+    "ET2": {
+      "host_storage": "mmap",
+      "noise_generation": "indexed-v1",
+      "noise_algorithm": "indexed-threefry2x32-fold64-hi-lo-normal2-f64-v1",
+      "zero_noise": 0.0,
+      "waveform_chunk_size": 262144.0,
+      "full_length_device_noise": 0.0,
+      "native_fd_storage_bytes": 4294967312.0
+    },
+    "ET3": {
+      "host_storage": "mmap",
+      "noise_generation": "indexed-v1",
+      "noise_algorithm": "indexed-threefry2x32-fold64-hi-lo-normal2-f64-v1",
+      "zero_noise": 0.0,
+      "waveform_chunk_size": 262144.0,
+      "full_length_device_noise": 0.0,
+      "native_fd_storage_bytes": 4294967312.0
+    }
+  }
+}

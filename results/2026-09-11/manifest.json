@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "scope": "Same-event CE + ET-D inference: CE from 5 Hz and three ET channels from 2 Hz.",
+  "qualification": false,
+  "notes": [
+    "Gaussian noise seed 2 and sampler seed 2 are shared across the three retained network runs.",
+    "The adaptive run used four H200 GPUs. Historical comparators used four H100 GPUs.",
+    "The matched fixed-grid H200 trial timed out. There is no completed paired speed ratio.",
+    "The adaptive result has three finite native likelihood checks. These do not qualify the posterior.",
+    "Historical 1024-bin attempts 5 and 8 share their physical parameter trajectory. They are not independent runs.",
+    "Saved configurations and source records retain their original external paths and options."
+  ],
+  "storage_policy": {
+    "keep": [
+      "weighted nested points",
+      "posterior draws",
+      "exact run configurations",
+      "scientific timing and validation records",
+      "summary plots"
+    ],
+    "omit": [
+      "strain arrays",
+      "native moment banks",
+      "per-slice diagnostics",
+      "compiler caches and profiles",
+      "pod tools and logs"
+    ],
+    "npz": "Lossless ZIP compression; index.json records source, archive, and member hashes."
+  },
+  "timing": {
+    "loop": "Nested sampling loop, excluding measured compilation.",
+    "finalise": "Final live-point processing after the loop.",
+    "sample_call": "Observed call wall time, including first-use compilation.",
+    "pipeline": "Observed heterodyning start to synchronized sampler return; blank if not measured.",
+    "warm_pipeline": "Not measured. Loop time alone does not establish event latency."
+  }
+}

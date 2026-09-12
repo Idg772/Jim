@@ -1,0 +1,11 @@
+{
+  "status": "timed out",
+  "exit_status": 124,
+  "gpu": "H200",
+  "devices": 4,
+  "completed_posterior_available": false,
+  "completed_sampling_time_available": false,
+  "source": "benchmark-results/xg-allocator-trial-20260911/baseline-remote-receipt.json",
+  "source_sha256": "b9b822b7a80f64b668e44b3884ae2fdbc0a768097a4e8631e873f41fc8042b07",
+  "interpretation": "This trial does not establish a paired allocator speed ratio."
+}

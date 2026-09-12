@@ -1,0 +1,15 @@
+{
+  "path": "/workspace/jim-network-measurement-20260911/network-preflight.json",
+  "sha256": "1da6815b727873eb0ce44d8cecd8b079e80f907ed311b9b4d91cc9ff80eaba92",
+  "config_sha256": "a92210ee7fc9f677c7a7f7aa7a75e121679575f5c02abf2bd8ba14d0bdaaa808",
+  "analysis_contract_sha256": "e462da611100c80b1efea0719e19d2d3c9b0eb6c051041ee27d96208e698d232",
+  "input_files_sha256": {
+    "psd:CE": "a8934610ae6395a86129a70bf913d2b3469a477f872fec18c626b49dc7aa3f49",
+    "psd:ET1": "92089fb91b5a22aec20a63114da84cf1e494b7507fb7c41e601e070c95792cd6",
+    "psd:ET2": "92089fb91b5a22aec20a63114da84cf1e494b7507fb7c41e601e070c95792cd6",
+    "psd:ET3": "92089fb91b5a22aec20a63114da84cf1e494b7507fb7c41e601e070c95792cd6",
+    "ephemeris:earth": "4995647b2c47617c90804ad0bc814ce42b426f1e5015a90cf939bcdd0c20ea67",
+    "ephemeris:sun": "0b132dc5a712ebc16661a10cb88409e2577c16723c64f98e9b9b4d265510700f"
+  },
+  "detector_metadata_sha256": "83971bfcbace26a58560cd752749ca31954591f892f08b450f823106bb439d1c"
+}

@@ -1,0 +1,507 @@
+{
+  "scope": "Descriptive recovery from all saved weighted nested points; no new likelihood calls or GPU sampling",
+  "qualification": false,
+  "sources": {
+    "verified-adaptive/jim-adaptive-chebyshev-20260911/inference/results/config.final.toml": "68686ed573a72313d923350cc218100723c8af97eadd3c47565c5cd1a94082b8",
+    "verified-adaptive/jim-adaptive-chebyshev-20260911/inference/results/nested_samples.npz": "202efd66ff25a9b0832aa80e838046b9f9cff8c35ffe539170ce49b2fdbcfa66",
+    "verified-adaptive/jim-adaptive-chebyshev-20260911/inference/native-validation.json": "9a3fc02d17ba732d76e7c4181892c53e82d7490350d05f6ea2dc606c9aeb1b1c",
+    "verified-adaptive/jim-adaptive-chebyshev-20260911/inference/injection-recovery.json": "ec16d6adc61eef7f4e99e7efc71d417b2a76cde37f71ebfe1d98439b6373144b"
+  },
+  "weighted_points": 336896,
+  "weight_ess": 30564.394364070842,
+  "weight_ess_is_chain_mixing_ess": false,
+  "sampled_parameter_count": 12,
+  "sampled_truths_in_90": 11,
+  "sampled_truths_in_95": 12,
+  "parameters": {
+    "M_c": {
+      "truth": 1.1802650981093186,
+      "mean": 1.1802649370477196,
+      "posterior_sd": 8.690053911123534e-08,
+      "median": 1.1802649243785714,
+      "mean_minus_truth": -1.6106159894668792e-07,
+      "mean_minus_truth_in_posterior_sd": -1.8534016082515226,
+      "truth_cdf": 0.950076301420717,
+      "interval_90": [
+        1.180264817957077,
+        1.1802650980148277
+      ],
+      "truth_inside_90": false,
+      "interval_95": [
+        1.180264800806864,
+        1.1802651469904655
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        1.1802647660320023,
+        1.1802652408235557
+      ],
+      "truth_inside_99": true
+    },
+    "q": {
+      "truth": 0.9724191074091124,
+      "mean": 0.9873042726870067,
+      "posterior_sd": 0.008920848019536931,
+      "median": 0.9888173331694606,
+      "mean_minus_truth": 0.014885165277894297,
+      "mean_minus_truth_in_posterior_sd": 1.668581870837316,
+      "truth_cdf": 0.07158715095973173,
+      "interval_90": [
+        0.9704047855022081,
+        0.9989143362299029
+      ],
+      "truth_inside_90": true,
+      "interval_95": [
+        0.9671618645892676,
+        0.9994435797317373
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        0.9613943911956884,
+        0.9998772822874112
+      ],
+      "truth_inside_99": true
+    },
+    "s1_z": {
+      "truth": -0.014169601016451747,
+      "mean": -0.017489998155625314,
+      "posterior_sd": 0.012303306732401141,
+      "median": -0.017639411963856794,
+      "mean_minus_truth": -0.0033203971391735677,
+      "mean_minus_truth_in_posterior_sd": -0.26987843279800533,
+      "truth_cdf": 0.5937162639581693,
+      "interval_90": [
+        -0.037251128037144095,
+        0.0025388178665444465
+      ],
+      "truth_inside_90": true,
+      "interval_95": [
+        -0.03982943992644253,
+        0.005293798331756285
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        -0.04445963059426432,
+        0.009670516479365662
+      ],
+      "truth_inside_99": true
+    },
+    "s2_z": {
+      "truth": -0.02350583516601907,
+      "mean": -0.020168090529371595,
+      "posterior_sd": 0.012471481058196664,
+      "median": -0.020061424899692957,
+      "mean_minus_truth": 0.0033377446366474744,
+      "mean_minus_truth_in_posterior_sd": 0.2676301732787222,
+      "truth_cdf": 0.40924048457006756,
+      "interval_90": [
+        -0.04038968062604306,
+        -4.350677559275091e-05
+      ],
+      "truth_inside_90": true,
+      "interval_95": [
+        -0.043157849255849694,
+        0.002575431232974069
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        -0.04750657032560304,
+        0.007327257994266291
+      ],
+      "truth_inside_99": true
+    },
+    "lambda_1": {
+      "truth": 483.1557044220429,
+      "mean": 647.120704763439,
+      "posterior_sd": 216.86447914371553,
+      "median": 654.2121837413805,
+      "mean_minus_truth": 163.9650003413961,
+      "mean_minus_truth_in_posterior_sd": 0.7560712615952976,
+      "truth_cdf": 0.2780989583253291,
+      "interval_90": [
+        297.03078390845417,
+        969.4405601752396
+      ],
+      "truth_inside_90": true,
+      "interval_95": [
+        275.35658347861005,
+        984.9915919377711
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        255.60036547510998,
+        997.0053639807477
+      ],
+      "truth_inside_99": true
+    },
+    "lambda_2": {
+      "truth": 771.0436351634714,
+      "mean": 591.7745918126681,
+      "posterior_sd": 225.8508538443939,
+      "median": 583.893537940747,
+      "mean_minus_truth": -179.26904335080337,
+      "mean_minus_truth_in_posterior_sd": -0.793749681700631,
+      "truth_cdf": 0.7331130656499628,
+      "interval_90": [
+        256.3914840593179,
+        957.3746851025365
+      ],
+      "truth_inside_90": true,
+      "interval_95": [
+        240.78171185316126,
+        979.0338184232526
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        219.93543842191423,
+        995.5143365558782
+      ],
+      "truth_inside_99": true
+    },
+    "d_L": {
+      "truth": 20.0,
+      "mean": 19.992309806341726,
+      "posterior_sd": 0.024822896973812295,
+      "median": 19.992274069213142,
+      "mean_minus_truth": -0.007690193658273614,
+      "mean_minus_truth_in_posterior_sd": -0.309802424204823,
+      "truth_cdf": 0.6209545126352051,
+      "interval_90": [
+        19.951484564890205,
+        20.033500269038456
+      ],
+      "truth_inside_90": true,
+      "interval_95": [
+        19.94371917139488,
+        20.041184211451473
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        19.929219402881436,
+        20.05652034711515
+      ],
+      "truth_inside_99": true
+    },
+    "iota": {
+      "truth": 2.016083447361016,
+      "mean": 2.016186534637041,
+      "posterior_sd": 0.0010479786736315284,
+      "median": 2.016185220696874,
+      "mean_minus_truth": 0.00010308727602525991,
+      "mean_minus_truth_in_posterior_sd": 0.09836772314081042,
+      "truth_cdf": 0.4612591564345909,
+      "interval_90": [
+        2.0144624654248786,
+        2.017913934255849
+      ],
+      "truth_inside_90": true,
+      "interval_95": [
+        2.014157944935035,
+        2.0182271843765234
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        2.013505358316019,
+        2.018901005818531
+      ],
+      "truth_inside_99": true
+    },
+    "ra": {
+      "truth": 6.052874807646849,
+      "mean": 6.052809249309128,
+      "posterior_sd": 0.00025530376973681115,
+      "median": 6.052808679024565,
+      "mean_minus_truth": -6.555833772114994e-05,
+      "mean_minus_truth_in_posterior_sd": -0.25678562360725443,
+      "truth_cdf": 0.6011722513552221,
+      "interval_90": [
+        6.052388044716491,
+        6.053231154110232
+      ],
+      "truth_inside_90": true,
+      "interval_95": [
+        6.052309248962349,
+        6.053307898955849
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        6.05214828350085,
+        6.053473462560538
+      ],
+      "truth_inside_99": true,
+      "circular": {
+        "period": 6.283185307179586,
+        "mean_direction": 6.052809249309136,
+        "resultant_length": 0.9999999674099932,
+        "circular_sd": 0.00025530376940181734,
+        "equal_tail_branch": "Unwrapped on the common interval centered at the injection; CDF and linear SD depend on this branch",
+        "shortest_arcs": {
+          "90": {
+            "start": 6.052398774551824,
+            "end": 6.053238954562507,
+            "arc_width": 0.0008401800106829782,
+            "crosses_zero": false,
+            "contains_truth": true,
+            "scope": "Shortest single contiguous weighted arc; not a multimodal HPD set"
+          },
+          "95": {
+            "start": 6.052307001940411,
+            "end": 6.053305107049379,
+            "arc_width": 0.0009981051089678061,
+            "crosses_zero": false,
+            "contains_truth": true,
+            "scope": "Shortest single contiguous weighted arc; not a multimodal HPD set"
+          },
+          "99": {
+            "start": 6.052142852291864,
+            "end": 6.053464465044164,
+            "arc_width": 0.0013216127523003607,
+            "crosses_zero": false,
+            "contains_truth": true,
+            "scope": "Shortest single contiguous weighted arc; not a multimodal HPD set"
+          }
+        }
+      }
+    },
+    "dec": {
+      "truth": 0.17257877754217157,
+      "mean": 0.17292029508650142,
+      "posterior_sd": 0.0006468929716152451,
+      "median": 0.17292227310258038,
+      "mean_minus_truth": 0.0003415175443298446,
+      "mean_minus_truth_in_posterior_sd": 0.527935159779368,
+      "truth_cdf": 0.2970587786035447,
+      "interval_90": [
+        0.1718598054799269,
+        0.17399048443815757
+      ],
+      "truth_inside_90": true,
+      "interval_95": [
+        0.1716499697796926,
+        0.17419444192204125
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        0.17126450798776283,
+        0.1746061728280246
+      ],
+      "truth_inside_99": true
+    },
+    "psi": {
+      "truth": 1.6782976747256861,
+      "mean": 1.1300191308823473,
+      "posterior_sd": 0.8978407452766509,
+      "median": 1.678666457994347,
+      "mean_minus_truth": -0.5482785438433389,
+      "mean_minus_truth_in_posterior_sd": -0.6106634686916533,
+      "truth_cdf": 0.4626675301680616,
+      "interval_90": [
+        0.10808662822594406,
+        1.6841797320418816
+      ],
+      "truth_inside_90": true,
+      "interval_95": [
+        0.10781212721089117,
+        3.2485799563015227
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        0.10757250204738811,
+        3.2490122061195565
+      ],
+      "truth_inside_99": true,
+      "circular": {
+        "period": 3.141592653589793,
+        "mean_direction": 1.679653458199948,
+        "resultant_length": 0.1009720689754777,
+        "circular_sd": 1.0707267030348342,
+        "equal_tail_branch": "Unwrapped on the common interval centered at the injection; CDF and linear SD depend on this branch",
+        "shortest_arcs": {
+          "90": {
+            "start": 0.10749428562119412,
+            "end": 1.6815182279573282,
+            "arc_width": 1.574023942336134,
+            "crosses_zero": false,
+            "contains_truth": true,
+            "scope": "Shortest single contiguous weighted arc; not a multimodal HPD set"
+          },
+          "95": {
+            "start": 0.10703501631676561,
+            "end": 1.6820094900285074,
+            "arc_width": 1.5749744737117417,
+            "crosses_zero": false,
+            "contains_truth": true,
+            "scope": "Shortest single contiguous weighted arc; not a multimodal HPD set"
+          },
+          "99": {
+            "start": 0.10607454702606295,
+            "end": 1.682841748668114,
+            "arc_width": 1.576767201642051,
+            "crosses_zero": false,
+            "contains_truth": true,
+            "scope": "Shortest single contiguous weighted arc; not a multimodal HPD set"
+          }
+        }
+      }
+    },
+    "t_c": {
+      "truth": 0.03512602655783986,
+      "mean": 0.035128479899488176,
+      "posterior_sd": 1.1685944908245003e-05,
+      "median": 0.03512850392407982,
+      "mean_minus_truth": 2.4533416483132897e-06,
+      "mean_minus_truth_in_posterior_sd": 0.2099395185906052,
+      "truth_cdf": 0.41461422911455326,
+      "interval_90": [
+        0.03510916635781242,
+        0.03514773179857104
+      ],
+      "truth_inside_90": true,
+      "interval_95": [
+        0.035105479048212186,
+        0.03515142052073208
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        0.035098274280677653,
+        0.035158451319176776
+      ],
+      "truth_inside_99": true
+    },
+    "chi_eff": {
+      "truth": -0.018772442493793843,
+      "mean": -0.01882033202856358,
+      "posterior_sd": 5.458988734884015e-05,
+      "median": -0.018832768702806313,
+      "mean_minus_truth": -4.7889534769737785e-05,
+      "mean_minus_truth_in_posterior_sd": -0.8772601867396099,
+      "truth_cdf": 0.8285100342641913,
+      "interval_90": [
+        -0.0188838529513183,
+        -0.018712914867830697
+      ],
+      "truth_inside_90": true,
+      "interval_95": [
+        -0.018889263386578516,
+        -0.01868484503282049
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        -0.018898625131769407,
+        -0.018612444351399218
+      ],
+      "truth_inside_99": true
+    },
+    "lambda_tilde": {
+      "truth": 621.0726400744164,
+      "mean": 620.0775635891835,
+      "posterior_sd": 2.399314114147514,
+      "median": 620.1143202494839,
+      "mean_minus_truth": -0.9950764852329712,
+      "mean_minus_truth_in_posterior_sd": -0.4147337271787466,
+      "truth_cdf": 0.65628339857934,
+      "interval_90": [
+        616.0901478605348,
+        623.9573858435476
+      ],
+      "truth_inside_90": true,
+      "interval_95": [
+        615.2568632443651,
+        624.6809979991477
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        613.4324974137836,
+        626.043072545001
+      ],
+      "truth_inside_99": true
+    },
+    "psi_phase_equivalent": {
+      "truth": 1.6782976747256861,
+      "mean": 1.6798399969037712,
+      "posterior_sd": 0.0012826382850367234,
+      "median": 1.6798363990259473,
+      "mean_minus_truth": 0.0015423221780850316,
+      "mean_minus_truth_in_posterior_sd": 1.2024607374329803,
+      "truth_cdf": 0.11264069559855633,
+      "interval_90": [
+        1.6777299706750175,
+        1.681931921295559
+      ],
+      "truth_inside_90": true,
+      "interval_95": [
+        1.6773205602003909,
+        1.6823667497994537
+      ],
+      "truth_inside_95": true,
+      "interval_99": [
+        1.6765191340405456,
+        1.6831300384765076
+      ],
+      "truth_inside_99": true,
+      "circular": {
+        "period": 1.5707963267948966,
+        "mean_direction": 0.10904367006383749,
+        "resultant_length": 0.999986838799097,
+        "circular_sd": 0.0012826382728757131,
+        "equal_tail_branch": "Unwrapped on the common interval centered at the injection; CDF and linear SD depend on this branch",
+        "shortest_arcs": {
+          "90": {
+            "start": 0.10695039653610461,
+            "end": 0.11114890557962731,
+            "arc_width": 0.004198509043522702,
+            "crosses_zero": false,
+            "contains_truth": true,
+            "scope": "Shortest single contiguous weighted arc; not a multimodal HPD set"
+          },
+          "95": {
+            "start": 0.10642250203288772,
+            "end": 0.11145254952894923,
+            "arc_width": 0.005030047496061507,
+            "crosses_zero": false,
+            "contains_truth": true,
+            "scope": "Shortest single contiguous weighted arc; not a multimodal HPD set"
+          },
+          "99": {
+            "start": 0.10573907290047953,
+            "end": 0.11233915151823962,
+            "arc_width": 0.006600078617760088,
+            "crosses_zero": false,
+            "contains_truth": true,
+            "scope": "Shortest single contiguous weighted arc; not a multimodal HPD set"
+          }
+        }
+      }
+    }
+  },
+  "sky": {
+    "angular_distance_degrees_quantiles": {
+      "50": 0.030668775831444256,
+      "90": 0.07266199196395837,
+      "95": 0.08614806733002334,
+      "99": 0.1121606120519833
+    },
+    "weight_within_degrees": {
+      "0.05": 0.7392804823590853,
+      "0.1": 0.9778604729782385,
+      "0.2": 0.9999964085332396,
+      "1": 1.0,
+      "90": 1.0
+    },
+    "scope": "Angular distances from truth are descriptive, not joint credible-region coverage"
+  },
+  "likelihood": {
+    "heterodyne_at_injection": 3354435.85793614,
+    "maximum_saved_minus_injection": 7.740874388255179,
+    "weight_above_injection": 0.9030266044557147,
+    "scope": "Saved approximate likelihood; in noisy data truth need not maximize likelihood"
+  },
+  "caveats": [
+    "Marginal interval inclusion does not establish joint recovery or sampler mixing.",
+    "This is one noisy injection and one sampler seed; no repeated-injection calibration was performed.",
+    "Raw psi has phase-equivalent modes; psi_phase_equivalent folds modulo pi/2.",
+    "phase_c is analytically marginalized and has no sampled posterior here.",
+    "The interrupted fixed-grid control has no posterior for comparison."
+  ],
+  "saved_recovery_truth_ranks_reproduced": true
+}

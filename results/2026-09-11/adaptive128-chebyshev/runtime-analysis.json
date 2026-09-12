@@ -1,0 +1,134 @@
+{
+  "schema": "xg-adaptive-completed-run-analysis-v1",
+  "qualification": false,
+  "scope": "Observed completed adaptive Chebyshev run only; the baseline exited 124 without a completed runtime, as reported by the root orchestration audit. No paired speed factor is established. No GPU or source changes for this analysis.",
+  "sources": {
+    "allocator-trial-summary.json": {
+      "path": "benchmark-results/xg-allocator-trial-20260911/verified-adaptive/jim-adaptive-chebyshev-20260911/inference/allocator-trial-summary.json",
+      "sha256": "286a719f3323c744938b78b67c85b4d9a22614af805990144f5c96bca65fab45"
+    },
+    "construction.json": {
+      "path": "benchmark-results/xg-allocator-trial-20260911/verified-adaptive/jim-adaptive-chebyshev-20260911/inference/construction.json",
+      "sha256": "5490cbbb9f4592bbb9647b621fca95d9e9bcee3e8c772507331d3d6e11d5c37d"
+    },
+    "sampling-timing.json": {
+      "path": "benchmark-results/xg-allocator-trial-20260911/verified-adaptive/jim-adaptive-chebyshev-20260911/inference/sampling-timing.json",
+      "sha256": "e38c56f3bb69164a2a0478daee4e897492799e9def9413ee3b064266bf27dfc3"
+    },
+    "pipeline-runtime.json": {
+      "path": "benchmark-results/xg-allocator-trial-20260911/verified-adaptive/jim-adaptive-chebyshev-20260911/inference/pipeline-runtime.json",
+      "sha256": "3e3f8a6252c1ca0db2c85ebad82bb4618d2425a11e2c3cb85cb93c8c0402b35d"
+    },
+    "results/diagnostics.json": {
+      "path": "benchmark-results/xg-allocator-trial-20260911/verified-adaptive/jim-adaptive-chebyshev-20260911/inference/results/diagnostics.json",
+      "sha256": "dda66e25f8de44407891a1438d4dea5374857ff391d71d16cc71886fcbf4a73c"
+    }
+  },
+  "continuous_seconds": 524.8445903658867,
+  "target_seconds": 300.0,
+  "target_met": false,
+  "sampler_counts": {
+    "n_iterations": 650,
+    "replacement_chains_per_round": 512,
+    "replacement_chains": 332800,
+    "final_live_points": 4096,
+    "nested_points": 336896,
+    "slices_per_replacement": 96,
+    "n_slice_updates": 31948800,
+    "logical_stepping_out": 30642088,
+    "logical_shrinking": 70020763,
+    "logical_expansion_plus_shrink": 100662851,
+    "logical_baseline_endpoint_convention": 164560451,
+    "fsm_optimizations": {
+      "requested": "ce-fast",
+      "implementation": "ce-fast-v1",
+      "skip_exhausted_endpoints": 1.0,
+      "defer_rebuild_cache": 1.0,
+      "fallback_reason": null,
+      "scope": "ordinary physical-target R/H transitions; marked or repartitioned targets retain baseline"
+    },
+    "counter_caveat": "logical E+S plus two endpoints per stepping-out slice; excludes endpoint-skipping savings and masked-lane work; legacy physical counter is not a GPU invocation count"
+  },
+  "saved_array_audit": {
+    "nested_parameter_and_logweight_shapes": [
+      336896
+    ],
+    "expansion_and_shrink_history_shapes": [
+      332800,
+      1,
+      96
+    ],
+    "expansion_history_sum": 30642088,
+    "expansion_min_max": [
+      0,
+      9
+    ],
+    "shrink_history_sum": 70020763,
+    "shrink_min_max": [
+      1,
+      39
+    ],
+    "acceptance_history_shape": [
+      332800,
+      1
+    ],
+    "accepted_replacements": 332800,
+    "exact_identities": [
+      "650 * 512 = 332800",
+      "332800 + 4096 = 336896",
+      "332800 * 96 = 31948800",
+      "30642088 + 70020763 = 100662851",
+      "100662851 + 2 * 31948800 = 164560451"
+    ],
+    "acceptance_caveat": "All replacement chains finished successfully; this is not the acceptance rate of every proposed slice point."
+  },
+  "nonoverlapping_seconds": {
+    "sampler_loop": 220.86516108270735,
+    "construction": 131.66534914635122,
+    "native_checks": 3.848441262729466,
+    "jim_construction": 38.88763472251594,
+    "sample_init_total": 15.355539686977863,
+    "outer_sampler_kernel_jit": 107.09162852354348,
+    "sample_finalise": 3.518496467731893,
+    "sample_unattributed": 3.558863419108093,
+    "pipeline_unattributed": 0.05347605422139168
+  },
+  "nonloop_seconds": 303.97942928317934,
+  "nested_construction_details_do_not_add": {
+    "planning": 11.6449124943465,
+    "native_candidate_construction": 42.350023596547544,
+    "selection": 76.75346078909934,
+    "moment_export": 0.6319374972954392
+  },
+  "rates": {
+    "slice_updates_per_second": 144652.96311732993,
+    "replacement_chains_per_second": 1506.8016991388536,
+    "loop_seconds_per_round": 0.33979255551185744,
+    "logical_expansions_per_slice": 0.9590998096955128,
+    "logical_shrinks_per_slice": 2.191655492538061
+  },
+  "target_arithmetic": {
+    "required_savings_seconds": 224.8445903658867,
+    "required_fraction_total_removed": 0.4284022251408556,
+    "required_total_speedup": 1.749481967886289,
+    "nonloop_budget_if_loop_unchanged": 79.13483891729265,
+    "required_nonloop_fraction_removed_if_loop_unchanged": 0.7396704141990716,
+    "time_if_entire_selection_and_outer_jit_vanished": 340.9995010532439,
+    "scenario_caveat": "Arithmetic limits only; no assumption that these phases can be eliminated. Node changes may also affect compilation/setup, but loop acceleration alone cannot meet the target with current overhead."
+  },
+  "outside_target_seconds": {
+    "completed_data_preparation": 90.0889044450596,
+    "post_sampling_output_and_recovery": 37.498391672968864
+  },
+  "interpretation": [
+    "The target is missed by 224.845 seconds. Both loop work and startup are material; non-loop time alone exceeds 300 seconds.",
+    "Source entries fell 50% and active detector entries 53.28% relative to the pinned 256-bin layout. The fixed 256-bin baseline exited 124 without a complete runtime; no paired end-to-end or loop speed factor can be claimed.",
+    "ns_loop includes host termination/control work. Logical counters are not GPU invocation counts or isolated source-evaluation counts.",
+    "Saved finite-bank and native spot checks passed; they are not prior-wide or posterior qualification."
+  ],
+  "baseline_completion_note": {
+    "status": "interrupted",
+    "exit_status": 124,
+    "source": "root orchestration audit message; this record does not infer a runtime for the interrupted baseline"
+  }
+}

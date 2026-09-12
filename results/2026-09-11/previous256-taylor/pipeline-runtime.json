@@ -1,0 +1,9 @@
+{
+  "qualification": false,
+  "status": "complete",
+  "metric": "heterodyning_to_sample_return_seconds_including_compilation",
+  "wall_seconds": 914.1834904523566,
+  "target_seconds": 300.0,
+  "target_met": false,
+  "scope": "Continuous wall time immediately before construct_candidate through jim.sample return and synchronization; includes bin planning, native moments, automatic selection, intermediate receipts, native checks, Jim construction and all first-use compilation. Excludes completed data preparation and post-sampling diagnostics, output and recovery."
+}

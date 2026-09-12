@@ -1,0 +1,877 @@
+{
+  "schema": "xg-posterior-comparison-contract-v1",
+  "qualification": false,
+  "audit": "Read-only saved-receipt and source-manifest comparison; no posterior statistics or new likelihood evaluations performed by this audit.",
+  "conclusion": "All four completed runs target the same declared physical inference problem and deterministic indexed-noise realization. The previous256 run is the closest historical posterior comparator. None is an isolated bin-count experiment or a multi-seed posterior qualification.",
+  "common_input_files_sha256": {
+    "psd:CE": "a8934610ae6395a86129a70bf913d2b3469a477f872fec18c626b49dc7aa3f49",
+    "psd:ET1": "92089fb91b5a22aec20a63114da84cf1e494b7507fb7c41e601e070c95792cd6",
+    "psd:ET2": "92089fb91b5a22aec20a63114da84cf1e494b7507fb7c41e601e070c95792cd6",
+    "psd:ET3": "92089fb91b5a22aec20a63114da84cf1e494b7507fb7c41e601e070c95792cd6",
+    "ephemeris:earth": "4995647b2c47617c90804ad0bc814ce42b426f1e5015a90cf939bcdd0c20ea67",
+    "ephemeris:sun": "0b132dc5a712ebc16661a10cb88409e2577c16723c64f98e9b9b4d265510700f"
+  },
+  "byte_identical_preparation_waveform_detector_source_files": {
+    "src/jimgw/cli/_data.py": "3755ec6ccc886290d791f1a6a3802c34b43308e44239deda77e9437b7d40a2e7",
+    "src/jimgw/cli/_waveform.py": "4f6de79833ae4781d214a69fb2a1cb4fb1172b81e8eebc696aaabec0ef714014",
+    "src/jimgw/core/single_event/data.py": "9c0a04509fb494448ed56471faf6ee72b0884e9517407f2e8641fa7dd4518312",
+    "src/jimgw/core/single_event/detector.py": "49acf6469ea1fccede3e2344f6ce7e9457f32f3f8e773a83ccb7800b33e8a72d",
+    "src/jimgw/core/single_event/heterodyne_noise.py": "f58f2755a96d98599c09419050b9bdfe093cf104e01db3e3039d5906602483ad",
+    "src/jimgw/core/single_event/waveform.py": "faa9e8d01b8e9b5244c107778485abd3466b042b90eb376baca8b4c81f0a50ff"
+  },
+  "data_identity_limit": "Generated full strain/noise arrays were not archived with content hashes. Same inputs, generator source, seed, index rule, native grid and runtime versions establish the same deterministic data construction contract; full bytewise data equality was not independently tested. All three native probe totals are exactly equal between adaptive and previous256.",
+  "runs": {
+    "adaptive128_chebyshev": {
+      "inference_path": "/Users/imangill/projects/Jim/benchmark-results/xg-allocator-trial-20260911/verified-adaptive/jim-adaptive-chebyshev-20260911/inference",
+      "completed": true,
+      "run_config_sha256": "fbda54abdf3fae2571f122fdf2d2c5a5d50f97a9c01bee456fae4e39b56b801a",
+      "preflight_analysis_contract_sha256": "32489644987204aa1d5753d446f09d3f524284a83db3468fca3e511420c0ebe9",
+      "source_tree_sha256": "011138223694aee9db9a6c3134a14389b9ca643ed2a6024c13d5fd70f5ac90e4",
+      "declared_native_target_configuration_sha256": "8ebd1c798624822acaa9bb92a9fc08681d16c266c4c66c74cdb61fb8bf462271",
+      "physical_detector_metadata_sha256": "83971bfcbace26a58560cd752749ca31954591f892f08b450f823106bb439d1c",
+      "jax_version": "0.11.0",
+      "jax_enable_x64": true,
+      "runtime_versions": {
+        "jimgw": "0.0.dev0+network.11138223694",
+        "jax": "0.11.0",
+        "jaxlib": "0.11.0",
+        "numpy": "2.5.1",
+        "scipy": "1.18.0",
+        "ripplegw": "0.3.0",
+        "equinox": "0.13.8"
+      },
+      "hardware": "four H200",
+      "bins": 128,
+      "interpolation_order": 8,
+      "phasor_moment_order": 16,
+      "phasor_time_anchors": {
+        "count": 21,
+        "minimum_seconds": -0.2,
+        "maximum_seconds": 0.2,
+        "step_seconds": 0.02
+      },
+      "phasor_approximation": "chebyshev",
+      "saved_final_node_frequency_prefix": [
+        2.0,
+        2.0020898047582847
+      ],
+      "evaluation_implementation": "factored-carrier-network-v2",
+      "sampler_fsm": {
+        "requested": "ce-fast",
+        "implementation": "ce-fast-v1",
+        "skip_exhausted_endpoints": 1.0,
+        "defer_rebuild_cache": 1.0,
+        "fallback_reason": null,
+        "scope": "ordinary physical-target R/H transitions; marked or repartitioned targets retain baseline"
+      },
+      "sweep_layout": "scan; fsm_sweep_unroll=1",
+      "noise_seed": 2,
+      "sampler_seed": 2,
+      "noise_algorithm": "indexed-threefry2x32-fold64-hi-lo-normal2-f64-v1",
+      "detector_key_rule": "fold_in(root_key, zero-based expanded detector index)",
+      "detector_noise_indices": {
+        "CE": 0,
+        "ET1": 1,
+        "ET2": 2,
+        "ET3": 3
+      },
+      "native_checks_passed": true,
+      "native_probe_totals": [
+        {
+          "name": "injection",
+          "log_likelihood": 3354435.857936157,
+          "complex_overlap": {
+            "real": 5072532.188578794,
+            "imag": -4393947.656511951
+          },
+          "waveform_norm": 6713086.559535846,
+          "native_prefix": [
+            2.0,
+            2.0000076293945312
+          ]
+        },
+        {
+          "name": "local-coupled",
+          "log_likelihood": 3353975.7563766534,
+          "complex_overlap": {
+            "real": 5097311.464370764,
+            "imag": -4362593.9083117265
+          },
+          "waveform_norm": 6710646.324455858,
+          "native_prefix": [
+            2.0,
+            2.0000076293945312
+          ]
+        },
+        {
+          "name": "broader-interior",
+          "log_likelihood": 1934453.3108718088,
+          "complex_overlap": {
+            "real": 4907144.689080338,
+            "imag": -1567774.7146442814
+          },
+          "waveform_norm": 6434082.744890377,
+          "native_prefix": [
+            2.0,
+            2.0000076293945312
+          ]
+        }
+      ],
+      "native_centered_errors_nats": {
+        "injection": 0.0,
+        "local-coupled": -0.00018731039017438889,
+        "broader-interior": 0.002169747371226549
+      },
+      "selected_bank_receipt": {
+        "method": "shared-native-moments-adaptive-k8-v1",
+        "training_bank_sha256": "21ea8efcfe75a4102d4815f6003ea1fa88ddff38322dc0ed28cf807383446550",
+        "verification_bank_sha256": "ab20122c53df2b8fa39cd9885ba86e676e2776bb612cd1b96d4755e827e21bac",
+        "maximum_training_error_nats": 0.02172565460205078,
+        "maximum_verification_error_nats": 0.0003449763171374798,
+        "reference_convergence_error_nats": {
+          "training": 0.00010514259338378906,
+          "verification": 7.217749953269958e-08
+        }
+      },
+      "source_receipts": {
+        "run.json": "478968d2b37881249ed7c9450c22b87724cea6066bb91650827b8089df02a032",
+        "preflight-binding.json": "f3b9f7eb1f20ef555298c4226bde9d6e2c3e75a0d210fab5bdd063cd6b30cf44",
+        "preparation.json": "4a6756f8269ea69f6a952ac2a0139578d6ff3595519973d361a33c5d89fb027d",
+        "construction.json": "5490cbbb9f4592bbb9647b621fca95d9e9bcee3e8c772507331d3d6e11d5c37d",
+        "native-validation.json": "9a3fc02d17ba732d76e7c4181892c53e82d7490350d05f6ea2dc606c9aeb1b1c",
+        "results/diagnostics.json": "dda66e25f8de44407891a1438d4dea5374857ff391d71d16cc71886fcbf4a73c"
+      }
+    },
+    "previous256_taylor": {
+      "inference_path": "/Users/imangill/projects/Jim/benchmark-results/xg-five-minute-gpu-20260911/verified-results/jim-network-measurement-20260911/inference",
+      "completed": true,
+      "run_config_sha256": "a92210ee7fc9f677c7a7f7aa7a75e121679575f5c02abf2bd8ba14d0bdaaa808",
+      "preflight_analysis_contract_sha256": "e462da611100c80b1efea0719e19d2d3c9b0eb6c051041ee27d96208e698d232",
+      "source_tree_sha256": "ae583ebe5eec938e0a0bd8cbe0db72f69bc5bbd24cc1c00a146dbb38fb04432d",
+      "declared_native_target_configuration_sha256": "8ebd1c798624822acaa9bb92a9fc08681d16c266c4c66c74cdb61fb8bf462271",
+      "physical_detector_metadata_sha256": "83971bfcbace26a58560cd752749ca31954591f892f08b450f823106bb439d1c",
+      "jax_version": "0.11.0",
+      "jax_enable_x64": true,
+      "runtime_versions": {
+        "jimgw": "0.0.dev0+network.ae583ebe5eec",
+        "jax": "0.11.0",
+        "jaxlib": "0.11.0",
+        "jax-cuda12-plugin": "0.11.0",
+        "jax-cuda12-pjrt": "0.11.0",
+        "numpy": "2.5.1",
+        "scipy": "1.18.0",
+        "ripplegw": "0.3.0",
+        "equinox": "0.13.8",
+        "lalsuite": "7.26.15",
+        "gwpy": "4.0.1"
+      },
+      "hardware": "four H100 80GB SXM",
+      "bins": 256,
+      "interpolation_order": 8,
+      "phasor_moment_order": 16,
+      "phasor_time_anchors": {
+        "count": 21,
+        "minimum_seconds": -0.2,
+        "maximum_seconds": 0.2,
+        "step_seconds": 0.02
+      },
+      "phasor_approximation": "legacy Taylor (field predates explicit representation choice)",
+      "saved_final_node_frequency_prefix": [
+        2.0,
+        2.0020898047582847
+      ],
+      "evaluation_implementation": "factored-carrier-network-v2",
+      "sampler_fsm": {
+        "implementation": "pre-ce-fast baseline"
+      },
+      "sweep_layout": "scan; fsm_sweep_unroll=1",
+      "noise_seed": 2,
+      "sampler_seed": 2,
+      "noise_algorithm": "indexed-threefry2x32-fold64-hi-lo-normal2-f64-v1",
+      "detector_key_rule": "fold_in(root_key, zero-based expanded detector index)",
+      "detector_noise_indices": {
+        "CE": 0,
+        "ET1": 1,
+        "ET2": 2,
+        "ET3": 3
+      },
+      "native_checks_passed": true,
+      "native_probe_totals": [
+        {
+          "name": "injection",
+          "log_likelihood": 3354435.857936157,
+          "complex_overlap": {
+            "real": 5072532.188578794,
+            "imag": -4393947.656511951
+          },
+          "waveform_norm": 6713086.559535846,
+          "native_prefix": [
+            2.0,
+            2.0000076293945312
+          ]
+        },
+        {
+          "name": "local-coupled",
+          "log_likelihood": 3353975.7563766534,
+          "complex_overlap": {
+            "real": 5097311.464370764,
+            "imag": -4362593.9083117265
+          },
+          "waveform_norm": 6710646.324455858,
+          "native_prefix": [
+            2.0,
+            2.0000076293945312
+          ]
+        },
+        {
+          "name": "broader-interior",
+          "log_likelihood": 1934453.3108718088,
+          "complex_overlap": {
+            "real": 4907144.689080338,
+            "imag": -1567774.7146442814
+          },
+          "waveform_norm": 6434082.744890377,
+          "native_prefix": [
+            2.0,
+            2.0000076293945312
+          ]
+        }
+      ],
+      "native_centered_errors_nats": {
+        "injection": 0.0,
+        "local-coupled": -0.00018712365999817848,
+        "broader-interior": 0.0021543148905038834
+      },
+      "selected_bank_receipt": {
+        "method": "shared-native-moments-frozen-grid-v1",
+        "training_bank_sha256": "21ea8efcfe75a4102d4815f6003ea1fa88ddff38322dc0ed28cf807383446550",
+        "verification_bank_sha256": "ab20122c53df2b8fa39cd9885ba86e676e2776bb612cd1b96d4755e827e21bac",
+        "maximum_training_error_nats": 0.0275421142578125,
+        "maximum_verification_error_nats": 3.14018689095974e-05,
+        "reference_convergence_error_nats": {
+          "training": 0.00010514259338378906,
+          "verification": 6.752088665962219e-08
+        }
+      },
+      "source_receipts": {
+        "run.json": "9b0eb1b90415240584567f52511b6ede26185dfa60d44ef557b06eb4af75f283",
+        "preflight-binding.json": "1a1427d2e136769247607562ac149f18612467dbc8e6312e84b8834413fb8a75",
+        "preparation.json": "9f6e50423ccc6cc578e6500f1a637281ea84ab11f80866b8a6370a1c68255dc1",
+        "construction.json": "51eb562dcf1189920498cfbe07eddab63441085f0b6c0b4a995eb1dcd0f3e069",
+        "native-validation.json": "19d717ffbae640bfd30e349181a7823f2f3bcebd66012fc09ee57dce45dcb46d",
+        "results/diagnostics.json": "37ab04c8879200b0114eb99a85876c39916e66bd1573547a37bff7ff00bf60ee"
+      }
+    },
+    "previous1024_attempt5": {
+      "inference_path": "/Users/imangill/projects/Jim/benchmark-results/xg-network-pod-20260910/extracted-attempt-5/jim-network-run-20260910-5/inference",
+      "completed": true,
+      "run_config_sha256": "6034a30739a8a99bae8b25808b72bd174968cb59166917f0bea737a3414c0b8b",
+      "preflight_analysis_contract_sha256": "c26ec60c1b96a64ee1ea25bb367c6b0b0f5b2ca326f2bb21e0220a19cd1d6ab5",
+      "source_tree_sha256": "8a70391f16b7c18ed4724226d5410867cf4356bcdc4535e0dc3e4b37abb39eac",
+      "declared_native_target_configuration_sha256": "8ebd1c798624822acaa9bb92a9fc08681d16c266c4c66c74cdb61fb8bf462271",
+      "physical_detector_metadata_sha256": "83971bfcbace26a58560cd752749ca31954591f892f08b450f823106bb439d1c",
+      "jax_version": "0.11.0",
+      "jax_enable_x64": true,
+      "runtime_versions": {
+        "jimgw": "0.0.dev0+network.8a70391f16b7",
+        "jax": "0.11.0",
+        "jaxlib": "0.11.0",
+        "jax-cuda12-plugin": "0.11.0",
+        "jax-cuda12-pjrt": "0.11.0",
+        "numpy": "2.5.1",
+        "scipy": "1.18.0",
+        "ripplegw": "0.3.0",
+        "equinox": "0.13.8",
+        "lalsuite": "7.26.15",
+        "gwpy": "4.0.1"
+      },
+      "hardware": "four H100 80GB SXM",
+      "bins": 1024,
+      "interpolation_order": 8,
+      "phasor_moment_order": 16,
+      "phasor_time_anchors": {
+        "count": 21,
+        "minimum_seconds": -0.2,
+        "maximum_seconds": 0.2,
+        "step_seconds": 0.02
+      },
+      "phasor_approximation": "legacy Taylor (field predates explicit representation choice)",
+      "saved_final_node_frequency_prefix": null,
+      "evaluation_implementation": "legacy per-detector evaluator; implementation marker not saved",
+      "sampler_fsm": {
+        "implementation": "pre-ce-fast baseline"
+      },
+      "sweep_layout": "legacy unrolled",
+      "noise_seed": 2,
+      "sampler_seed": 2,
+      "noise_algorithm": "indexed-threefry2x32-fold64-hi-lo-normal2-f64-v1",
+      "detector_key_rule": "fold_in(root_key, zero-based expanded detector index)",
+      "detector_noise_indices": {
+        "CE": 0,
+        "ET1": 1,
+        "ET2": 2,
+        "ET3": 3
+      },
+      "native_checks_passed": true,
+      "native_probe_totals": [
+        {
+          "name": "injection",
+          "log_likelihood": 3354435.8579361606,
+          "complex_overlap": {
+            "real": 5072532.188594783,
+            "imag": -4393947.656493498
+          },
+          "waveform_norm": 6713086.559535846,
+          "native_prefix": [
+            2.0,
+            2.0000076293945312
+          ]
+        },
+        {
+          "name": "local-coupled",
+          "log_likelihood": 3353975.756376653,
+          "complex_overlap": {
+            "real": 5097311.464339029,
+            "imag": -4362593.908348806
+          },
+          "waveform_norm": 6710646.324455859,
+          "native_prefix": [
+            2.0,
+            2.0000076293945312
+          ]
+        },
+        {
+          "name": "broader-interior",
+          "log_likelihood": 1934453.3108667159,
+          "complex_overlap": {
+            "real": 4907144.689076198,
+            "imag": -1567774.7146405075
+          },
+          "waveform_norm": 6434082.744890378,
+          "native_prefix": [
+            2.0,
+            2.0000076293945312
+          ]
+        }
+      ],
+      "native_centered_errors_nats": {
+        "injection": 0.0,
+        "local-coupled": 3.3015385270118713e-07,
+        "broader-interior": 8.859671652317047e-06
+      },
+      "selected_bank_receipt": null,
+      "source_receipts": {
+        "run.json": "64c8a1db8f58c400964466c58342636775591fe6fa4a2ea759359807863f1610",
+        "preflight-binding.json": "31b4124212f4fc9568854d2ff97fd06f4b9d6c442548456290094afaa8f37de0",
+        "preparation.json": "1b9a6326b75ade8932ac876a3dfac506605e6a3a9bf4a9e8d79f51668a5fab21",
+        "construction.json": "9067b235920379b01a8da9b0f9f175bda1570cb07c697cc5fe6985c66b4694c9",
+        "native-validation.json": "31ce54622910ff9d6baa85f3fac84079b76914349d8318a49b7a009edb1b5664",
+        "results/diagnostics.json": "f3789d55d97973b892177496b2923582154f11899ea8c7fb86c1eed7d205ea2b"
+      }
+    },
+    "previous1024_attempt8": {
+      "inference_path": "/Users/imangill/projects/Jim/benchmark-results/xg-network-pod-20260910/extracted-attempt-8/jim-network-run-20260910-8/inference",
+      "completed": true,
+      "run_config_sha256": "6034a30739a8a99bae8b25808b72bd174968cb59166917f0bea737a3414c0b8b",
+      "preflight_analysis_contract_sha256": "c26ec60c1b96a64ee1ea25bb367c6b0b0f5b2ca326f2bb21e0220a19cd1d6ab5",
+      "source_tree_sha256": "5ff6e9bbd2d7d06f42e7a4989dbd66fba1cc23f80deac58871a68a3597d94cca",
+      "declared_native_target_configuration_sha256": "8ebd1c798624822acaa9bb92a9fc08681d16c266c4c66c74cdb61fb8bf462271",
+      "physical_detector_metadata_sha256": "83971bfcbace26a58560cd752749ca31954591f892f08b450f823106bb439d1c",
+      "jax_version": "0.11.0",
+      "jax_enable_x64": true,
+      "runtime_versions": {
+        "jimgw": "0.0.dev0+network.5ff6e9bbd2d7",
+        "jax": "0.11.0",
+        "jaxlib": "0.11.0",
+        "jax-cuda12-plugin": "0.11.0",
+        "jax-cuda12-pjrt": "0.11.0",
+        "numpy": "2.5.1",
+        "scipy": "1.18.0",
+        "ripplegw": "0.3.0",
+        "equinox": "0.13.8",
+        "lalsuite": "7.26.15",
+        "gwpy": "4.0.1"
+      },
+      "hardware": "four H100 80GB SXM",
+      "bins": 1024,
+      "interpolation_order": 8,
+      "phasor_moment_order": 16,
+      "phasor_time_anchors": {
+        "count": 21,
+        "minimum_seconds": -0.2,
+        "maximum_seconds": 0.2,
+        "step_seconds": 0.02
+      },
+      "phasor_approximation": "legacy Taylor (field predates explicit representation choice)",
+      "saved_final_node_frequency_prefix": null,
+      "evaluation_implementation": "legacy per-detector evaluator; implementation marker not saved",
+      "sampler_fsm": {
+        "implementation": "pre-ce-fast baseline"
+      },
+      "sweep_layout": "private scan launcher",
+      "noise_seed": 2,
+      "sampler_seed": 2,
+      "noise_algorithm": "indexed-threefry2x32-fold64-hi-lo-normal2-f64-v1",
+      "detector_key_rule": "fold_in(root_key, zero-based expanded detector index)",
+      "detector_noise_indices": {
+        "CE": 0,
+        "ET1": 1,
+        "ET2": 2,
+        "ET3": 3
+      },
+      "native_checks_passed": true,
+      "native_probe_totals": [
+        {
+          "name": "injection",
+          "log_likelihood": 3354435.85793616,
+          "complex_overlap": {
+            "real": 5072532.188594783,
+            "imag": -4393947.656493498
+          },
+          "waveform_norm": 6713086.559535847,
+          "native_prefix": [
+            2.0,
+            2.0000076293945312
+          ]
+        },
+        {
+          "name": "local-coupled",
+          "log_likelihood": 3353975.756376653,
+          "complex_overlap": {
+            "real": 5097311.464339029,
+            "imag": -4362593.908348806
+          },
+          "waveform_norm": 6710646.324455859,
+          "native_prefix": [
+            2.0,
+            2.0000076293945312
+          ]
+        },
+        {
+          "name": "broader-interior",
+          "log_likelihood": 1934453.3108667159,
+          "complex_overlap": {
+            "real": 4907144.689076198,
+            "imag": -1567774.7146405075
+          },
+          "waveform_norm": 6434082.744890378,
+          "native_prefix": [
+            2.0,
+            2.0000076293945312
+          ]
+        }
+      ],
+      "native_centered_errors_nats": {
+        "injection": 0.0,
+        "local-coupled": 3.296881914138794e-07,
+        "broader-interior": 8.85920599102974e-06
+      },
+      "selected_bank_receipt": null,
+      "source_receipts": {
+        "run.json": "a02adbbaf925c0a02d3f5e3d6b7c628cd90877009842e23459483599d36d5a63",
+        "preflight-binding.json": "0d0dca752f23b18d168495d4e352e1c12d46d568963f22d520f7e62a4e8d97f3",
+        "preparation.json": "abaa994ad0838d6b7fdde2c2a505a4b63445d23cb04712fcec184c77b6bcb3ab",
+        "construction.json": "40d42a97c8b6cab9dc8ec3d0bd9e64065c6a1ae1142b721c8180f65bcdbb3d08",
+        "native-validation.json": "d784cc56ecdd5decbb19d5a4d615177a6aa0e88a610494e1517b1e05ee7a91c0",
+        "results/diagnostics.json": "e9157be795226ab66752958075c0ced6dc6ac8f9b4c9ef7b8de96bf1dff141c8"
+      }
+    }
+  },
+  "adaptive_comparisons": {
+    "previous256_taylor": {
+      "same_declared_native_target_configuration": true,
+      "same_psd_ephemeris_hashes": true,
+      "same_detector_metadata_hash": true,
+      "same_noise_and_sampler_seed_contract": true,
+      "same_preparation_detector_contract": true,
+      "same_sampling_controls_excluding_fsm_implementation_fields": true,
+      "requested_config_differences": [
+        {
+          "path": "likelihood.heterodyne.bin_selection.allocation_base_bins",
+          "adaptive": 256,
+          "comparator": "<absent>"
+        },
+        {
+          "path": "likelihood.heterodyne.bin_selection.allocation_max_intervals",
+          "adaptive": 8192,
+          "comparator": "<absent>"
+        },
+        {
+          "path": "likelihood.heterodyne.bin_selection.allocation_max_proposals",
+          "adaptive": 64,
+          "comparator": "<absent>"
+        },
+        {
+          "path": "likelihood.heterodyne.bin_selection.allocation_refinement_depth",
+          "adaptive": 1,
+          "comparator": "<absent>"
+        },
+        {
+          "path": "likelihood.heterodyne.bin_selection.candidate_edge_indices",
+          "adaptive": {
+            "type": "list",
+            "length": 1,
+            "entry_lengths": [
+              167
+            ],
+            "canonical_sha256": "5b550cab91be4611bbede273ac912bd4a280200ef6607f108e536d99545f2014"
+          },
+          "comparator": "<absent>"
+        },
+        {
+          "path": "likelihood.heterodyne.bin_selection.max_timed_candidates",
+          "adaptive": 3,
+          "comparator": "<absent>"
+        },
+        {
+          "path": "likelihood.heterodyne.bin_selection.method",
+          "adaptive": "adaptive",
+          "comparator": "<absent>"
+        },
+        {
+          "path": "likelihood.heterodyne.node_frequency_prefix",
+          "adaptive": [
+            2.0,
+            2.0020898047582847
+          ],
+          "comparator": null
+        },
+        {
+          "path": "likelihood.heterodyne.phasor_approximation",
+          "adaptive": "chebyshev",
+          "comparator": "<absent>"
+        },
+        {
+          "path": "output.dir",
+          "adaptive": "/workspace/jim-adaptive-chebyshev-20260911/inference/results",
+          "comparator": "/workspace/jim-network-measurement-20260911/inference/results"
+        },
+        {
+          "path": "sampler.fsm_optimizations",
+          "adaptive": "ce-fast",
+          "comparator": "<absent>"
+        }
+      ],
+      "native_probe_comparison": [
+        {
+          "name": "injection",
+          "same_parameters": true,
+          "log_likelihood_adaptive_minus_comparator_nats": 0.0,
+          "overlap_real_difference": 0.0,
+          "overlap_imag_difference": 0.0,
+          "norm_difference": 0.0
+        },
+        {
+          "name": "local-coupled",
+          "same_parameters": true,
+          "log_likelihood_adaptive_minus_comparator_nats": 0.0,
+          "overlap_real_difference": 0.0,
+          "overlap_imag_difference": 0.0,
+          "norm_difference": 0.0
+        },
+        {
+          "name": "broader-interior",
+          "same_parameters": true,
+          "log_likelihood_adaptive_minus_comparator_nats": 0.0,
+          "overlap_real_difference": 0.0,
+          "overlap_imag_difference": 0.0,
+          "norm_difference": 0.0
+        }
+      ],
+      "all_saved_native_probe_totals_exactly_equal": true,
+      "changed_production_source_paths": [
+        "src/jimgw/cli/_config.py",
+        "src/jimgw/cli/_likelihood.py",
+        "src/jimgw/cli/_xg_allocation.py",
+        "src/jimgw/cli/_xg_binning.py",
+        "src/jimgw/cli/xg_qualification.py",
+        "src/jimgw/core/jim.py",
+        "src/jimgw/core/single_event/heterodyne_allocation.py",
+        "src/jimgw/core/single_event/heterodyne_extrinsics.py",
+        "src/jimgw/core/single_event/heterodyne_phasor.py",
+        "src/jimgw/core/single_event/heterodyne_rebin.py",
+        "src/jimgw/core/single_event/heterodyne_selection.py",
+        "src/jimgw/core/single_event/likelihood.py",
+        "src/jimgw/core/single_event/xg_evaluation.py",
+        "src/jimgw/core/single_event/xg_network_evaluation.py",
+        "src/jimgw/samplers/blackjax/_deferred_cache.py",
+        "src/jimgw/samplers/blackjax/_fsm.py",
+        "src/jimgw/samplers/blackjax/swig.py",
+        "src/jimgw/samplers/config.py"
+      ]
+    },
+    "previous1024_attempt5": {
+      "same_declared_native_target_configuration": true,
+      "same_psd_ephemeris_hashes": true,
+      "same_detector_metadata_hash": true,
+      "same_noise_and_sampler_seed_contract": true,
+      "same_preparation_detector_contract": true,
+      "same_sampling_controls_excluding_fsm_implementation_fields": true,
+      "requested_config_differences": [
+        {
+          "path": "likelihood.heterodyne.bin_selection",
+          "adaptive": {
+            "type": "object",
+            "keys": [
+              "method",
+              "tolerance",
+              "reference_bins",
+              "candidate_bins",
+              "candidate_edge_indices",
+              "training_points",
+              "verification_points",
+              "frequency_chunk_size",
+              "parameter_batch_size",
+              "max_bank_bytes",
+              "timing_lanes",
+              "timing_repeats",
+              "max_timed_candidates",
+              "allocation_base_bins",
+              "allocation_refinement_depth",
+              "allocation_max_intervals",
+              "allocation_max_proposals",
+              "seed"
+            ],
+            "canonical_sha256": "f32447228038fb37cf1381ed04f0ae9e09ce9eda3bc875c4099304fb224bbe48"
+          },
+          "comparator": "<absent>"
+        },
+        {
+          "path": "likelihood.heterodyne.n_bins",
+          "adaptive": 2048,
+          "comparator": 1024
+        },
+        {
+          "path": "likelihood.heterodyne.node_frequency_prefix",
+          "adaptive": [
+            2.0,
+            2.0020898047582847
+          ],
+          "comparator": "<absent>"
+        },
+        {
+          "path": "likelihood.heterodyne.phasor_approximation",
+          "adaptive": "chebyshev",
+          "comparator": "<absent>"
+        },
+        {
+          "path": "likelihood.heterodyne.xg_evaluation_mode",
+          "adaptive": "auto",
+          "comparator": "<absent>"
+        },
+        {
+          "path": "output.dir",
+          "adaptive": "/workspace/jim-adaptive-chebyshev-20260911/inference/results",
+          "comparator": "/workspace/jim-network-run-20260910-5/inference/results"
+        },
+        {
+          "path": "sampler.fsm_optimizations",
+          "adaptive": "ce-fast",
+          "comparator": "<absent>"
+        },
+        {
+          "path": "sampler.fsm_sweep_unroll",
+          "adaptive": 1,
+          "comparator": "<absent>"
+        }
+      ],
+      "native_probe_comparison": [
+        {
+          "name": "injection",
+          "same_parameters": true,
+          "log_likelihood_adaptive_minus_comparator_nats": -3.725290298461914e-09,
+          "overlap_real_difference": -1.5988945960998535e-05,
+          "overlap_imag_difference": -1.845322549343109e-05,
+          "norm_difference": 0.0
+        },
+        {
+          "name": "local-coupled",
+          "same_parameters": true,
+          "log_likelihood_adaptive_minus_comparator_nats": 4.656612873077393e-10,
+          "overlap_real_difference": 3.173481673002243e-05,
+          "overlap_imag_difference": 3.707967698574066e-05,
+          "norm_difference": -9.313225746154785e-10
+        },
+        {
+          "name": "broader-interior",
+          "same_parameters": true,
+          "log_likelihood_adaptive_minus_comparator_nats": 5.092937499284744e-06,
+          "overlap_real_difference": 4.139728844165802e-06,
+          "overlap_imag_difference": -3.773951902985573e-06,
+          "norm_difference": -9.313225746154785e-10
+        }
+      ],
+      "all_saved_native_probe_totals_exactly_equal": false,
+      "changed_production_source_paths": [
+        "src/jimgw/cli/_config.py",
+        "src/jimgw/cli/_likelihood.py",
+        "src/jimgw/cli/_xg_allocation.py",
+        "src/jimgw/cli/_xg_binning.py",
+        "src/jimgw/cli/_xg_timing.py",
+        "src/jimgw/cli/xg_qualification.py",
+        "src/jimgw/core/jim.py",
+        "src/jimgw/core/single_event/_nrtidalv2_basis.py",
+        "src/jimgw/core/single_event/heterodyne_allocation.py",
+        "src/jimgw/core/single_event/heterodyne_extrinsics.py",
+        "src/jimgw/core/single_event/heterodyne_phasor.py",
+        "src/jimgw/core/single_event/heterodyne_rebin.py",
+        "src/jimgw/core/single_event/heterodyne_selection.py",
+        "src/jimgw/core/single_event/likelihood.py",
+        "src/jimgw/core/single_event/native_probe.py",
+        "src/jimgw/core/single_event/xg_evaluation.py",
+        "src/jimgw/core/single_event/xg_network_evaluation.py",
+        "src/jimgw/core/single_event/xg_network_response.py",
+        "src/jimgw/core/single_event/xg_waveform.py",
+        "src/jimgw/samplers/blackjax/_deferred_cache.py",
+        "src/jimgw/samplers/blackjax/_fsm.py",
+        "src/jimgw/samplers/blackjax/nss.py",
+        "src/jimgw/samplers/blackjax/swig.py",
+        "src/jimgw/samplers/config.py"
+      ]
+    },
+    "previous1024_attempt8": {
+      "same_declared_native_target_configuration": true,
+      "same_psd_ephemeris_hashes": true,
+      "same_detector_metadata_hash": true,
+      "same_noise_and_sampler_seed_contract": true,
+      "same_preparation_detector_contract": true,
+      "same_sampling_controls_excluding_fsm_implementation_fields": true,
+      "requested_config_differences": [
+        {
+          "path": "likelihood.heterodyne.bin_selection",
+          "adaptive": {
+            "type": "object",
+            "keys": [
+              "method",
+              "tolerance",
+              "reference_bins",
+              "candidate_bins",
+              "candidate_edge_indices",
+              "training_points",
+              "verification_points",
+              "frequency_chunk_size",
+              "parameter_batch_size",
+              "max_bank_bytes",
+              "timing_lanes",
+              "timing_repeats",
+              "max_timed_candidates",
+              "allocation_base_bins",
+              "allocation_refinement_depth",
+              "allocation_max_intervals",
+              "allocation_max_proposals",
+              "seed"
+            ],
+            "canonical_sha256": "f32447228038fb37cf1381ed04f0ae9e09ce9eda3bc875c4099304fb224bbe48"
+          },
+          "comparator": "<absent>"
+        },
+        {
+          "path": "likelihood.heterodyne.n_bins",
+          "adaptive": 2048,
+          "comparator": 1024
+        },
+        {
+          "path": "likelihood.heterodyne.node_frequency_prefix",
+          "adaptive": [
+            2.0,
+            2.0020898047582847
+          ],
+          "comparator": "<absent>"
+        },
+        {
+          "path": "likelihood.heterodyne.phasor_approximation",
+          "adaptive": "chebyshev",
+          "comparator": "<absent>"
+        },
+        {
+          "path": "likelihood.heterodyne.xg_evaluation_mode",
+          "adaptive": "auto",
+          "comparator": "<absent>"
+        },
+        {
+          "path": "output.dir",
+          "adaptive": "/workspace/jim-adaptive-chebyshev-20260911/inference/results",
+          "comparator": "/workspace/jim-network-run-20260910-8/inference/results"
+        },
+        {
+          "path": "sampler.fsm_optimizations",
+          "adaptive": "ce-fast",
+          "comparator": "<absent>"
+        },
+        {
+          "path": "sampler.fsm_sweep_unroll",
+          "adaptive": 1,
+          "comparator": "<absent>"
+        }
+      ],
+      "native_probe_comparison": [
+        {
+          "name": "injection",
+          "same_parameters": true,
+          "log_likelihood_adaptive_minus_comparator_nats": -3.259629011154175e-09,
+          "overlap_real_difference": -1.5988945960998535e-05,
+          "overlap_imag_difference": -1.845322549343109e-05,
+          "norm_difference": -9.313225746154785e-10
+        },
+        {
+          "name": "local-coupled",
+          "same_parameters": true,
+          "log_likelihood_adaptive_minus_comparator_nats": 4.656612873077393e-10,
+          "overlap_real_difference": 3.173481673002243e-05,
+          "overlap_imag_difference": 3.707967698574066e-05,
+          "norm_difference": -9.313225746154785e-10
+        },
+        {
+          "name": "broader-interior",
+          "same_parameters": true,
+          "log_likelihood_adaptive_minus_comparator_nats": 5.092937499284744e-06,
+          "overlap_real_difference": 4.139728844165802e-06,
+          "overlap_imag_difference": -3.773951902985573e-06,
+          "norm_difference": -9.313225746154785e-10
+        }
+      ],
+      "all_saved_native_probe_totals_exactly_equal": false,
+      "changed_production_source_paths": [
+        "src/jimgw/cli/_config.py",
+        "src/jimgw/cli/_likelihood.py",
+        "src/jimgw/cli/_xg_allocation.py",
+        "src/jimgw/cli/_xg_binning.py",
+        "src/jimgw/cli/_xg_timing.py",
+        "src/jimgw/cli/xg_qualification.py",
+        "src/jimgw/core/jim.py",
+        "src/jimgw/core/single_event/_nrtidalv2_basis.py",
+        "src/jimgw/core/single_event/heterodyne_allocation.py",
+        "src/jimgw/core/single_event/heterodyne_extrinsics.py",
+        "src/jimgw/core/single_event/heterodyne_phasor.py",
+        "src/jimgw/core/single_event/heterodyne_rebin.py",
+        "src/jimgw/core/single_event/heterodyne_selection.py",
+        "src/jimgw/core/single_event/likelihood.py",
+        "src/jimgw/core/single_event/native_probe.py",
+        "src/jimgw/core/single_event/xg_evaluation.py",
+        "src/jimgw/core/single_event/xg_network_evaluation.py",
+        "src/jimgw/core/single_event/xg_network_response.py",
+        "src/jimgw/core/single_event/xg_waveform.py",
+        "src/jimgw/samplers/blackjax/_deferred_cache.py",
+        "src/jimgw/samplers/blackjax/_fsm.py",
+        "src/jimgw/samplers/blackjax/swig.py",
+        "src/jimgw/samplers/config.py"
+      ]
+    }
+  },
+  "scientific_attribution_limits": [
+    "Adaptive128 versus previous256 changes nonuniform edges and Chebyshev phasor simultaneously; previous256 uses Taylor. It also changes CE-fast endpoint skipping/deferred cache, source revision and H200 versus H100 hardware. These preserve the intended target but can change floating-point and sampler trajectories.",
+    "Both recent runs use the exact same final source frequency prefix and the same training/verification-bank hashes. Their model grid approximations differ, so matching scientific configuration is not proof of identical approximate likelihoods everywhere.",
+    "The older1024 runs predate batched network evaluation, share the same noise and intended physical model, and use Taylor with 21 anchors. Their explicit source-frequency prefix is not recorded; their sparse waveform grid differs from the 2048-derived prefix frozen in the recent runs. Do not infer prefix equality from the native-grid prefix.",
+    "Attempts5 and8 use the same configuration and seed; attempt8 enables a private sweep scan through its execution launcher. They are not independent-seed replications. Their changed production files are nss.py and swig.py, as confirmed by manifests.",
+    "All runs keep 4096 live points, eight sweeps, 96 slices, stepping-out, max expansions 10, max shrinkage 100, termination_dlogz 0.0485873516, and the same priors/physical coordinates. Equal RNG seeds do not ensure identical draws after numerical or control-flow changes.",
+    "Finite training, verification and three native-grid checks are not prior-wide, posterior-wide or absolute-evidence certification. Posterior overlays and distribution summaries are empirical consistency checks; distinguish Monte Carlo variation, mixing and approximation changes.",
+    "The current same-machine fixed256 Taylor run timed out and has no completed posterior; it cannot replace the completed historical comparator.",
+    "Whole preflight analysis/config hashes differ because heterodyne and sampler implementation controls are included. These hash mismatches do not indicate different PSDs, injection or priors; semantic equality was checked separately."
+  ],
+  "hardware_and_private_scan_evidence": [
+    "/Users/imangill/projects/Jim/benchmark-results/xg-allocator-trial-20260911/setup-summary.json",
+    "/Users/imangill/projects/Jim/benchmark-results/xg-five-minute-gpu-20260911/RUN-REPORT.md",
+    "/Users/imangill/projects/Jim/benchmark-results/xg-network-pod-20260910/RUN-REPORT.md",
+    "/Users/imangill/projects/Jim/benchmark-results/xg-network-pod-20260910/extracted-attempt-8/jim-network-run-20260910-8/.runpod/experiment.json"
+  ]
+}

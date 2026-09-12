@@ -1,0 +1,105 @@
+{
+  "marginal_bins": 65,
+  "joint_bins_per_axis": 70,
+  "joint_smoothing_sigma_bins": 1,
+  "joint_contours": "Density-ranked 50%/90% of the smoothed mass inside displayed common rectangle; descriptive histogram contours, not a calibrated coverage result",
+  "ranges": "Union of each run's central99.8% marginal intervals",
+  "joint_rectangle_mass": [
+    {
+      "run": "previous1024_scan",
+      "parameters": [
+        "M_c",
+        "q"
+      ],
+      "mass_in_plot_rectangle": 0.9976956432552059
+    },
+    {
+      "run": "previous256",
+      "parameters": [
+        "M_c",
+        "q"
+      ],
+      "mass_in_plot_rectangle": 0.9971116831552818
+    },
+    {
+      "run": "current128",
+      "parameters": [
+        "M_c",
+        "q"
+      ],
+      "mass_in_plot_rectangle": 0.9971401518622038
+    },
+    {
+      "run": "previous1024_scan",
+      "parameters": [
+        "s1_z",
+        "s2_z"
+      ],
+      "mass_in_plot_rectangle": 0.9987107781383897
+    },
+    {
+      "run": "previous256",
+      "parameters": [
+        "s1_z",
+        "s2_z"
+      ],
+      "mass_in_plot_rectangle": 0.9992291377262625
+    },
+    {
+      "run": "current128",
+      "parameters": [
+        "s1_z",
+        "s2_z"
+      ],
+      "mass_in_plot_rectangle": 0.9981832954044814
+    },
+    {
+      "run": "previous1024_scan",
+      "parameters": [
+        "lambda_1",
+        "lambda_2"
+      ],
+      "mass_in_plot_rectangle": 0.9966550765813083
+    },
+    {
+      "run": "previous256",
+      "parameters": [
+        "lambda_1",
+        "lambda_2"
+      ],
+      "mass_in_plot_rectangle": 0.9970064871949498
+    },
+    {
+      "run": "current128",
+      "parameters": [
+        "lambda_1",
+        "lambda_2"
+      ],
+      "mass_in_plot_rectangle": 0.996877687777925
+    },
+    {
+      "run": "previous1024_scan",
+      "parameters": [
+        "ra",
+        "dec"
+      ],
+      "mass_in_plot_rectangle": 0.9969379574367035
+    },
+    {
+      "run": "previous256",
+      "parameters": [
+        "ra",
+        "dec"
+      ],
+      "mass_in_plot_rectangle": 0.9969981322906558
+    },
+    {
+      "run": "current128",
+      "parameters": [
+        "ra",
+        "dec"
+      ],
+      "mass_in_plot_rectangle": 0.9968803745294532
+    }
+  ]
+}

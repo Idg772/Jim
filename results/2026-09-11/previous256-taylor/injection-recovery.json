@@ -1,0 +1,333 @@
+{
+  "qualification": false,
+  "scope": "One noise realization; marginal recovery summaries are not posterior calibration or mixing proof",
+  "weighted_point_count": 336896,
+  "weight_effective_sample_size": 30803.947447609822,
+  "weight_ess_is_chain_mixing_ess": false,
+  "parameters": {
+    "M_c": {
+      "injection": 1.1802650981093186,
+      "reported_truth": 1.1802650981093186,
+      "coordinate": "prior parameter",
+      "period": null,
+      "median": 1.1802649282485387,
+      "truth_cdf": 0.9452502675336729,
+      "central_intervals_percent": {
+        "50": [
+          1.1802648796830761,
+          1.1802649892606563
+        ],
+        "90": [
+          1.1802648232832467,
+          1.1802651046487884
+        ],
+        "99": [
+          1.1802647766161525,
+          1.1802652456699012
+        ]
+      },
+      "truth_in_central_interval": {
+        "50": false,
+        "90": true,
+        "99": true
+      }
+    },
+    "s1_z": {
+      "injection": -0.014169601016451747,
+      "reported_truth": -0.014169601016451747,
+      "coordinate": "prior parameter",
+      "period": null,
+      "median": -0.019244873164787096,
+      "truth_cdf": 0.6423380173078607,
+      "central_intervals_percent": {
+        "50": [
+          -0.028394413597419968,
+          -0.010161185658577753
+        ],
+        "90": [
+          -0.038274514450285645,
+          0.0004983234899229217
+        ],
+        "99": [
+          -0.04484954517384285,
+          0.007796720314863177
+        ]
+      },
+      "truth_in_central_interval": {
+        "50": true,
+        "90": true,
+        "99": true
+      }
+    },
+    "s2_z": {
+      "injection": -0.02350583516601907,
+      "reported_truth": -0.02350583516601907,
+      "coordinate": "prior parameter",
+      "period": null,
+      "median": -0.018426763288807733,
+      "truth_cdf": 0.3601639795982515,
+      "central_intervals_percent": {
+        "50": [
+          -0.027642540036004266,
+          -0.009107392292964289
+        ],
+        "90": [
+          -0.03836884563739548,
+          0.0009670283747202427
+        ],
+        "99": [
+          -0.04570720720466759,
+          0.007730963509330457
+        ]
+      },
+      "truth_in_central_interval": {
+        "50": true,
+        "90": true,
+        "99": true
+      }
+    },
+    "lambda_1": {
+      "injection": 483.1557044220429,
+      "reported_truth": 483.1557044220429,
+      "coordinate": "prior parameter",
+      "period": null,
+      "median": 615.1155941349352,
+      "truth_cdf": 0.31999775434760047,
+      "central_intervals_percent": {
+        "50": [
+          433.8163018268894,
+          805.6705484547784
+        ],
+        "90": [
+          289.4406026629577,
+          961.375088378622
+        ],
+        "99": [
+          254.70317144275003,
+          995.5118888844275
+        ]
+      },
+      "truth_in_central_interval": {
+        "50": true,
+        "90": true,
+        "99": true
+      }
+    },
+    "lambda_2": {
+      "injection": 771.0436351634714,
+      "reported_truth": 771.0436351634714,
+      "coordinate": "prior parameter",
+      "period": null,
+      "median": 625.1086937601576,
+      "truth_cdf": 0.6916443726276602,
+      "central_intervals_percent": {
+        "50": [
+          427.048736387819,
+          814.077521188631
+        ],
+        "90": [
+          263.9753882296091,
+          964.6844839604559
+        ],
+        "99": [
+          220.1589564383665,
+          996.4992901930533
+        ]
+      },
+      "truth_in_central_interval": {
+        "50": true,
+        "90": true,
+        "99": true
+      }
+    },
+    "d_L": {
+      "injection": 20.0,
+      "reported_truth": 20.0,
+      "coordinate": "prior parameter",
+      "period": null,
+      "median": 19.992158528267936,
+      "truth_cdf": 0.6234210801698897,
+      "central_intervals_percent": {
+        "50": [
+          19.97552722790954,
+          20.009161904431373
+        ],
+        "90": [
+          19.95105930979764,
+          20.03367796852841
+        ],
+        "99": [
+          19.928912872388207,
+          20.05647622131107
+        ]
+      },
+      "truth_in_central_interval": {
+        "50": true,
+        "90": true,
+        "99": true
+      }
+    },
+    "iota": {
+      "injection": 2.016083447361016,
+      "reported_truth": 2.016083447361016,
+      "coordinate": "prior parameter",
+      "period": null,
+      "median": 2.0161807069183415,
+      "truth_cdf": 0.4611617468968019,
+      "central_intervals_percent": {
+        "50": [
+          2.015481212416391,
+          2.0169050249426648
+        ],
+        "90": [
+          2.0144503600030585,
+          2.0179343884339342
+        ],
+        "99": [
+          2.0134838849339642,
+          2.018902920178893
+        ]
+      },
+      "truth_in_central_interval": {
+        "50": true,
+        "90": true,
+        "99": true
+      }
+    },
+    "ra": {
+      "injection": 6.052874807646849,
+      "reported_truth": 0.0,
+      "coordinate": "wrapped offset from injection",
+      "period": 6.283185307179586,
+      "median": -6.597148285525378e-05,
+      "truth_cdf": 0.6020672257765982,
+      "central_intervals_percent": {
+        "50": [
+          -0.000239211891351232,
+          0.00010474696016871121
+        ],
+        "90": [
+          -0.0004891263570732107,
+          0.0003471843808791064
+        ],
+        "99": [
+          -0.0007278056829003177,
+          0.0005851212088092694
+        ]
+      },
+      "truth_in_central_interval": {
+        "50": true,
+        "90": true,
+        "99": true
+      }
+    },
+    "dec": {
+      "injection": 0.17257877754217157,
+      "reported_truth": 0.17257877754217157,
+      "coordinate": "prior parameter",
+      "period": null,
+      "median": 0.17292113355692124,
+      "truth_cdf": 0.29993887681227765,
+      "central_intervals_percent": {
+        "50": [
+          0.17248482348107713,
+          0.17336058543327984
+        ],
+        "90": [
+          0.17187040484825014,
+          0.17398685483472973
+        ],
+        "99": [
+          0.17125733590788708,
+          0.17459926258594274
+        ]
+      },
+      "truth_in_central_interval": {
+        "50": true,
+        "90": true,
+        "99": true
+      }
+    },
+    "psi": {
+      "injection": 1.6782976747256861,
+      "reported_truth": 0.0,
+      "coordinate": "wrapped offset from injection",
+      "period": 3.141592653589793,
+      "median": -0.00018712564768863515,
+      "truth_cdf": 0.5114987774583276,
+      "central_intervals_percent": {
+        "50": [
+          -1.5689339887274023,
+          0.0018574052045920997
+        ],
+        "90": [
+          -1.5702742316652563,
+          1.5694449766682994
+        ],
+        "99": [
+          -1.5707432700365551,
+          1.5707173289155048
+        ]
+      },
+      "truth_in_central_interval": {
+        "50": true,
+        "90": true,
+        "99": true
+      }
+    },
+    "t_c": {
+      "injection": 0.03512602655783986,
+      "reported_truth": 0.03512602655783986,
+      "coordinate": "prior parameter",
+      "period": null,
+      "median": 0.03512875112443181,
+      "truth_cdf": 0.407723660537771,
+      "central_intervals_percent": {
+        "50": [
+          0.035120863169158724,
+          0.03513658472896947
+        ],
+        "90": [
+          0.03510969720942348,
+          0.03514789552738333
+        ],
+        "99": [
+          0.03509851571173564,
+          0.03515836099991245
+        ]
+      },
+      "truth_in_central_interval": {
+        "50": true,
+        "90": true,
+        "99": true
+      }
+    },
+    "q": {
+      "injection": 0.9724191074091205,
+      "reported_truth": 0.9724191074091205,
+      "coordinate": "prior parameter",
+      "period": null,
+      "median": 0.9882225178057028,
+      "truth_cdf": 0.07101338540710456,
+      "central_intervals_percent": {
+        "50": [
+          0.9807750815762082,
+          0.994180444869691
+        ],
+        "90": [
+          0.9705342179628541,
+          0.9988150985506584
+        ],
+        "99": [
+          0.9609533992320464,
+          0.9998864690461733
+        ]
+      },
+      "truth_in_central_interval": {
+        "50": false,
+        "90": true,
+        "99": true
+      }
+    }
+  }
+}

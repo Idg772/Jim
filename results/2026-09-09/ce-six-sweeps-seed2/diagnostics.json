@@ -1,0 +1,30 @@
+{
+  "versions": {
+    "JimGW": "0.0.dev0+g6dea3b93913b",
+    "rippleGW": "0.3.0"
+  },
+  "n_likelihood_evaluations": 61796285.0,
+  "n_iterations": 476.0,
+  "n_likelihood_evaluations_stepping_out": 21029815.0,
+  "n_likelihood_evaluations_shrinking": 40766470.0,
+  "log_Z": 2184273.7191038853,
+  "log_Z_error": 0.11474253038670076,
+  "sample_phase_seconds": {
+    "init_total": 1.623888879083097,
+    "likelihood_jit": 1.3014578809961677,
+    "initial_likelihood_eval": 0.04835402639582753,
+    "sampler_kernel_jit": null,
+    "ns_loop": 267.7994931326248,
+    "finalise": 1.9180589970201254,
+    "init_particle_replication": 0.21996498527005315,
+    "init_adaptive_init": 0.052194833755493164,
+    "init_state_placement": 0.001399909146130085
+  },
+  "n_likelihood_evaluations_de_jumps": 0.0,
+  "n_de_jump_attempts": 0.0,
+  "n_de_jump_acceptances": 0.0,
+  "de_jump_acceptance_rate": null,
+  "n_slice_updates": 17547264.0,
+  "n_likelihood_evaluations_physical": 96890813.0,
+  "sampling_time": 272.1552217467688
+}

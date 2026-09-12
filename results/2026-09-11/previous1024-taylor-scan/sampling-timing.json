@@ -1,0 +1,22 @@
+{
+  "qualification": false,
+  "timings": {
+    "preparation_seconds_including_compilation": 99.85486692935228,
+    "construction_seconds_including_compilation": 63.57170144096017,
+    "native_validation_seconds_including_compilation": 139.7775589171797,
+    "sampler_construction_seconds_including_compilation": 15.56796858459711,
+    "sample_call_seconds_including_compilation": 1183.228288738057
+  },
+  "sample_phase_seconds": {
+    "init_total": 24.123043082654476,
+    "likelihood_jit": 18.937111439183354,
+    "initial_likelihood_eval": 1.1981819197535515,
+    "sampler_kernel_jit": 168.49971456453204,
+    "ns_loop": 979.5883690938354,
+    "finalise": 6.823595400899649,
+    "init_particle_replication": 0.7660786919295788,
+    "init_adaptive_init": 3.1698811538517475,
+    "init_state_placement": 0.0010776594281196594
+  },
+  "stepping_out_evaluations": 30669137
+}

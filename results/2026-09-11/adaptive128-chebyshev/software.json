@@ -1,0 +1,13 @@
+{
+  "versions": {
+    "jimgw": "0.0.dev0+network.11138223694",
+    "jax": "0.11.0",
+    "jaxlib": "0.11.0",
+    "numpy": "2.5.1",
+    "scipy": "1.18.0",
+    "ripplegw": "0.3.0",
+    "equinox": "0.13.8"
+  },
+  "python": "3.12.13 (main, Mar 24 2026, 22:49:22) [Clang 22.1.1 ]",
+  "source_sha256": "b1136a68217c531123e445cc7b2b8450bcce57fb287698892a32f51d33353ad7"
+}

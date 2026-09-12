@@ -1,0 +1,12 @@
+{
+  "nested_samples.npz": {
+    "canonical_source_sha256": "2fdf0c2e4c894380e401e0dcd5cd75626136f416ea16b2378be098b0ca8beae0",
+    "control_source_sha256": "2fdf0c2e4c894380e401e0dcd5cd75626136f416ea16b2378be098b0ca8beae0",
+    "all_array_values_equal": true
+  },
+  "samples.npz": {
+    "canonical_source_sha256": "6492fd01b2816e32731bb0a747b4b703a2e94ea99465560029e7206360007b2b",
+    "control_source_sha256": "6492fd01b2816e32731bb0a747b4b703a2e94ea99465560029e7206360007b2b",
+    "all_array_values_equal": true
+  }
+}
