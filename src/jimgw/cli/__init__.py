@@ -1,4 +1,5 @@
 import logging
+import time
 import tomllib
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -157,7 +158,7 @@ def run(
 
     jax.config.update("jax_enable_x64", True)
 
-    from jimgw.cli._data import build_data
+    from jimgw.cli._data import build_data, wait_for_data_ready
     from jimgw.cli._jim import build_jim
     from jimgw.cli._likelihood import build_likelihood
     from jimgw.cli._output import write_outputs
@@ -172,6 +173,7 @@ def run(
     )
 
     trigger_time: float = cfg.data.trigger_time
+    pipeline_started = time.perf_counter()
 
     # Stage 2: waveform
     waveform = build_waveform(cfg.waveform)
@@ -179,10 +181,11 @@ def run(
         waveform = DominantModeTimeCachedWaveform(waveform)
 
     # Stage 3: data — injection runs receive the already-built waveform
+    f_min, f_max = cfg.likelihood.frequency_bounds(cfg.data.detectors)
     ifos = build_data(
         cfg.data,
-        f_min=cfg.likelihood.f_min,
-        f_max=cfg.likelihood.f_max,
+        f_min=f_min,
+        f_max=f_max,
         waveform=waveform,
         time_frame=cfg.sampling.time_frame,
         time_dependent_response=cfg.likelihood.time_dependent_response,
@@ -199,6 +202,8 @@ def run(
             else None
         ),
     )
+    wait_for_data_ready(ifos)
+    data_ready = time.perf_counter()
 
     # NS AW requires all sampling-space parameters in [0, 1].
     # Must run before build_prior so the built prior and
@@ -257,6 +262,14 @@ def run(
         logger.error("Sampling failed: %s", exc)
         raise typer.Exit(code=3) from exc
     logger.info("Sampling complete.")
+    sample_finished = time.perf_counter()
+    jim.pipeline_timing = {
+        "data_and_waveform_preparation_seconds": data_ready - pipeline_started,
+        "inference_including_construction_and_compilation_seconds": sample_finished
+        - data_ready,
+        "total_preparation_and_inference_seconds": sample_finished - pipeline_started,
+        "scope": "Wall time from waveform/data preparation through sampler return (the NSS backend materializes samples before returning); includes likelihood construction, sampler initialization and compilation; excludes imports, config verification and output writing",
+    }
 
     # Stage 8: write outputs
     try:

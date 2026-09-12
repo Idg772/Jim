@@ -2492,7 +2492,9 @@ class TestHeterodynedTransientLikelihoodFD:
         )
 
         assert jnp.isfinite(likelihood.evaluate(example_params()))
-        assert max(call_sizes) <= chunk_size
+        # Each chunk carries two native prefix samples so spacing-reading
+        # waveform backends see the true grid spacing on every call.
+        assert max(call_sizes) <= chunk_size + 2
         assert len(call_sizes) > len(ifos) + 2
 
     def test_no_reference_params_and_no_prior_raises(self, detectors_and_waveform):

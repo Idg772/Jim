@@ -363,3 +363,84 @@ def test_candidate_binding_requires_x64(
 
     with pytest.raises(ValueError, match="64-bit precision"):
         bind_xg_qualification_candidate(cfg, "b" * 64)
+
+
+def test_heterodyne_config_accepts_interpolation_order(tmp_path: Path) -> None:
+    raw = _injection_raw_config(tmp_path)
+    assert _preflight(raw).likelihood.heterodyne.interpolation_order == 1
+
+    raw["likelihood"]["heterodyne"]["interpolation_order"] = 3
+    assert _preflight(raw).likelihood.heterodyne.interpolation_order == 3
+
+    for invalid in (0, 9, 2.5):
+        raw["likelihood"]["heterodyne"]["interpolation_order"] = invalid
+        with pytest.raises(ValueError):
+            _preflight(raw)
+
+
+def test_cubic_interpolation_order_is_planned_bound_and_built(tmp_path: Path) -> None:
+    linear_cfg = _preflight(_injection_raw_config(tmp_path))
+    raw = _injection_raw_config(tmp_path)
+    raw["likelihood"]["heterodyne"]["interpolation_order"] = 3
+    cubic_cfg = _preflight(raw)
+    assert (
+        cubic_cfg.xg_analysis_contract_sha256()
+        != linear_cfg.xg_analysis_contract_sha256()
+    )
+
+    ifos, waveform, prior, transforms = _realized_components(
+        cubic_cfg,
+        cubic_cfg.xg_input_files_sha256(),
+    )
+    linear_digest = plan_xg_qualification_bin_edges(linear_cfg, ifos, waveform)
+    cubic_digest = plan_xg_qualification_bin_edges(cubic_cfg, ifos, waveform)
+    assert cubic_digest != linear_digest
+
+    binding = bind_xg_qualification_candidate(cubic_cfg, cubic_digest)
+    candidate = build_xg_qualification_candidate(
+        binding,
+        cubic_cfg,
+        ifos,
+        waveform,
+        prior,
+        transforms,
+    )
+    assert candidate.interpolation_order == 3
+    assert candidate.bin_edges_sha256 == cubic_digest
+    assert bool(jnp.isfinite(candidate.evaluate(REFERENCE_PARAMETERS)))
+
+
+def test_phasor_moment_order_is_planned_bound_and_built(tmp_path: Path) -> None:
+    raw = _injection_raw_config(tmp_path)
+    raw["likelihood"]["heterodyne"]["interpolation_order"] = 3
+    cubic_cfg = _preflight(raw)
+    raw = _injection_raw_config(tmp_path)
+    raw["likelihood"]["heterodyne"]["interpolation_order"] = 3
+    raw["likelihood"]["heterodyne"]["phasor_moment_order"] = 8
+    dressed_cfg = _preflight(raw)
+    assert dressed_cfg.likelihood.heterodyne.phasor_moment_order == 8
+    assert (
+        dressed_cfg.xg_analysis_contract_sha256()
+        != cubic_cfg.xg_analysis_contract_sha256()
+    )
+
+    ifos, waveform, prior, transforms = _realized_components(
+        dressed_cfg,
+        dressed_cfg.xg_input_files_sha256(),
+    )
+    cubic_digest = plan_xg_qualification_bin_edges(cubic_cfg, ifos, waveform)
+    dressed_digest = plan_xg_qualification_bin_edges(dressed_cfg, ifos, waveform)
+    assert dressed_digest != cubic_digest
+
+    binding = bind_xg_qualification_candidate(dressed_cfg, dressed_digest)
+    candidate = build_xg_qualification_candidate(
+        binding,
+        dressed_cfg,
+        ifos,
+        waveform,
+        prior,
+        transforms,
+    )
+    assert candidate.phasor_moment_order == 8
+    assert candidate.bin_edges_sha256 == dressed_digest
+    assert bool(jnp.isfinite(candidate.evaluate(REFERENCE_PARAMETERS)))

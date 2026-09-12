@@ -25,6 +25,8 @@ def _make_pipeline_cfg(
     sky_frame="detector",
     time_frame="detector",
     inclination_coordinate="iota",
+    distance_coordinate="d_L",
+    chirp_mass_coordinate="M_c",
 ):
     """Build a minimal PipelineConfig, merging prior_raw on top of _MINIMAL_PRIOR."""
     return PipelineConfig.model_validate(
@@ -39,6 +41,8 @@ def _make_pipeline_cfg(
                 "sky_frame": sky_frame,
                 "time_frame": time_frame,
                 "inclination_coordinate": inclination_coordinate,
+                "distance_coordinate": distance_coordinate,
+                "chirp_mass_coordinate": chirp_mass_coordinate,
             },
         }
     )
@@ -59,6 +63,8 @@ def _infer(
     sky_frame="detector",
     time_frame="detector",
     inclination_coordinate="iota",
+    distance_coordinate="d_L",
+    chirp_mass_coordinate="M_c",
 ):
 
     from jimgw.cli._transforms import (
@@ -71,6 +77,8 @@ def _infer(
         sky_frame=sky_frame,
         time_frame=time_frame,
         inclination_coordinate=inclination_coordinate,
+        distance_coordinate=distance_coordinate,
+        chirp_mass_coordinate=chirp_mass_coordinate,
     )  # type: ignore[arg-type]
     prior_cfg = PriorConfig.model_validate({})
     sample_t = infer_sample_transforms(
@@ -569,3 +577,168 @@ def test_adapt_ns_time_t_det_geocentric():
     assert isinstance(spec, UniformSpec)
     assert spec.min == lo
     assert spec.max == hi
+
+
+# ---------------------------------------------------------------------------
+# SNR-weighted distance sampling coordinate
+# ---------------------------------------------------------------------------
+
+_D_HAT_PRIOR = {
+    "iota": {"type": "sine"},
+    "d_L": {"type": "power_law", "min": 1.0, "max": 1000.0, "alpha": 2.0},
+    "ra": {"type": "uniform", "min": 0.0, "max": 6.283185307179586},
+    "dec": {"type": "cosine"},
+    "psi": {"type": "uniform", "min": 0.0, "max": 3.141592653589793},
+}
+
+
+@pytest.mark.slow
+def test_d_hat_sample_coordinate_is_built_before_cos_iota_and_round_trips():
+    sample_t, _ = _infer(
+        {"M_c", "q", "iota", "d_L", "ra", "dec", "psi"},
+        sky_frame="geocentric",
+        inclination_coordinate="cos_iota",
+        distance_coordinate="d_hat",
+    )
+    names = [type(transform).__name__ for transform in sample_t]
+    assert "DistanceToSNRWeightedDistanceTransform" in names
+    # d_hat conditions on physical iota, so it must be built while iota exists.
+    assert names.index("DistanceToSNRWeightedDistanceTransform") < names.index(
+        "CosineTransform"
+    )
+
+    physical = {
+        "M_c": 30.0,
+        "q": 0.8,
+        "iota": 1.2,
+        "d_L": 400.0,
+        "ra": 1.375,
+        "dec": -1.2108,
+        "psi": 0.2,
+    }
+    forward = dict(physical)
+    for transform in sample_t:
+        forward = transform.forward(forward)
+    assert "d_hat" in forward and "d_L" not in forward
+    assert "cos_iota" in forward and "iota" not in forward
+    backward = dict(forward)
+    for transform in reversed(sample_t):
+        backward = transform.backward(backward)
+    assert backward["d_L"] == pytest.approx(400.0)
+    assert backward["iota"] == pytest.approx(1.2)
+
+
+def test_d_hat_sample_coordinate_requires_conditioning_priors():
+    with pytest.raises(ValidationError, match="distance_coordinate='d_hat'"):
+        _make_pipeline_cfg(
+            prior_raw={"d_L": _D_HAT_PRIOR["d_L"]},
+            distance_coordinate="d_hat",
+        )
+
+
+def test_d_hat_sample_coordinate_accepts_full_extrinsic_prior():
+    cfg = _make_pipeline_cfg(
+        prior_raw=_D_HAT_PRIOR,
+        sky_frame="geocentric",
+        inclination_coordinate="cos_iota",
+        distance_coordinate="d_hat",
+    )
+    assert cfg.sampling.distance_coordinate == "d_hat"
+
+
+# ---------------------------------------------------------------------------
+# Doppler-dressed chirp mass
+# ---------------------------------------------------------------------------
+
+
+def test_doppler_dressed_chirp_mass_transform_is_added():
+    sample_t, _ = _infer(
+        {"M_c", "q", "ra", "dec"},
+        sky_frame="geocentric",
+        chirp_mass_coordinate="M_hat",
+    )
+    names = [type(t).__name__ for t in sample_t]
+    assert names.count("ChirpMassToDopplerDressedChirpMassTransform") == 1
+
+
+def test_doppler_dressed_chirp_mass_absent_by_default():
+    sample_t, _ = _infer({"M_c", "q", "ra", "dec"}, sky_frame="geocentric")
+    names = [type(t).__name__ for t in sample_t]
+    assert "ChirpMassToDopplerDressedChirpMassTransform" not in names
+
+
+def test_doppler_dressed_chirp_mass_precedes_sky_transform():
+    """The reversed chain must restore ra/dec before the dressing consumes them,
+    so the dressing has to sit before the sky transform in the forward list."""
+    sample_t, _ = _infer(
+        {"M_c", "q", "ra", "dec"},
+        sky_frame="detector",
+        chirp_mass_coordinate="M_hat",
+    )
+    names = [type(t).__name__ for t in sample_t]
+    assert names.index("ChirpMassToDopplerDressedChirpMassTransform") < names.index(
+        "SkyFrameToDetectorFrameSkyPositionTransform"
+    )
+
+
+def test_doppler_dressed_chirp_mass_follows_distance_transform():
+    """d_hat's inverse consumes M_c, so in the reversed chain the dressing must
+    run first: it therefore sits after the distance transform going forward."""
+    sample_t, _ = _infer(
+        {"M_c", "q", "ra", "dec", "psi", "iota", "d_L"},
+        sky_frame="geocentric",
+        distance_coordinate="d_hat",
+        chirp_mass_coordinate="M_hat",
+    )
+    names = [type(t).__name__ for t in sample_t]
+    assert names.index("DistanceToSNRWeightedDistanceTransform") < names.index(
+        "ChirpMassToDopplerDressedChirpMassTransform"
+    )
+
+
+def test_full_stack_round_trips_with_dressed_chirp_mass():
+    """Physical -> sampling -> physical must be the identity for the whole chain
+    (dressing composed with d_hat, cos_iota, detector time and detector sky)."""
+    sample_t, _ = _infer(
+        {"M_c", "q", "ra", "dec", "psi", "iota", "d_L", "t_c"},
+        sky_frame="detector",
+        time_frame="detector",
+        inclination_coordinate="cos_iota",
+        distance_coordinate="d_hat",
+        chirp_mass_coordinate="M_hat",
+    )
+    physical = {
+        "M_c": 1.1802650981093186,
+        "q": 0.97,
+        "ra": 2.96479778676665,
+        "dec": 0.17257877754217157,
+        "psi": 1.678,
+        "iota": 2.016,
+        "d_L": 20.0,
+        "t_c": 0.035,
+    }
+    point = dict(physical)
+    for transform in sample_t:
+        point, _ = transform.transform(point)
+    assert "M_hat" in point and "M_c" not in point
+    for transform in reversed(sample_t):
+        point, _ = transform.inverse(point)
+    for name, value in physical.items():
+        assert point[name] == pytest.approx(value, rel=1e-10, abs=1e-12), name
+
+
+def test_dressed_chirp_mass_requires_sky_priors():
+    with pytest.raises(ValidationError, match="requires physical"):
+        _make_pipeline_cfg(chirp_mass_coordinate="M_hat")
+
+
+def test_dressed_chirp_mass_rejects_duplicate_prior_coordinate():
+    with pytest.raises(ValidationError, match="already declares 'M_hat'"):
+        _make_pipeline_cfg(
+            prior_raw={
+                "ra": {"type": "uniform", "min": 0.0, "max": 6.283185307179586},
+                "dec": {"type": "cosine"},
+                "M_hat": {"type": "uniform", "min": 1.0, "max": 2.0},
+            },
+            chirp_mass_coordinate="M_hat",
+        )

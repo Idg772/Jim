@@ -39,6 +39,42 @@ from jimgw.core.transforms import NtoMTransform
 logger = logging.getLogger(__name__)
 
 
+def build_zero_noise_summary(pipeline_cfg, ifos, waveform):
+    """Resolve the optional summary builder from the same injection contract."""
+    heterodyne = pipeline_cfg.likelihood.heterodyne
+    if heterodyne is None or heterodyne.zero_noise_quadrature is None:
+        return None
+    data = pipeline_cfg.data
+    if not isinstance(data, InjectionDataConfig) or not data.zero_noise:
+        raise ValueError("compressed summaries require a declared zero-noise injection")
+    from jimgw.core.single_event.data import PowerSpectrum
+    from jimgw.core.single_event.heterodyne_quadrature import ZeroNoiseSummaryBuilder
+
+    parameters = to_likelihood_space(
+        data.injection_parameters,
+        waveform_f_ref=waveform.f_ref,
+        trigger_time=data.trigger_time,
+        ifos=ifos,
+        time_frame=pipeline_cfg.sampling.time_frame,
+    )
+    psds = {}
+    for detector in ifos:
+        family = "ET" if detector.name.startswith("ET") else detector.name
+        path = data.psd_files.get(detector.name, data.psd_files.get(family))
+        if path is None:
+            raise ValueError("compressed summaries require configured PSD files")
+        spectrum = PowerSpectrum.from_file(
+            str(path),
+            is_asd=data.psd_is_asd.get(
+                detector.name, data.psd_is_asd.get(family, False)
+            ),
+        )
+        psds[detector.name] = (spectrum.frequencies, spectrum.values)
+    return ZeroNoiseSummaryBuilder(
+        parameters, psds, **heterodyne.zero_noise_quadrature.model_dump()
+    )
+
+
 def detector_metadata_sha256(ifos: list[GroundBased2G]) -> str:
     """Hash detector site, arm, and response metadata in network order."""
 
@@ -118,6 +154,7 @@ def build_likelihood(
     "injection"`` — it must be an ``InjectionDataConfig`` in that case.
     """
     cfg: LikelihoodConfig = pipeline_cfg.likelihood
+    f_min, f_max = cfg.frequency_bounds([ifo.name for ifo in ifos])
     trigger_time = pipeline_cfg.data.trigger_time
     waveform_f_ref = pipeline_cfg.waveform.f_ref
     time_frame = pipeline_cfg.sampling.time_frame
@@ -275,8 +312,8 @@ def build_likelihood(
             detectors=ifos,
             waveform=waveform,
             fixed_parameters=fixed_params,
-            f_min=cfg.f_min,
-            f_max=cfg.f_max,
+            f_min=f_min,
+            f_max=f_max,
             trigger_time=trigger_time,
             n_bins=cfg.heterodyne.n_bins,
             epsilon=cfg.heterodyne.epsilon,
@@ -289,6 +326,16 @@ def build_likelihood(
             time_marginalization=heterodyne_time_marg,
             reference_parameters=reference_params,
             reference_chunk_size=cfg.heterodyne.reference_chunk_size,
+            summary_backend=cfg.heterodyne.summary_backend,
+            xg_evaluation_mode=cfg.heterodyne.xg_evaluation_mode,
+            node_frequency_prefix=cfg.heterodyne.node_frequency_prefix,
+            interpolation_order=cfg.heterodyne.interpolation_order,
+            phasor_moment_order=cfg.heterodyne.phasor_moment_order,
+            phasor_time_anchors=cfg.heterodyne.phasor_time_anchors,
+            phasor_approximation=cfg.heterodyne.phasor_approximation,
+            zero_noise_summary=build_zero_noise_summary(pipeline_cfg, ifos, waveform),
+            reference_projection=cfg.heterodyne.reference_projection,
+            frequency_bin_edges=cfg.heterodyne.frequency_bin_edges,
             xg_plan=(
                 pipeline_cfg._issue_verified_xg_plan()
                 if verified_xg_manifest is not None
@@ -355,8 +402,8 @@ def build_likelihood(
             detectors=ifos,
             waveform=waveform,
             fixed_parameters=fixed_params,
-            f_min=cfg.f_min,
-            f_max=cfg.f_max,
+            f_min=f_min,
+            f_max=f_max,
             trigger_time=trigger_time,
             highest_mode=mb.highest_mode,
             accuracy_factor=mb.accuracy_factor,
@@ -396,8 +443,8 @@ def build_likelihood(
         detectors=ifos,
         waveform=waveform,
         fixed_parameters=fixed_params,
-        f_min=cfg.f_min,
-        f_max=cfg.f_max,
+        f_min=f_min,
+        f_max=f_max,
         trigger_time=trigger_time,
         phase_marginalization=phase_marg,
         time_marginalization=time_marg,

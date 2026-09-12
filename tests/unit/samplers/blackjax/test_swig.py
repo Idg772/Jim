@@ -1277,14 +1277,14 @@ def test_slice_to_block_map_orders_blocks_per_sweep():
 
 
 def _run_controller(widths, exp, shr, **kw):
-    defaults = dict(
-        slice_to_block=(0, 1),
-        n_blocks=2,
-        rate=0.25,
-        target_expansions=1.0,
-        target_shrinks=3.0,
-        shrink_only=False,
-    )
+    defaults = {
+        "slice_to_block": (0, 1),
+        "n_blocks": 2,
+        "rate": 0.25,
+        "target_expansions": 1.0,
+        "target_shrinks": 3.0,
+        "shrink_only": False,
+    }
     defaults.update(kw)
     return _updated_block_widths(
         widths, jnp.asarray(exp, float), jnp.asarray(shr, float), **defaults
@@ -1429,13 +1429,19 @@ def test_physical_eval_count_endpoint_term_is_bracket_mode_aware(bracket_mode: s
 
     diagnostics = sampler.get_diagnostics()
     assert diagnostics["n_slice_updates"] > 0
+    assert (
+        diagnostics["n_likelihood_requests_baseline_convention"]
+        == diagnostics["n_likelihood_evaluations_physical"]
+    )
+    assert diagnostics["fsm_optimizations"]["implementation"] == "baseline"
+    assert "logical" in diagnostics["likelihood_evaluation_counter_convention"]
     if bracket_mode == "shrink-only":
         assert diagnostics["n_likelihood_evaluations_stepping_out"] == 0
-        assert diagnostics["n_likelihood_evaluations_physical"] == (
-            diagnostics["n_likelihood_evaluations"]
+        assert (
+            diagnostics["n_likelihood_evaluations_physical"]
+            == (diagnostics["n_likelihood_evaluations"])
         )
     else:
         assert diagnostics["n_likelihood_evaluations_physical"] == (
-            diagnostics["n_likelihood_evaluations"]
-            + 2 * diagnostics["n_slice_updates"]
+            diagnostics["n_likelihood_evaluations"] + 2 * diagnostics["n_slice_updates"]
         )

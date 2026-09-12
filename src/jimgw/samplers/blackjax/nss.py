@@ -34,6 +34,7 @@ from jimgw.samplers.blackjax._fsm import (
     run_segment,
     slice_randoms_from_keys,
 )
+from jimgw.samplers.blackjax.closed_constants import with_replicated_constants
 from jimgw.samplers.blackjax.sharding import (
     build_replicated_from_mcmc_kernel,
     make_live_mesh,
@@ -481,12 +482,18 @@ class BlackJAXNSSSampler(Sampler):
             # the likelihood and sampler-kernel compiles separately from the
             # sampling time.
             _jit_t0 = time.perf_counter()
+            placed_init = with_replicated_constants(_batched_fn, positions, mesh=mesh)
             _compiled_init = (
-                jax.jit(_batched_fn, out_shardings=replacement_sharding(mesh))
+                jax.jit(placed_init, out_shardings=replacement_sharding(mesh))
                 .lower(positions)
                 .compile()
             )
             phase_seconds["likelihood_jit"] = time.perf_counter() - _jit_t0
+            logger.info(
+                "%s: initial likelihood compilation completed in %.3f s",
+                self.sampler_name,
+                phase_seconds["likelihood_jit"],
+            )
             _eval_t0 = time.perf_counter()
             initial_particles = jax.block_until_ready(_compiled_init(positions))
             phase_seconds["initial_likelihood_eval"] = time.perf_counter() - _eval_t0
@@ -574,16 +581,26 @@ class BlackJAXNSSSampler(Sampler):
         # sampler-kernel JIT separately from sampling wall time.  The fallback
         # preserves benchmark observers that intentionally wrap ``jax.jit``
         # with a plain callable to time the lazy first invocation themselves.
-        jitted_step_fn = jax.jit(nested_sampler.step)
+        _sampler_jit_t0 = time.perf_counter()
+        outer_step = nested_sampler.step
+        if mesh is not None:
+            outer_step = with_replicated_constants(
+                outer_step, rng_key, state, mesh=mesh
+            )
+        jitted_step_fn = jax.jit(outer_step)
         step_fn: Callable[[Any, Any], Any]
         lower_step = getattr(jitted_step_fn, "lower", None)
         if callable(lower_step):
-            _sampler_jit_t0 = time.perf_counter()
             compile_step = getattr(lower_step(rng_key, state), "compile", None)
             if not callable(compile_step):
                 raise TypeError("lowered sampler kernel is not compilable")
             step_fn = cast(Callable[[Any, Any], Any], compile_step())
             phase_seconds["sampler_kernel_jit"] = time.perf_counter() - _sampler_jit_t0
+            logger.info(
+                "%s: sampler kernel compilation completed in %.3f s; starting sampling",
+                self.sampler_name,
+                phase_seconds["sampler_kernel_jit"],
+            )
         else:
             step_fn = cast(Callable[[Any, Any], Any], jitted_step_fn)
         _last_ckpt_t = time.perf_counter()

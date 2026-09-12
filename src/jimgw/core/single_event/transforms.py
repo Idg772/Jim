@@ -4,6 +4,7 @@ import jax.numpy as jnp
 from beartype import beartype as typechecker
 from jaxtyping import Array, Float, jaxtyped
 
+from jimgw.core.constants import C_SI, DAYSID_SI, EARTH_SEMI_MAJOR_AXIS
 from jimgw.core.single_event.detector import GroundBased2G
 from jimgw.core.single_event.time_utils import (
     greenwich_mean_sidereal_time as compute_gmst,
@@ -578,6 +579,107 @@ class DistanceToSNRWeightedDistanceTransform(ConditionalBijectiveTransform):
             return {
                 "d_L": d_L,
             }
+
+        self.inverse_transform_func = named_inverse_transform
+
+
+class ChirpMassToDopplerDressedChirpMassTransform(ConditionalBijectiveTransform):
+    """Absorb the Earth-rotation Doppler/chirp-mass degeneracy into the chirp mass.
+
+    Over a long inspiral the detector's diurnal motion imposes a line-of-sight
+    Doppler shift on the observed frequency.  At leading post-Newtonian order the
+    inspiral phase depends on frequency and chirp mass only through the product
+    :math:`\\mathcal{M}_c f`, so a constant fractional frequency shift is exactly a
+    chirp-mass rescaling.  A shift of the sky position therefore trades against a
+    shift of the chirp mass, leaving a long, nearly flat ridge in the joint
+    sky--chirp-mass posterior that axis-aligned proposals cannot traverse.
+
+    Sampling the dressed chirp mass
+
+    $$
+    \\hat{\\mathcal{M}}_c = \\mathcal{M}_c\\left(1 + \\epsilon(\\hat n)\\right),
+    \\qquad
+    \\epsilon(\\hat n) = -\\frac{\\vec v_\\oplus \\cdot \\hat n}{c}
+    = \\frac{\\Omega_\\oplus R_\\oplus\\cos\\lambda}{c}
+      \\cos\\delta\\,\\sin(\\theta_0 - \\alpha)
+    $$
+
+    makes a sky move at fixed :math:`\\hat{\\mathcal{M}}_c` carry the compensating
+    chirp-mass shift by construction, so the sky block traverses the ridge without
+    a joint sky--chirp-mass proposal.  Here :math:`\\vec v_\\oplus` is the reference
+    detector's rotational velocity at the trigger time, :math:`\\lambda` its
+    latitude and :math:`\\theta_0` its right ascension at that time.
+
+    The dressing is of order :math:`10^{-6}`, far too small to disturb the
+    chirp-mass/mass-ratio correlation, so the dressed chirp mass stays in the
+    intrinsic block.  Because the rescaling depends on the sky alone, the map is
+    bijective with log-Jacobian :math:`\\log(1 + \\epsilon)`.
+
+    Warning:
+        The dressing makes the waveform depend on the sky coordinates, so any
+        block containing ``ra`` or ``dec`` becomes rebuild-priced.  Bridge blocks
+        are required to be cache-resident and must therefore not contain ``ra``
+        or ``dec`` when this coordinate is enabled.
+
+    Note:
+        This is a proposal-geometry reparametrisation only.  The prior is
+        declared on the physical ``M_c`` and mapped exactly by the Jacobian.
+
+    Attributes:
+        gmst (Float): Greenwich Mean Sidereal Time at the trigger time, radians.
+        detector_right_ascension (Float): Right ascension of the reference
+            detector at the trigger time, in radians.
+        velocity_over_c (Float): Rotational speed of the reference detector
+            divided by the speed of light.
+    """
+
+    gmst: FloatScalar
+    detector_right_ascension: FloatScalar
+    velocity_over_c: FloatScalar
+
+    def __repr__(self):
+        return (
+            "ChirpMassToDopplerDressedChirpMassTransform("
+            f"gmst={self.gmst}, v/c={self.velocity_over_c})"
+        )
+
+    def __init__(self, trigger_time: float, ifo: GroundBased2G) -> None:
+        """
+        Args:
+            trigger_time (Float): GPS trigger time in seconds.
+            ifo (GroundBased2G): Reference detector whose rotational velocity
+                defines the dressing.
+        """
+        name_mapping = (["M_c"], ["M_hat"])
+        conditional_names = ["ra", "dec"]
+        super().__init__(name_mapping, conditional_names)
+
+        assert "M_c" in name_mapping[0] and "M_hat" in name_mapping[1]
+        assert "ra" in conditional_names and "dec" in conditional_names
+
+        self.gmst = compute_gmst(trigger_time)
+        self.detector_right_ascension = self.gmst + ifo.longitude
+        self.velocity_over_c = (
+            (2.0 * jnp.pi / DAYSID_SI)
+            * EARTH_SEMI_MAJOR_AXIS
+            * jnp.cos(ifo.latitude)
+            / C_SI
+        )
+
+        def _epsilon(ra, dec):
+            return (
+                self.velocity_over_c
+                * jnp.cos(dec)
+                * jnp.sin(self.detector_right_ascension - ra)
+            )
+
+        def named_transform(x):
+            return {"M_hat": x["M_c"] * (1.0 + _epsilon(x["ra"], x["dec"]))}
+
+        self.transform_func = named_transform
+
+        def named_inverse_transform(x):
+            return {"M_c": x["M_hat"] / (1.0 + _epsilon(x["ra"], x["dec"]))}
 
         self.inverse_transform_func = named_inverse_transform
 

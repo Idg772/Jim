@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Mapping
 from typing import Optional, assert_never
 
 import jax
@@ -21,10 +22,42 @@ from jimgw.core.single_event.detector import (
 logger = logging.getLogger(__name__)
 
 
+FrequencyBound = float | Mapping[str, float]
+
+
+def wait_for_data_ready(ifos: list[GroundBased2G]) -> None:
+    """Synchronize existing data buffers without materializing lazy TD data."""
+    jax.block_until_ready(
+        [
+            (
+                getattr(ifo, "sliced_fd_data", None),
+                getattr(ifo, "sliced_psd", None),
+                ifo.data.materialized_arrays(),
+                tuple(
+                    getattr(getattr(ifo, "psd", None), name, None)
+                    for name in ("frequencies", "values")
+                ),
+            )
+            for ifo in ifos
+        ]
+    )
+
+
+def _detector_frequency_bound(bound: FrequencyBound, name: str) -> float:
+    """Resolve a scalar or detector bound, with an ET-family fallback."""
+    if not isinstance(bound, Mapping):
+        return bound
+    if name in bound:
+        return bound[name]
+    if name in {"ET1", "ET2", "ET3"} and "ET" in bound:
+        return bound["ET"]
+    raise ValueError(f"Frequency bound requires an entry for detector {name!r}")
+
+
 def build_data(
     data_cfg: DataConfig,
-    f_min: float,
-    f_max: float,
+    f_min: FrequencyBound,
+    f_max: FrequencyBound,
     waveform=None,
     time_frame: str = "detector",
     time_dependent_response: bool = False,
@@ -40,8 +73,14 @@ def build_data(
     """Construct a list of detectors populated with strain data and PSDs.
 
     For injection runs, *waveform* is required and is used to inject the signal.
+    Frequency bounds may be scalars or maps keyed by concrete detector name;
+    ``ET`` supplies the fallback for the three ET channels.
     """
-    preset = get_detector_preset()
+    preset = (
+        get_detector_preset(site_overrides=data_cfg.detector_sites)
+        if data_cfg.detector_sites
+        else get_detector_preset()
+    )
 
     ifos: list[GroundBased2G] = []
     for name in data_cfg.detectors:
@@ -96,19 +135,21 @@ def build_data(
         assert_never(data_cfg)
 
     for ifo in ifos:
+        detector_f_min = _detector_frequency_bound(f_min, ifo.name)
+        detector_f_max = _detector_frequency_bound(f_max, ifo.name)
         _validate_frequency_coverage(
             ifo.data.frequencies,
-            f_min,
-            f_max,
+            detector_f_min,
+            detector_f_max,
             f"{ifo.name} strain",
         )
         _validate_frequency_coverage(
             ifo.psd.frequencies,
-            f_min,
-            f_max,
+            detector_f_min,
+            detector_f_max,
             f"{ifo.name} PSD",
         )
-        _validate_psd_values(ifo.psd, f_min, f_max, f"{ifo.name} PSD")
+        _validate_psd_values(ifo.psd, detector_f_min, detector_f_max, f"{ifo.name} PSD")
         logger.info(
             "%s: %.1f s @ %.0f Hz, PSD shape %s",
             ifo.name,
@@ -155,17 +196,21 @@ def _validate_psd_values(
 ) -> None:
     """Require finite, strictly positive PSD values over the analysis band."""
 
-    frequencies = np.asarray(jax.device_get(psd.frequencies))
-    values = np.asarray(jax.device_get(psd.values))
-    in_band = (frequencies >= f_min) & (frequencies <= f_max)
-    if not np.any(in_band):
+    found = False
+    # Validation must not create native-length masks, copies, or transfers.
+    for start in range(0, len(psd.frequencies), 262_144):
+        stop = min(start + 262_144, len(psd.frequencies))
+        frequencies = np.asarray(jax.device_get(psd.frequencies[start:stop]))
+        values = np.asarray(jax.device_get(psd.values[start:stop]))
+        in_band = (frequencies >= f_min) & (frequencies <= f_max)
+        found |= bool(np.any(in_band))
+        if np.any(in_band & (~np.isfinite(values) | (values <= 0.0))):
+            raise ValueError(
+                f"{label} must contain finite, strictly positive values over the "
+                "analysis band"
+            )
+    if not found:
         raise ValueError(f"{label} has no samples in the requested analysis band")
-    invalid = ~np.isfinite(values[in_band]) | (values[in_band] <= 0.0)
-    if np.any(invalid):
-        raise ValueError(
-            f"{label} must contain finite, strictly positive values over the "
-            "analysis band"
-        )
 
 
 def _load_gwosc(ifos: list[GroundBased2G], cfg: GWOSCDataConfig) -> None:
@@ -192,8 +237,8 @@ def _load_injection(
     cfg: InjectionDataConfig,
     waveform,
     *,
-    f_min: float,
-    f_max: float,
+    f_min: FrequencyBound,
+    f_max: FrequencyBound,
     time_frame: str = "detector",
     seed: int = 0,
     require_configured_psd: bool = False,
@@ -206,26 +251,47 @@ def _load_injection(
         time_frame=time_frame,
     )
 
-    if cfg.sampling_frequency / 2.0 < f_max:
-        raise ValueError(
-            "injection sampling_frequency has a Nyquist frequency below "
-            f"f_max={f_max} Hz"
+    bounds = [
+        (
+            _detector_frequency_bound(f_min, ifo.name),
+            _detector_frequency_bound(f_max, ifo.name),
         )
+        for ifo in ifos
+    ]
+    for ifo, (_, detector_f_max) in zip(ifos, bounds, strict=True):
+        if cfg.sampling_frequency / 2.0 < detector_f_max:
+            raise ValueError(
+                "injection sampling_frequency has a Nyquist frequency below "
+                f"{ifo.name} f_max={detector_f_max} Hz"
+            )
 
-    root_key = jax.random.key(seed)
+    root_key = (
+        jax.random.key(seed, impl="threefry2x32")
+        if cfg.noise_generation == "indexed-v1"
+        else jax.random.key(seed)
+    )
+    original_psds = {}
+    prepared_psds = {}
     for detector_index, ifo in enumerate(ifos):
+        detector_f_min, detector_f_max = bounds[detector_index]
         family_name = "ET" if ifo.name.startswith("ET") else ifo.name
         sensitivity_file = cfg.psd_files.get(
             ifo.name,
             cfg.psd_files.get(family_name),
         )
+        psd_key = None
         if sensitivity_file is not None:
             is_asd = cfg.psd_is_asd.get(
                 ifo.name,
                 cfg.psd_is_asd.get(family_name, False),
             )
+            psd_key = (str(sensitivity_file.resolve()), is_asd)
             logger.info("Loading configured sensitivity for %s", ifo.name)
-            ifo.set_psd(PowerSpectrum.from_file(str(sensitivity_file), is_asd=is_asd))
+            if psd_key not in original_psds:
+                original_psds[psd_key] = PowerSpectrum.from_file(
+                    str(sensitivity_file), is_asd=is_asd
+                )
+            ifo.set_psd(original_psds[psd_key])
         elif require_configured_psd:
             raise ValueError(
                 f"XG injection requires data.psd_files.{family_name}; built-in "
@@ -243,16 +309,21 @@ def _load_injection(
 
         _validate_frequency_coverage(
             ifo.psd.frequencies,
-            f_min,
-            f_max,
+            detector_f_min,
+            detector_f_max,
             f"{ifo.name} configured PSD",
         )
         _validate_psd_values(
             ifo.psd,
-            f_min,
-            f_max,
+            detector_f_min,
+            detector_f_max,
             f"{ifo.name} configured PSD",
         )
+
+        # Coverage is checked against the original table above, before any
+        # interpolation. Sharing a native table must never expand PSD support.
+        if cfg.host_resident_data and psd_key in prepared_psds:
+            ifo.set_psd(prepared_psds[psd_key])
 
         logger.info("Injecting signal into %s", ifo.name)
         ifo.inject_signal(
@@ -261,22 +332,32 @@ def _load_injection(
             trigger_time=cfg.trigger_time,
             waveform_model=waveform,
             parameters=parameters,
-            f_min=f_min,
-            f_max=f_max,
+            f_min=detector_f_min,
+            f_max=detector_f_max,
             zero_noise=cfg.zero_noise,
             rng_key=jax.random.fold_in(root_key, detector_index),
             waveform_chunk_size=cfg.waveform_chunk_size,
+            host_resident=cfg.host_resident_data,
+            host_storage=cfg.host_data_storage,
+            noise_generation=cfg.noise_generation,
         )
+        if cfg.host_resident_data and psd_key is not None:
+            # No caller may modify a shared native sensitivity in place.
+            if isinstance(ifo.psd.values, np.ndarray):
+                ifo.psd.values.setflags(write=False)
+            prepared_psds[psd_key] = ifo.psd
 
 
 def _load_files(
     ifos: list[GroundBased2G],
     cfg: FileDataConfig,
     *,
-    f_min: float,
-    f_max: float,
+    f_min: FrequencyBound,
+    f_max: FrequencyBound,
 ) -> None:
     for ifo in ifos:
+        detector_f_min = _detector_frequency_bound(f_min, ifo.name)
+        detector_f_max = _detector_frequency_bound(f_max, ifo.name)
         family_name = "ET" if ifo.name.startswith("ET") else ifo.name
         if ifo.name not in cfg.strain_files:
             raise ValueError(
@@ -300,8 +381,8 @@ def _load_files(
         strain = Data.from_file(str(strain_path), channel=channel)
         _validate_frequency_coverage(
             strain.frequencies,
-            f_min,
-            f_max,
+            detector_f_min,
+            detector_f_max,
             f"{ifo.name} configured strain",
         )
 
@@ -309,14 +390,14 @@ def _load_files(
         psd = PowerSpectrum.from_file(str(psd_path), is_asd=is_asd)
         _validate_frequency_coverage(
             psd.frequencies,
-            f_min,
-            f_max,
+            detector_f_min,
+            detector_f_max,
             f"{ifo.name} configured PSD",
         )
         _validate_psd_values(
             psd,
-            f_min,
-            f_max,
+            detector_f_min,
+            detector_f_max,
             f"{ifo.name} configured PSD",
         )
         ifo.set_data(strain)

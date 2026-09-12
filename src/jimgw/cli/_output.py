@@ -17,6 +17,31 @@ from jimgw.core.transforms import BijectiveTransform, NtoMTransform
 
 logger = logging.getLogger(__name__)
 
+# Files the CLI-configured sampler checkpoint writes into ``output.dir`` while
+# sampling is still running (see ``jimgw.cli._jim._with_checkpoint``).
+_CHECKPOINT_ARTIFACTS = frozenset({"checkpoint.pkl", "jax_cache"})
+
+
+def _holds_only_checkpoint_artifacts(out_dir: Path) -> bool:
+    """True when *out_dir* contains nothing but the sampler's own checkpoint files."""
+    return all(child.name in _CHECKPOINT_ARTIFACTS for child in out_dir.iterdir())
+
+
+def _json_scalar(value):
+    """Coerce one zero-dimensional diagnostic into a JSON-serialisable value.
+
+    Numeric scalars become floats (the historical on-disk format); ``None``
+    stays null; nested dicts, lists and strings are converted element-wise so
+    that backend timing tables such as ``sample_phase_seconds`` survive.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_scalar(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_scalar(v) for v in value]
+    return float(value)
+
 
 def write_outputs(jim, cfg) -> None:
     """Write samples, diagnostics, and optional corner plot under output.dir."""
@@ -24,14 +49,21 @@ def write_outputs(jim, cfg) -> None:
     out_dir: Path = cfg.output.dir
 
     if out_dir.exists():
-        if not cfg.output.overwrite:
+        if cfg.output.overwrite:
+            shutil.rmtree(out_dir)
+            logger.info("Removed existing output directory: %s", out_dir)
+        elif _holds_only_checkpoint_artifacts(out_dir):
+            logger.info(
+                "Reusing output directory that holds only sampler checkpoint "
+                "artifacts: %s",
+                out_dir,
+            )
+        else:
             raise FileExistsError(
                 f"Output directory already exists: {out_dir}. "
                 "Set output.overwrite = true to allow overwriting."
             )
-        shutil.rmtree(out_dir)
-        logger.info("Removed existing output directory: %s", out_dir)
-    out_dir.mkdir(parents=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # Samples
     samples = jim.get_samples(n_samples=cfg.output.n_samples)
@@ -42,6 +74,11 @@ def write_outputs(jim, cfg) -> None:
         "Saved %d samples to %s", next(iter(samples.values())).shape[0], samples_path
     )
 
+    # Raw nested points (dead points with birth contours and quadrature
+    # weights) when the backend keeps them: this is what a population-history
+    # post-mortem of a failed run needs, and get_samples() discards it.
+    _save_nested_points(jim, out_dir)
+
     # Diagnostics
     diagnostics = jim.get_diagnostics()
     scalar_diag = {k: v for k, v in diagnostics.items() if np.asarray(v).ndim == 0}
@@ -49,7 +86,25 @@ def write_outputs(jim, cfg) -> None:
 
     diag_json = out_dir / "diagnostics.json"
     diag_data: dict = {"versions": _collect_versions(cfg.sampler.type)}
-    diag_data.update({k: float(v) for k, v in scalar_diag.items()})
+    diag_data.update({k: _json_scalar(v) for k, v in scalar_diag.items()})
+    construction = getattr(
+        getattr(jim, "likelihood", None), "construction_diagnostics", None
+    )
+    if construction is not None:
+        diag_data["likelihood_construction"] = _json_scalar(construction)
+    pipeline_timing = getattr(jim, "pipeline_timing", None)
+    if pipeline_timing is not None:
+        diag_data["pipeline_timing"] = _json_scalar(pipeline_timing)
+    detectors = getattr(getattr(jim, "likelihood", None), "detectors", None)
+    if detectors:
+        from jimgw.core.single_event.native_storage import native_storage_accounting
+
+        diag_data["native_data_storage"] = native_storage_accounting(detectors)
+        diag_data["data_preparation"] = {
+            detector.name: _json_scalar(detector.data_preparation_diagnostics)
+            for detector in detectors
+            if hasattr(detector, "data_preparation_diagnostics")
+        }
     with open(diag_json, "w") as f:
         json.dump(diag_data, f, indent=2)
     logger.info("Saved diagnostics to %s", diag_json)
@@ -88,6 +143,24 @@ def write_outputs(jim, cfg) -> None:
             else None
         )
         _save_corner(out_dir, samples, cfg.output.corner_parameters, truths)
+
+
+def _save_nested_points(jim, out_dir: Path) -> None:
+    getter = getattr(jim, "get_weighted_samples", None)
+    if getter is None:
+        return
+    try:
+        nested = getter(space="prior")
+    except NotImplementedError:
+        return
+    nested_path = out_dir / "nested_samples.npz"
+    # NumPy's stubs do not model dynamically named arrays unpacked as kwargs.
+    np.savez(nested_path, **{k: np.asarray(v) for k, v in nested.items()})  # type: ignore[call-overload]
+    logger.info(
+        "Saved %d nested points to %s",
+        next(iter(nested.values())).shape[0],
+        nested_path,
+    )
 
 
 def _injection_truths_in_prior_space(

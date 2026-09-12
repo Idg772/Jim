@@ -1,6 +1,8 @@
 import logging
 from abc import ABC
+from threading import Lock
 from typing import Optional, Self
+from weakref import WeakValueDictionary
 
 import jax
 import jax.numpy as jnp
@@ -17,6 +19,26 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TUKEY_ROLL_OFF = 0.4
 _EMPTY_ARRAY = jnp.array([])
+_HOST_FREQUENCY_GRIDS: WeakValueDictionary[tuple[int, float], np.ndarray] = (
+    WeakValueDictionary()
+)
+_HOST_FREQUENCY_GRIDS_LOCK = Lock()
+
+
+def _shared_host_frequencies(n_time: int, delta_t: float) -> np.ndarray:
+    """Share immutable native grids without retaining unused arrays."""
+    key = (n_time, delta_t)
+    with _HOST_FREQUENCY_GRIDS_LOCK:
+        frequencies = _HOST_FREQUENCY_GRIDS.get(key)
+        if frequencies is None:
+            # Match NumPy rfftfreq's multiplication convention with one full
+            # allocation, avoiding its temporary integer-index array.
+            frequencies = np.arange(n_time // 2 + 1, dtype=np.float64)
+            frequencies *= 1.0 / (n_time * delta_t)
+            frequencies.setflags(write=False)
+            _HOST_FREQUENCY_GRIDS[key] = frequencies
+        return frequencies
+
 
 # TODO: Need to expand this list. Currently it is only O3.
 asd_file_dict = {
@@ -24,6 +46,31 @@ asd_file_dict = {
     "L1": "https://dcc.ligo.org/public/0169/P2000251/001/O3-L1-C01_CLEAN_SUB60HZ-1240573680.0_sensitivity_strain_asd.txt",
     "V1": "https://dcc.ligo.org/public/0169/P2000251/001/O3-V1_sensitivity_strain_asd.txt",
 }
+
+
+def _sorted_band_indices(frequencies: np.ndarray, f_min, f_max) -> tuple[int, int]:
+    """Index range of ``f_min <= f <= f_max`` on a sorted host grid.
+
+    Equivalent to the boolean mask used for device arrays, without allocating
+    a mask or a copy of the selected samples.
+    """
+    f_min, f_max = float(f_min), float(f_max)
+    if np.isnan(f_min) or np.isnan(f_max):
+        return 0, 0
+    start = int(np.searchsorted(frequencies, f_min, side="left"))
+    stop = int(np.searchsorted(frequencies, f_max, side="right"))
+    return start, max(start, stop)
+
+
+def _host_grid_is_nondecreasing(frequencies: np.ndarray) -> bool:
+    """Check a mutable host grid with bounded temporary comparison arrays."""
+    if frequencies.ndim != 1:
+        return False
+    for start in range(1, frequencies.size, 65_536):
+        stop = min(start + 65_536, frequencies.size)
+        if not np.all(frequencies[start - 1 : stop - 1] <= frequencies[start:stop]):
+            return False
+    return True
 
 
 class Data(ABC):
@@ -45,15 +92,71 @@ class Data(ABC):
 
     name: str
 
-    td: Float[Array, "n_time"]
     fd: Complex[Array, "n_time // 2 + 1"]
 
     start_time: float
     delta_t: FloatLike
 
-    window: Float[Array, "n_time"]
-
     _fd_is_fixed: bool
+    # Host-resident, frequency-domain-only instances (see ``from_host_fd``)
+    # keep ``_td``/``_window`` unset until a caller asks for them.
+    _td: Optional[Float[Array, "n_time"]] = None
+    _window: Optional[Float[Array, "n_time"]] = None
+    _n_time: int = 0
+    _host_frequencies: Optional[np.ndarray] = None
+    _host_frequency_delta_t: Optional[float] = None
+
+    @property
+    def td(self) -> Float[Array, "n_time"]:
+        """Time-domain data, computed without retaining a mutable host-FD cache.
+
+        Host FD buffers may be filled in place, so each access must reflect
+        their current values. A caller needing repeated TD access can retain
+        the returned array explicitly. Eager TD data retain their original
+        stored array.
+        """
+        if self._td is None:
+            time_domain = np.fft.irfft(np.asarray(self.fd), n=self._n_time)
+            time_domain /= float(self.delta_t)
+            return time_domain
+        return self._td
+
+    @td.setter
+    def td(self, value) -> None:
+        self._td = value
+        self._n_time = len(value)
+
+    @property
+    def window(self) -> Float[Array, "n_time"]:
+        """Window applied before the FFT; all ones for host-resident data."""
+        if self._window is None:
+            # A scalar broadcast has the expected shape without allocating
+            # another full time series; callers cannot mutate the shared one.
+            self._window = np.broadcast_to(np.array(1.0), (self._n_time,))
+        return self._window
+
+    @window.setter
+    def window(self, value) -> None:
+        self._window = value
+
+    @property
+    def time_domain_materialised(self) -> bool:
+        """Whether this object retains a time-domain array."""
+        return self._td is not None
+
+    def materialized_arrays(self) -> tuple[Array | np.ndarray, ...]:
+        """Return existing buffers without invoking lazy properties or copying.
+
+        This is suitable for synchronization and memory accounting. On-demand
+        TD arrays retained only by an external caller are not included.
+        Buffers may share storage or be broadcast views; their ``nbytes`` is
+        their logical size, not necessarily their unique allocated storage.
+        """
+        return tuple(
+            value
+            for value in (self.fd, self._td, self._window, self._host_frequencies)
+            if value is not None
+        )
 
     def __len__(self) -> int:
         """Returns the length of the time-domain data.
@@ -61,7 +164,7 @@ class Data(ABC):
         Returns:
             int: Length of time domain data array.
         """
-        return len(self.td)
+        return self.n_time
 
     def __iter__(self):
         """Iterator over the time-domain data.
@@ -78,7 +181,7 @@ class Data(ABC):
         Returns:
             int: Number of time domain samples.
         """
-        return len(self.td)
+        return self._n_time
 
     @property
     def n_freq(self) -> int:
@@ -129,9 +232,22 @@ class Data(ABC):
     def frequencies(self) -> Float[Array, "n_time // 2 + 1"]:
         """Gets frequencies of the data.
 
+        Host-resident data return a cached NumPy grid so that slicing never
+        allocates a device array of the full native length.
+
         Returns:
             Array: Array of frequencies in Hz.
         """
+        if isinstance(self.fd, np.ndarray):
+            delta_t = float(self.delta_t)
+            if (
+                self._host_frequencies is None
+                or len(self._host_frequencies) != self.n_freq
+                or self._host_frequency_delta_t != delta_t
+            ):
+                self._host_frequencies = _shared_host_frequencies(self.n_time, delta_t)
+                self._host_frequency_delta_t = delta_t
+            return self._host_frequencies
         return jnp.fft.rfftfreq(self.n_time, self.delta_t)
 
     @property
@@ -198,7 +314,7 @@ class Data(ABC):
 
     def __bool__(self) -> bool:
         """Check if the data is empty."""
-        return len(self.td) > 0
+        return self.n_time > 0
 
     def set_tukey_window(
         self,
@@ -299,6 +415,9 @@ class Data(ABC):
         """
         if auto_fft:
             self.fft()
+        if isinstance(self.fd, np.ndarray):
+            start, stop = _sorted_band_indices(self.frequencies, f_min, f_max)
+            return self.fd[start:stop], self.frequencies[start:stop]
         mask = (self.frequencies >= f_min) * (self.frequencies <= f_max)
         return self.fd[mask], self.frequencies[mask]
 
@@ -350,6 +469,47 @@ class Data(ABC):
         if not isinstance(epoch, (int, float, np.floating)):
             raise TypeError("GWOSC data epoch must be a scalar")
         return cls(data_td.value, data_td.dt.value, float(epoch), ifo)
+
+    @classmethod
+    def from_host_fd(
+        cls,
+        fd: np.ndarray,
+        delta_t: FloatLike,
+        start_time: float = 0.0,
+        name: str = "",
+    ) -> Self:
+        """Wrap a full one-sided Fourier series that lives in host memory.
+
+        No time-domain array, window or device copy is created. The array is
+        referenced, not copied, so a caller may fill it in place afterwards.
+        ``td`` is computed afresh only if a caller asks for it, without
+        retaining a stale copy when the shared FD buffer is updated.
+
+        Args:
+            fd: Complex one-sided Fourier series on the native grid
+                ``rfftfreq(n_time, delta_t)`` with ``n_time`` even.
+            delta_t: Time step in seconds.
+            start_time: GPS start time of the segment in seconds.
+            name: Name of the data.
+        """
+        fd = np.asarray(fd)
+        if fd.ndim != 1 or fd.size < 2 or not np.iscomplexobj(fd):
+            raise ValueError("from_host_fd requires a complex one-sided series")
+        delta_t_value = float(delta_t)
+        if not np.isfinite(delta_t_value) or delta_t_value <= 0:
+            raise ValueError("delta_t must be finite and positive")
+        data = cls.__new__(cls)
+        data.name = name or ""
+        data._td = None
+        data._window = None
+        data._n_time = 2 * (fd.size - 1)
+        data._host_frequencies = None
+        data._host_frequency_delta_t = None
+        data.fd = fd
+        data._fd_is_fixed = True
+        data.delta_t = delta_t
+        data.start_time = start_time
+        return data
 
     @classmethod
     def from_fd(
@@ -762,6 +922,13 @@ class PowerSpectrum(ABC):
                 - values: Sliced PSD values
                 - frequencies: Frequencies corresponding to sliced values
         """
+        if (
+            isinstance(self.frequencies, np.ndarray)
+            and isinstance(self.values, np.ndarray)
+            and _host_grid_is_nondecreasing(self.frequencies)
+        ):
+            start, stop = _sorted_band_indices(self.frequencies, f_min, f_max)
+            return self.values[start:stop], self.frequencies[start:stop]
         mask = (self.frequencies >= f_min) & (self.frequencies <= f_max)
         return self.values[mask], self.frequencies[mask]
 
@@ -786,7 +953,23 @@ class PowerSpectrum(ABC):
             bounds_error=False,
             **kws,
         )
-        return PowerSpectrum(interp(frequencies), frequencies, self.name)
+        if isinstance(frequencies, np.ndarray) and frequencies.ndim == 1:
+            chunk_size = 262_144
+            first = interp(frequencies[:chunk_size])
+            if frequencies.size <= chunk_size:
+                values = first
+            else:
+                # Keep only one full output and one bounded interpolation
+                # chunk; SciPy's index/mask/work arrays cannot scale with N.
+                values = np.empty(frequencies.shape, dtype=first.dtype)
+                values[:chunk_size] = first
+                del first
+                for start in range(chunk_size, frequencies.size, chunk_size):
+                    stop = min(start + chunk_size, frequencies.size)
+                    values[start:stop] = interp(frequencies[start:stop])
+        else:
+            values = interp(frequencies)
+        return PowerSpectrum(values, frequencies, self.name)
 
     def simulate_data(
         self,

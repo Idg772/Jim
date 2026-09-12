@@ -168,6 +168,30 @@ def _slice_entry(schedule, idx, logdensity, max_expansions, width, shrink_only=F
     return level, left, right, j, k, schedule.shrink_key_data[idx]
 
 
+def _normalize_exhausted_endpoints(c: _Carry) -> _Carry:
+    """Advance past endpoint predicates whose expansion budget is exhausted."""
+    # Normalize left before right: both zero budgets can enter SHRINK in one
+    # tick without changing the bracket, accepted state, or random key.
+    phase = jnp.where((c.phase == _LEFT) & (c.j_remaining <= 0), _RIGHT, c.phase)
+    skip_right = (phase == _RIGHT) & (c.k_remaining <= 0)
+    phase = jnp.where(skip_right, _SHRINK, phase)
+    # Capture the original bracket before this tick's first shrink proposal
+    # can reject and shorten it, just as the ordinary RIGHT transition does.
+    info = c.info._replace(
+        bracket_left=jnp.where(
+            skip_right,
+            c.info.bracket_left.at[c.slice_idx].set(c.left),
+            c.info.bracket_left,
+        ),
+        bracket_right=jnp.where(
+            skip_right,
+            c.info.bracket_right.at[c.slice_idx].set(c.right),
+            c.info.bracket_right,
+        ),
+    )
+    return c._replace(phase=phase, info=info)
+
+
 def run_segment(
     schedule: SegmentSchedule,
     state,
@@ -179,6 +203,7 @@ def run_segment(
     max_shrinkage: int,
     width: float = 1.0,
     shrink_only: bool = False,
+    skip_exhausted_endpoints: bool = False,
 ):
     """Run every slice of one segment for a single chain.
 
@@ -189,6 +214,11 @@ def run_segment(
     ``shrink_only`` is a static Python bool: when set, every slice enters the
     shrink phase directly with a fixed unit bracket and never performs
     stepping-out expansions (Neal 2003 sec 4.1).
+
+    ``skip_exhausted_endpoints`` omits pure candidate calls whose endpoint
+    predicate cannot affect stepping out because its side's budget is zero.
+    Accepted states, keys, brackets, and expansion/shrink counters are unchanged;
+    physical callback counts change. It has no effect on shrink-only segments.
     """
     assert max_shrinkage >= 1
 
@@ -224,6 +254,8 @@ def run_segment(
         return c.phase != _DONE
 
     def body(c):
+        if skip_exhausted_endpoints:
+            c = _normalize_exhausted_endpoints(c)
         key = jax.random.wrap_key_data(
             c.shrink_key_data,
             impl="threefry2x32",

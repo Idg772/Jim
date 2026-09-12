@@ -43,6 +43,8 @@ from jimgw.cli._utils import (
 )
 from jimgw.core.single_event.detector import GroundBased2G
 from jimgw.core.single_event.transforms import (
+    ChirpMassToDopplerDressedChirpMassTransform,
+    DistanceToSNRWeightedDistanceTransform,
     GeocentricArrivalTimeToDetectorArrivalTimeTransform,
     MassRatioToSymmetricMassRatioTransform,
     SkyFrameToDetectorFrameSkyPositionTransform,
@@ -116,10 +118,42 @@ def infer_sample_transforms(
             "time_frame='geocentric': sampling t_c directly, no time sample transform"
         )
 
+    # --- Distance sample transform ---------------------------------------
+    # Built while the physical sky, polarisation and inclination coordinates
+    # still exist, since d_hat conditions on them; reversing the list restores
+    # iota before d_L.
+    if "d_L" in prior_params and sampling_cfg.distance_coordinate == "d_hat":
+        sample_transforms.append(
+            DistanceToSNRWeightedDistanceTransform(trigger_time, ifos)
+        )
+        logger.debug("Added DistanceToSNRWeightedDistanceTransform(d_L -> d_hat)")
+
     # --- Inclination sample transform ------------------------------------
     if "iota" in prior_params and sampling_cfg.inclination_coordinate == "cos_iota":
         sample_transforms.append(CosineTransform((["iota"], ["cos_iota"])))
         logger.debug("Added CosineTransform(iota -> cos_iota)")
+
+    # --- Chirp-mass sample transform --------------------------------------
+    # Ordered after the inclination transform and before the sky transform: the
+    # reversed chain then restores ra/dec (sky) before the dressing consumes
+    # them, and restores M_c before d_hat consumes it.
+    if "M_c" in prior_params and sampling_cfg.chirp_mass_coordinate == "M_hat":
+        doppler_ifo_name = (
+            ifos[0].name
+            if sampling_cfg.time_frame in ("detector", "geocentric")
+            else sampling_cfg.time_frame
+        )
+        ifo_for_doppler = next(
+            (ifo for ifo in ifos if ifo.name == doppler_ifo_name), ifos[0]
+        )
+        sample_transforms.append(
+            ChirpMassToDopplerDressedChirpMassTransform(trigger_time, ifo_for_doppler)
+        )
+        logger.debug(
+            "Added ChirpMassToDopplerDressedChirpMassTransform(M_c -> M_hat, "
+            "detector=%s)",
+            ifo_for_doppler.name,
+        )
 
     # --- Sky sample transform ---------------------------------------------
     has_equatorial_sky = _EQUATORIAL_SKY_PARAMS <= prior_params

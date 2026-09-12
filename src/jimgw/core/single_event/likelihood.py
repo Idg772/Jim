@@ -1,7 +1,9 @@
 import hashlib
 import logging
+import time
 from abc import abstractmethod
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any, Optional, Union, cast
 
@@ -19,6 +21,10 @@ from jimgw.core.base import LikelihoodBase
 from jimgw.core.constants import EARTH_RADIUS_LIGHT_S, MTSUN
 from jimgw.core.prior import Prior, find_specific_prior
 from jimgw.core.single_event.detector import Detector
+from jimgw.core.single_event.heterodyne_moments import (
+    polynomial_moments,
+    validate_time_anchors,
+)
 from jimgw.core.single_event.marginalization_config import (
     DistanceMargConfig,
     HeterodyneTimeMargConfig,
@@ -82,8 +88,95 @@ _LIKELIHOOD_OPTIMIZATION_AXES = frozenset(
     {"shared_frequency_grid", "detector_phasor", "real_inner_product"}
 )
 _MAX_DIRECT_SUM_PHASOR_ELEMENTS = 4_194_304
+# Float64 elements of the bin-aligned tile matrices (powers, anchor weights,
+# and the one-hot tile-combine matrix) for one native construction chunk:
+# 16 Mi elements = 128 MiB; excludes waveform/compiler workspace and allocator
+# pools. Tile widths below 32 make the GEMM degenerate; shrink chunks instead.
+_MAX_TILE_MATRIX_ELEMENTS = 16 * 2**20
+_MIN_TILE_SIZE = 32
+_GRID_PROOF_CHUNK_SIZE = 262_144
+# Degree of the per-bin polynomial ratio model.  Lobatto-node Vandermonde
+# systems stay well conditioned up to this order.
+_MAX_INTERPOLATION_ORDER = 8
+# Taylor order of the analytic t_c phasor carried by the summary moments.
+_MAX_PHASOR_MOMENT_ORDER = 16
 _MAX_DIRECT_SUM_TIME_SAMPLES = 4_194_304
 _MIN_RELATIVE_BIN_REFERENCE_RESPONSE = 1.0e-12
+
+
+def _host_native_grid_is_uniform(grid, first_index, duration):
+    """Prove the complete host lattice with at most one chunk of scratch."""
+    for start in range(0, len(grid), _GRID_PROOF_CHUNK_SIZE):
+        stop = min(start + _GRID_PROOF_CHUNK_SIZE, len(grid))
+        part = grid[start:stop]
+        expected = (np.arange(start, stop, dtype=grid.dtype) + first_index) / duration
+        if not np.array_equal(part, expected) or np.any(part[1:] <= part[:-1]):
+            return False
+        if start and part[0] <= grid[start - 1]:
+            return False
+    return True
+
+
+def _host_grid_is_contained(part, whole, offset):
+    """Compare nested slices without a full-length equality mask."""
+    for start in range(0, len(part), _GRID_PROOF_CHUNK_SIZE):
+        stop = min(start + _GRID_PROOF_CHUNK_SIZE, len(part))
+        if not np.array_equal(part[start:stop], whole[offset + start : offset + stop]):
+            return False
+    return True
+
+
+@jax.jit
+def _device_chunk_is_native(frequencies, first_index, duration, real_count):
+    """Return one scalar; keep device frequency arrays on the device."""
+    index = jnp.arange(frequencies.size, dtype=jnp.int64)
+    expected = (index + first_index) / duration
+    return jnp.all((index >= real_count) | (frequencies == expected))
+
+
+def _summary_tile_layout(edges, duration, first_index, n_samples, chunk_size, planes):
+    """Find one bounded executable shape without retaining stream descriptors.
+
+    The metadata pass counts tiles directly from the small integer boundary
+    vector. Execution regenerates only the current chunk's descriptors.
+    """
+    from jimgw.core.single_event.heterodyne_summary_tiles import NativeGridTilePlanner
+
+    planners = {}
+    while True:
+        tile_size = min(512, chunk_size)
+        tile_floor = min(_MIN_TILE_SIZE, chunk_size)
+        while True:
+            if tile_size not in planners:
+                planners[tile_size] = NativeGridTilePlanner(
+                    edges, duration, tile_size=tile_size
+                )
+            planner = planners[tile_size]
+            max_tiles, max_local = 0, 0
+            for start in range(0, n_samples, chunk_size):
+                first = first_index + start
+                stop = first + min(chunk_size, n_samples - start)
+                lengths = np.diff(np.clip(planner.boundaries, first, stop))
+                max_tiles = max(
+                    max_tiles, int(np.sum((lengths + tile_size - 1) // tile_size))
+                )
+                max_local = max(max_local, int(np.count_nonzero(lengths)))
+            # The whole-stream maximum already fixes one executable shape.
+            # Rounding this batch dimension up can double padded arithmetic
+            # and needlessly force smaller chunks under the matrix budget.
+            padded_tiles = max(1, max_tiles)
+            padded_local = 1 << max(0, max_local - 1).bit_length()
+            matrix_elements = padded_tiles * (tile_size * planes + padded_local)
+            if matrix_elements <= _MAX_TILE_MATRIX_ELEMENTS:
+                return planner, chunk_size, padded_tiles, padded_local, matrix_elements
+            if tile_size <= tile_floor:
+                break
+            tile_size = max(tile_floor, tile_size // 2)
+        if chunk_size == 1:
+            raise ValueError(
+                "Tile matrix budget cannot hold one native sample and its combine matrix"
+            )
+        chunk_size = max(1, chunk_size // 2)
 
 
 def _set_and_merge_heterodyne_frequency_grids(
@@ -128,11 +221,91 @@ def _set_and_merge_heterodyne_frequency_grids(
         frequencies = detector_frequencies[0]
         identical_frequency_grids = True
     else:
-        host_frequencies = [
-            np.asarray(jax.device_get(frequencies))
-            for frequencies in detector_frequencies
-        ]
-        frequencies = jnp.asarray(np.unique(np.concatenate(host_frequencies)))
+        # Unequal analysis bounds often leave aligned slices of one native
+        # Fourier grid (for example CE >= 5 Hz and ET >= 2 Hz). Prove that a
+        # longest grid contains the others before reusing it. Metadata alone
+        # cannot establish this: irregular interiors or a half-bin offset must
+        # still take the general union path.
+        longest_index = max(
+            range(len(grid_metadata)), key=lambda i: grid_metadata[i][0]
+        )
+        longest = detector_frequencies[longest_index]
+        n_longest, low, high, _ = grid_metadata[longest_index]
+        nominal_spacing = (high - low) / (n_longest - 1)
+        nested = np.isfinite(nominal_spacing) and nominal_spacing > 0.0
+        offsets = []
+        if nested:
+            duration = float(
+                getattr(detectors[longest_index], "duration", 1.0 / nominal_spacing)
+            )
+            nested = np.isfinite(duration) and duration > 0.0
+        if nested:
+            for size, start, stop, _ in grid_metadata:
+                if not (
+                    np.isfinite(start)
+                    and np.isfinite(stop)
+                    and low <= start <= stop <= high
+                ):
+                    nested = False
+                    break
+                offset = round((start - low) * duration)
+                if offset < 0 or offset + size > n_longest:
+                    nested = False
+                    break
+                offsets.append(offset)
+
+        if nested and all(isinstance(g, np.ndarray) for g in detector_frequencies):
+            # Host-resident grids: prove the lattice on the host, never moving a
+            # full native grid to a device.
+            is_native_uniform_grid = _host_native_grid_is_uniform
+            is_contained_slice = _host_grid_is_contained
+
+        elif nested:
+
+            @jax.jit
+            def is_native_uniform_grid(grid, first_index, duration):
+                expected = (
+                    jnp.arange(grid.size, dtype=grid.dtype) + first_index
+                ) / duration
+                return jnp.all(grid == expected) & jnp.all(grid[1:] > grid[:-1])
+
+            @jax.jit
+            def is_contained_slice(part, whole, offset):
+                section = jax.lax.dynamic_slice_in_dim(whole, offset, part.size)
+                return jnp.all(part == section)
+
+        if nested:
+            # These fused reductions return only scalars to the host. In
+            # particular, neither the native grids nor their concatenation are
+            # copied to NumPy. Exact lattice reconstruction also permits the
+            # normal floating rounding of non-power-of-two durations.
+            nested = bool(
+                jax.device_get(
+                    is_native_uniform_grid(longest, round(low * duration), duration)
+                )
+            )
+            if nested:
+                for index, (grid, offset) in enumerate(
+                    zip(detector_frequencies, offsets, strict=True)
+                ):
+                    if index != longest_index and not bool(
+                        jax.device_get(is_contained_slice(grid, longest, offset))
+                    ):
+                        nested = False
+                        break
+        if nested:
+            frequencies = longest
+        else:
+            host_frequencies = [
+                np.asarray(jax.device_get(frequencies))
+                for frequencies in detector_frequencies
+            ]
+            union = np.unique(np.concatenate(host_frequencies))
+            frequencies = (
+                union
+                if all(isinstance(g, np.ndarray) for g in detector_frequencies)
+                else jnp.asarray(union)
+            )
         identical_frequency_grids = False
     df = detector_frequencies[0][1] - detector_frequencies[0][0]
     return frequencies, identical_frequency_grids, df
@@ -665,8 +838,18 @@ class TransientLikelihoodFD(SingleEventLikelihood):
 
         self.df = _frequencies[0][1] - _frequencies[0][0]
         self.frequencies = jnp.unique(jnp.concatenate(_frequencies))
+        # ``jnp.isin`` materialises an ``n_union x n_detector`` comparison
+        # (one byte per pair): 62 GiB for a 259k-sample band and ~280 TB for
+        # a 16.7M-sample XG band.  NumPy's sort-based ``isin`` needs only
+        # ``O(n log n)`` host memory, and the masks are static anyway.
+        host_frequencies = np.asarray(jax.device_get(self.frequencies))
         self.frequency_masks = [
-            jnp.isin(self.frequencies, detector.sliced_frequencies)
+            jnp.asarray(
+                np.isin(
+                    host_frequencies,
+                    np.asarray(jax.device_get(detector.sliced_frequencies)),
+                )
+            )
             for detector in detectors
         ]
         # All-True masks mean every detector shares the union grid: the mask
@@ -1230,6 +1413,26 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
             at once while constructing the fixed reference summaries. This
             bounds host and device scratch memory independently of the number
             of relative bins.
+        summary_backend: ``numpy`` retains the historical host reducer.
+            ``jax`` constructs native polynomial phasor summaries on device,
+            distributing independent detectors over available local devices.
+        xg_evaluation_mode: ``auto`` (default) selects factored proposal and
+            scalar-summary evaluation for supported anchored-carrier XG models,
+            keeping the original native reference and moments. ``baseline``
+            retains the supplied waveform and generic evaluation arithmetic.
+            The resolved implementation is recorded in ``evaluation_diagnostics``.
+        node_frequency_prefix: Optional two positive increasing frequencies
+            retaining a prior node grid's waveform cutoff convention when a
+            coarsened grid is reconstructed. This affects node reference and
+            proposal evaluation; native summary construction retains its own
+            original native-frequency prefix.
+        native_probe_parameters: Optional bank of one to nine likelihood-space
+            parameter dictionaries. With the JAX summary backend and supported
+            stock waveform, accumulate independent native likelihoods from the
+            same transferred chunks. Results are retained in
+            ``native_probe_results``; no extra native traversal is performed.
+            This adds bounded probe waveform workspace and compilation inside
+            summary construction. The default ``None`` adds no probe reducer.
         xg_plan: Internal capability created either after complete production
             receipt verification or by the isolated deterministic qualification
             builder. The latter does not authorize normal production use.
@@ -1244,6 +1447,11 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
     waveform_low_ref: dict[str, Complex[Array, " n_valid"]]
     waveform_high_ref: dict[str, Complex[Array, " n_valid"]]
     summary_data: dict[str, Complex[Array, "4 n_valid"]]
+
+    # Degree of the per-bin ratio polynomial.  A class-level default keeps
+    # benchmark subclasses that bypass ``__init__`` on the classic linear path.
+    interpolation_order: int = 1
+    phasor_moment_order: int = 0
 
     def __init__(
         self,
@@ -1268,7 +1476,44 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         ] = None,
         reference_chunk_size: int = 262_144,
         xg_plan: Optional[Union[_VerifiedXGPlan, _QualificationXGPlan]] = None,
+        interpolation_order: int = 1,
+        phasor_moment_order: int = 0,
+        phasor_time_anchors: Optional[Sequence[float]] = None,
+        phasor_approximation: str = "taylor",
+        zero_noise_summary=None,
+        reference_projection: str = "projected",
+        frequency_bin_edges: Optional[Sequence[float]] = None,
+        summary_backend: str = "numpy",
+        xg_evaluation_mode: str = "auto",
+        node_frequency_prefix: Optional[Sequence[float]] = None,
+        native_probe_parameters: Optional[Sequence[dict]] = None,
     ):
+        construction_started = time.perf_counter()
+        self._native_probe_bank = None
+        self.native_probe_parameters = None
+        self.native_probe_parameters_sha256 = None
+        self.native_probe_results = None
+        if xg_evaluation_mode not in {"auto", "baseline"}:
+            raise ValueError("xg_evaluation_mode must be auto or baseline")
+        self.node_frequency_prefix = None
+        if node_frequency_prefix is not None:
+            try:
+                prefix = np.asarray(node_frequency_prefix, dtype=np.float64)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "node_frequency_prefix must contain two finite positive increasing frequencies"
+                ) from error
+            if (
+                prefix.shape != (2,)
+                or not np.all(np.isfinite(prefix))
+                or not np.all(prefix > 0)
+                or not prefix[0] < prefix[1]
+            ):
+                raise ValueError(
+                    "node_frequency_prefix must contain two finite positive increasing frequencies"
+                )
+            self.node_frequency_prefix = tuple(map(float, prefix))
+            self._xg_node_frequency_prefix = jnp.asarray(prefix)
         super().__init__(detectors, waveform, fixed_parameters)
 
         # --- coerce marginalization inputs ---
@@ -1301,6 +1546,95 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
             raise ValueError("reference_chunk_size must be a positive integer")
         self.reference_chunk_size = int(reference_chunk_size)
         self.coefficient_builder = "numpy-segmented-v1"
+        if (
+            isinstance(interpolation_order, bool)
+            or not isinstance(interpolation_order, (int, np.integer))
+            or not 1 <= int(interpolation_order) <= _MAX_INTERPOLATION_ORDER
+        ):
+            raise ValueError(
+                "interpolation_order must be an integer between 1 and "
+                f"{_MAX_INTERPOLATION_ORDER}, got {interpolation_order!r}"
+            )
+        self.interpolation_order = int(interpolation_order)
+        if self.node_frequency_prefix is not None and self.interpolation_order < 2:
+            raise ValueError("node_frequency_prefix requires polynomial interpolation")
+        if self.interpolation_order > 1 and time_marginalization is not None:
+            raise ValueError(
+                "interpolation_order above 1 does not support time "
+                "marginalization: the direct-sum time grid assumes linear "
+                "bin-edge coefficients"
+            )
+        if (
+            isinstance(phasor_moment_order, bool)
+            or not isinstance(phasor_moment_order, (int, np.integer))
+            or not 0 <= int(phasor_moment_order) <= _MAX_PHASOR_MOMENT_ORDER
+        ):
+            raise ValueError(
+                "phasor_moment_order must be an integer between 0 and "
+                f"{_MAX_PHASOR_MOMENT_ORDER}, got {phasor_moment_order!r}"
+            )
+        self.phasor_moment_order = int(phasor_moment_order)
+        if phasor_approximation not in {"taylor", "chebyshev"}:
+            raise ValueError("phasor_approximation must be taylor or chebyshev")
+        self.phasor_approximation = phasor_approximation
+        if reference_projection not in {"projected", "carrier"}:
+            raise ValueError("reference_projection must be projected or carrier")
+        self.reference_projection = reference_projection
+        if reference_projection == "carrier":
+            from jimgw.core.single_event.dominant_mode import (
+                DominantModeTimeCachedWaveform,
+            )
+
+            if self.interpolation_order < 2 or self.phasor_moment_order == 0:
+                raise ValueError("carrier reference requires polynomial phasor moments")
+            if not isinstance(waveform, DominantModeTimeCachedWaveform):
+                DominantModeTimeCachedWaveform(waveform)
+        self.zero_noise_summary = zero_noise_summary
+        if summary_backend not in {"numpy", "jax"}:
+            raise ValueError("summary_backend must be numpy or jax")
+        if summary_backend == "jax" and (
+            self.phasor_moment_order == 0 or zero_noise_summary is not None
+        ):
+            raise ValueError(
+                "JAX summary construction requires native polynomial phasor moments"
+            )
+        if summary_backend == "jax" and not jax.config.jax_enable_x64:
+            raise ValueError("JAX summary construction requires 64-bit precision")
+        self.summary_backend = summary_backend
+        if native_probe_parameters is not None and summary_backend != "jax":
+            raise ValueError(
+                "native probes require the existing JAX native summary stream"
+            )
+        self.summary_construction_diagnostics = {}
+        if zero_noise_summary is not None and self.phasor_moment_order == 0:
+            raise ValueError("zero_noise_summary requires polynomial phasor moments")
+        if self.phasor_moment_order > 0:
+            self.coefficient_builder = (
+                zero_noise_summary.method
+                if zero_noise_summary is not None
+                else "jax-native-phasor-v1"
+                if self.summary_backend == "jax"
+                else "numpy-bincount-phasor-v2"
+            )
+        self.phasor_time_anchors = validate_time_anchors(phasor_time_anchors)
+        if self.phasor_approximation == "chebyshev" and (
+            self.phasor_moment_order != 16
+            or self.phasor_time_anchors is None
+            or len(self.phasor_time_anchors) < 2
+            or zero_noise_summary is not None
+        ):
+            raise ValueError(
+                "chebyshev phasor approximation requires native degree-16 moments "
+                "and at least two time anchors"
+            )
+        self.phasor_data_moments: dict[str, Array] = {}
+        if self.phasor_time_anchors is not None and self.phasor_moment_order == 0:
+            raise ValueError("phasor_time_anchors require nonzero phasor_moment_order")
+        if self.phasor_moment_order > 0 and self.interpolation_order == 1:
+            raise ValueError(
+                "phasor_moment_order requires interpolation_order above 1: the "
+                "analytic t_c phasor dresses the polynomial-ratio moments"
+            )
 
         self.trigger_time = trigger_time
         self.gmst = compute_gmst(self.trigger_time)
@@ -1431,6 +1765,15 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
             f_max,
         )
 
+        if native_probe_parameters is not None:
+            from jimgw.core.single_event.native_probe import NativeProbeBank
+
+            self._native_probe_bank = NativeProbeBank(
+                self, waveform, native_probe_parameters
+            )
+            self.native_probe_parameters = self._native_probe_bank.parameters
+            self.native_probe_parameters_sha256 = self._native_probe_bank.parameter_hash
+
         # --- heterodyne setup ---
         logger.info("Initializing heterodyned likelihood..")
 
@@ -1498,9 +1841,33 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
             reference_waveform,
             self.reference_parameters,
             self.reference_chunk_size,
+            **(
+                {"frequency_bin_edges": frequency_bin_edges}
+                if frequency_bin_edges is not None
+                else {}
+            ),
         )
         self._set_frequency_arrays(planned_edges)
-        self.bin_edges_sha256 = self._bin_edges_sha256(self.freq_grid_edges)
+        if self.phasor_time_anchors is not None and (
+            len(self.phasor_time_anchors)
+            * self.n_bins
+            * (self.interpolation_order + self.phasor_moment_order + 1)
+            > _MAX_DIRECT_SUM_PHASOR_ELEMENTS
+        ):
+            raise ValueError("phasor_time_anchors exceed the bounded moment-bank size")
+        self.bin_edges_sha256 = self._bin_edges_sha256(
+            self.freq_grid_edges,
+            interpolation_order=self.interpolation_order,
+            phasor_moment_order=self.phasor_moment_order,
+            phasor_time_anchors=self.phasor_time_anchors,
+            phasor_approximation=self.phasor_approximation,
+            summary_builder_sha256=(
+                zero_noise_summary.contract_sha256
+                if zero_noise_summary is not None
+                else None
+            ),
+            reference_projection=self.reference_projection,
+        )
         if xg_plan is not None and self.bin_edges_sha256 != xg_plan.bin_edges_sha256:
             raise ValueError(
                 "XG qualification bin edges do not match the retained reference support"
@@ -1508,11 +1875,11 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         masked_freq_grid = self.freq_grid_edges
 
         for detector in self.detectors:
-            waveform_low_ref = detector.fd_response(
-                self.freq_grid_low, hpc_low, self.reference_parameters
+            waveform_low_ref = self._project_reference(
+                detector, self.freq_grid_low, hpc_low
             )
-            waveform_high_ref = detector.fd_response(
-                self.freq_grid_high, hpc_high, self.reference_parameters
+            waveform_high_ref = self._project_reference(
+                detector, self.freq_grid_high, hpc_high
             )
             self._validate_reference_projection(
                 detector.name,
@@ -1529,19 +1896,193 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
             self.waveform_low_ref[detector.name] = waveform_low_ref
             self.waveform_high_ref[detector.name] = waveform_high_ref
 
+        self.waveform_node_ref: dict[str, Complex[Array, "n_node n_bins"]] = {}
+        if self.interpolation_order > 1:
+            node_frequencies = self.freq_grid_node_flat
+            if self.node_frequency_prefix is not None:
+                node_frequencies = jnp.concatenate(
+                    (self._xg_node_frequency_prefix, node_frequencies)
+                )
+            hpc_nodes = reference_waveform(node_frequencies, self.reference_parameters)
+            if self.node_frequency_prefix is not None:
+                hpc_nodes = jax.tree.map(lambda value: value[2:], hpc_nodes)
+            for detector in self.detectors:
+                node_ref = self._project_reference(
+                    detector, self.freq_grid_node_flat, hpc_nodes
+                )
+                self._validate_reference_projection(
+                    detector.name,
+                    hpc_nodes,
+                    node_ref,
+                    "node",
+                )
+                self.waveform_node_ref[detector.name] = jnp.reshape(
+                    node_ref, (self.interpolation_order + 1, self.n_bins)
+                )
+
         if time_marginalization is not None:
             self._init_direct_sum_time_marginalization(time_marginalization)
 
-        for detector in self.detectors:
-            self.summary_data[detector.name] = self._compute_reference_coefficients(
-                detector,
-                reference_waveform,
-                masked_freq_grid,
+        # With phasor_moment_order M > 0 the data moments are needed up to
+        # order K + M (the Taylor dressing of the t_c phasor mixes A_{k+m}
+        # into A_k), while the reference-norm moments stay at order 2K.
+        moment_order = self.interpolation_order + self.phasor_moment_order
+        self.summary_moments: dict[str, tuple[Array, Array]] = {}
+        device_summaries = None
+        if self.summary_backend == "jax":
+            devices = jax.local_devices()
+            workers = min(len(self.detectors), len(devices))
+
+            # Each worker owns one detector's independent reductions. Only
+            # the small final summaries return to the likelihood's device.
+            def construct(item):
+                index, detector = item
+                return self._compute_reference_coefficients_jax(
+                    detector,
+                    reference_waveform,
+                    masked_freq_grid,
+                    interpolation_order=moment_order,
+                    norm_order=2 * self.interpolation_order,
+                    device=devices[index % workers],
+                )
+
+            if workers > 1:
+
+                def construct_on_device(items):
+                    return [
+                        (index, construct((index, detector)))
+                        for index, detector in items
+                    ]
+
+                assignments = [
+                    list(enumerate(self.detectors))[worker::workers]
+                    for worker in range(workers)
+                ]
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    completed = [
+                        item
+                        for group in pool.map(construct_on_device, assignments)
+                        for item in group
+                    ]
+                device_summaries = [value for _, value in sorted(completed)]
+            else:
+                device_summaries = [
+                    construct(item) for item in enumerate(self.detectors)
+                ]
+        for detector_index, detector in enumerate(self.detectors):
+            if zero_noise_summary is not None:
+                moments = zero_noise_summary.build(self, detector, reference_waveform)
+                a, b = jnp.asarray(moments.data), jnp.asarray(moments.norm)
+                self.summary_moments[detector.name] = (a[0], b)
+                self.summary_data[detector.name] = jnp.concatenate((a[0], b))
+                if self.phasor_time_anchors is not None:
+                    self.phasor_data_moments[detector.name] = a
+                self.summary_construction_diagnostics[detector.name] = {
+                    "evaluations": moments.evaluations,
+                    "panels": moments.accepted_panels,
+                    "estimated_moment_error": moments.estimated_error,
+                }
+                continue
+            moment_kwargs = (
+                {"norm_order": 2 * self.interpolation_order}
+                if self.phasor_moment_order > 0
+                else {}
             )
+            if device_summaries is None:
+                summary = self._compute_reference_coefficients(
+                    detector,
+                    reference_waveform,
+                    masked_freq_grid,
+                    interpolation_order=moment_order,
+                    **moment_kwargs,
+                )
+            else:
+                summary, bank, diagnostics = device_summaries[detector_index]
+                # Host-resident grids have no device; summaries then live on
+                # the default device like every other likelihood constant.
+                destination = (
+                    next(iter(self.frequencies.devices()))
+                    if hasattr(self.frequencies, "devices")
+                    else jax.devices()[0]
+                )
+                summary = jax.device_put(summary, destination)
+                if self.phasor_time_anchors is not None:
+                    self.phasor_data_moments[detector.name] = jax.device_put(
+                        bank, destination
+                    )
+                self.summary_construction_diagnostics[detector.name] = diagnostics
+            self.summary_data[detector.name] = summary
+            if self.interpolation_order > 1:
+                split = moment_order + 1
+                self.summary_moments[detector.name] = (
+                    summary[:split],
+                    summary[split : split + 2 * self.interpolation_order + 1],
+                )
+        if self.phasor_moment_order > 0:
+            if "t_c" not in self.reference_parameters:
+                raise ValueError(
+                    "phasor_moment_order requires t_c in the reference parameters"
+                )
+            self._phasor_reference_t_c = jnp.asarray(
+                self.reference_parameters["t_c"], dtype=jnp.float64
+            )
+            self._phasor_reference_delay = {}
+            reference = self.reference_parameters
+            for detector in self.detectors:
+                if all(key in reference for key in ("ra", "dec", "gmst")):
+                    self._phasor_reference_delay[detector.name] = jnp.asarray(
+                        detector.delay_from_geocenter(
+                            reference["ra"], reference["dec"], reference["gmst"]
+                        ),
+                        dtype=jnp.float64,
+                    )
+                else:
+                    self._phasor_reference_delay[detector.name] = jnp.zeros(())
+
+        from jimgw.core.single_event.xg_evaluation import configure_xg_evaluation
+
+        if self._native_probe_bank is not None:
+            self.native_probe_results = self._native_probe_bank.results(
+                self.summary_construction_diagnostics
+            )
+        configure_xg_evaluation(self, reference_waveform, mode=xg_evaluation_mode)
+        jax.block_until_ready((self.summary_data, self.phasor_data_moments))
+        self.construction_diagnostics = {
+            "summary_backend": self.summary_backend,
+            "evaluation": dict(self.evaluation_diagnostics),
+            "wall_seconds_including_compilation": time.perf_counter()
+            - construction_started,
+            "detectors": dict(self.summary_construction_diagnostics),
+        }
 
     # --- direct evaluation ---
 
+    def build_extrinsic_summary(self, params, waveform_cache=None):
+        """Build a conditional summary using the selected evaluation algebra."""
+        from jimgw.core.single_event.heterodyne_extrinsics import (
+            build_extrinsic_summary,
+        )
+
+        if getattr(self, "_xg_fast_evaluator", None) is not None:
+            return self._xg_fast_evaluator.build_extrinsic_summary(
+                params, waveform_cache
+            )
+        return build_extrinsic_summary(self, params, waveform_cache)
+
+    def _project_reference(self, detector, frequencies, polarizations):
+        options = (
+            {"apply_antenna": False}
+            if getattr(self, "reference_projection", "projected") == "carrier"
+            else {}
+        )
+        return detector.fd_response(
+            frequencies, polarizations, self.reference_parameters, **options
+        )
+
     def _evaluate(self, params: dict[str, Float]) -> FloatScalar:
+        if self.interpolation_order > 1:
+            waveform_sky_nodes = self.waveform(self.freq_grid_node_flat, params)
+            return self._polynomial_likelihood(params, waveform_sky_nodes)
         waveform_sky_low = self.waveform(self.freq_grid_low, params)
         waveform_sky_high = self.waveform(self.freq_grid_high, params)
         return self._likelihood(params, waveform_sky_low, waveform_sky_high)
@@ -1557,6 +2098,10 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         so ``d_L`` is not a cache dependency; otherwise ``d_L`` is a
         dependency like any other waveform parameter.
         """
+        if self.interpolation_order > 1:
+            return {
+                "nodes": self._waveform_sky_for_cache(self.freq_grid_node_flat, params)
+            }
         return {
             "low": self._waveform_sky_for_cache(self.freq_grid_low, params),
             "high": self._waveform_sky_for_cache(self.freq_grid_high, params),
@@ -1568,6 +2113,11 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         waveform_cache: dict[str, dict[str, Complex[Array, " n_bins"]]],
     ) -> FloatScalar:
         """Core likelihood evaluation from a pre-generated waveform cache."""
+        if self.interpolation_order > 1:
+            waveform_sky_nodes = self._waveform_sky_from_cache(
+                self.freq_grid_node_flat, waveform_cache["nodes"], params
+            )
+            return self._polynomial_likelihood(params, waveform_sky_nodes)
         waveform_sky_low = self._waveform_sky_from_cache(
             self.freq_grid_low, waveform_cache["low"], params
         )
@@ -1575,6 +2125,147 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
             self.freq_grid_high, waveform_cache["high"], params
         )
         return self._likelihood(params, waveform_sky_low, waveform_sky_high)
+
+    def _rigid_time_shift(self, detector: Detector, params: dict[str, Float]) -> Float:
+        """Rigid arrival-time shift of ``params`` relative to the reference.
+
+        ``t_c`` plus the geocentre delay of the detector at the trigger epoch
+        for the parameter sky position, minus the same for the reference.
+        The slow within-signal variation of the delay (rotation, orbit,
+        emission-time GMST) stays in the node ratio.
+        """
+        t_c = jnp.asarray(params["t_c"], dtype=jnp.float64)
+        time_shift = t_c - self._phasor_reference_t_c
+        if "ra" in params and "dec" in params and "gmst" in params:
+            delay = detector.delay_from_geocenter(
+                params["ra"], params["dec"], params["gmst"]
+            )
+            reference_delay = self._phasor_reference_delay[detector.name]
+            time_shift = time_shift + (delay - reference_delay)
+        return time_shift
+
+    # --- degree-K polynomial ratio core ---
+
+    def _polynomial_likelihood(
+        self,
+        params: dict[str, Float],
+        waveform_sky_nodes: dict[str, Complex[Array, " n_node_total"]],
+    ) -> FloatScalar:
+        """Contract a degree-K per-bin ratio polynomial with summary moments.
+
+        Inside bin ``b`` the waveform ratio is modelled as
+        ``r(u) = sum_k c_k u**k`` with ``u = (f - f_c) / half_width`` and the
+        coefficients solved from the K+1 Lobatto nodes.  With the moments
+        ``A_k = sum d h_ref* u**k / S`` and ``B_k = sum |h_ref|^2 u**k / S``
+        the inner products are ``<d|h> = sum_k conj(c_k) A_k`` and
+        ``<h|h> = sum_{k,l} c_k conj(c_l) B_{k+l}``.  Order 1 reproduces the
+        classic r0/r1 relative-binning formulas; higher orders remove the
+        second-order phasor curvature error that scales as (bins)^-2.
+        """
+
+        if getattr(self, "_xg_fast_evaluator", None) is not None:
+            return self._xg_fast_evaluator.evaluate(params, waveform_sky_nodes)
+
+        order = self.interpolation_order
+        shape = (order + 1, self.n_bins)
+        log_likelihood: FloatScalar = jnp.zeros(())
+        complex_d_inner_h: ComplexScalar = jnp.zeros((), dtype=jnp.complex128)
+
+        phasor_order = self.phasor_moment_order
+        phasor_approximation = getattr(self, "phasor_approximation", "taylor")
+
+        for detector in self.detectors:
+            projected = detector.fd_response(
+                self.freq_grid_node_flat, waveform_sky_nodes, params
+            )
+            ratio = (
+                jnp.reshape(projected, shape) / self.waveform_node_ref[detector.name]
+            )
+            moments_a, moments_b = self.summary_moments[detector.name]
+            if phasor_order > 0:
+                # The rigid time shift (t_c plus the sky-dependent geocentre
+                # delay at the trigger) multiplies the ratio by
+                # exp(-2 pi i f dt).  Remove it at the nodes, leaving the
+                # smooth, slowly winding remainder for the polynomial, and
+                # put it back analytically in the data moments: with
+                # f = f_c + w u inside a bin,
+                # exp(2 pi i f dt) = exp(2 pi i f_c dt) sum_m (i theta)^m u^m / m!
+                # with theta = 2 pi w dt, so A_k(dt) = e^{2 pi i f_c dt}
+                # sum_m (i theta)^m / m! A_{k+m}.  <h|h> carries no phasor.
+                time_shift = self._rigid_time_shift(detector, params)
+                residual_shift = time_shift
+                if self.phasor_time_anchors is not None:
+                    anchors = jnp.asarray(self.phasor_time_anchors)
+                    anchor_index = jnp.argmin(jnp.abs(anchors - time_shift))
+                    moments_a = self.phasor_data_moments[detector.name][anchor_index]
+                    valid = (time_shift >= anchors[0]) & (time_shift <= anchors[-1])
+                    moments_a = jnp.where(valid, moments_a, jnp.nan)
+                    residual_shift = time_shift - anchors[anchor_index]
+                node_angle = (2.0 * jnp.pi) * self.freq_grid_nodes * time_shift
+                node_phasor = jax.lax.complex(jnp.cos(node_angle), jnp.sin(node_angle))
+                centre_angle = (2.0 * jnp.pi) * self.freq_grid_centres * residual_shift
+                centre_phasor = jax.lax.complex(
+                    jnp.cos(centre_angle), jnp.sin(centre_angle)
+                )
+                i_theta = (
+                    1j * (2.0 * jnp.pi) * self.freq_grid_half_widths * residual_shift
+                )
+                taylor_terms = [jnp.ones_like(i_theta)]
+                for m in range(1, phasor_order + 1):
+                    if phasor_approximation == "taylor":
+                        taylor_terms.append(taylor_terms[-1] * i_theta / m)
+                    else:
+                        taylor_terms.append(taylor_terms[-1] * i_theta)
+                if phasor_approximation == "chebyshev":
+                    taylor_terms = [
+                        term * self._phasor_polynomial_coefficients[m]
+                        for m, term in enumerate(taylor_terms)
+                    ]
+                ratio = ratio * node_phasor
+                moments_a = centre_phasor * jnp.stack(
+                    [
+                        sum(
+                            taylor_terms[m] * moments_a[k + m]
+                            for m in range(phasor_order + 1)
+                        )
+                        for k in range(order + 1)
+                    ]
+                )
+            coefficients = self._vandermonde_inverse @ ratio
+            conj_coefficients = jnp.conj(coefficients)
+
+            d_inner_h = jnp.sum(conj_coefficients * moments_a)
+            h_inner_h: FloatScalar = jnp.zeros(())
+            real_coefficients, imag_coefficients = coefficients.real, coefficients.imag
+            for k in range(order + 1):
+                h_inner_h += jnp.sum(
+                    (real_coefficients[k] ** 2 + imag_coefficients[k] ** 2)
+                    * moments_b[2 * k]
+                ).real
+                # B[k + m] is symmetric. Pair the two conjugate products
+                # before multiplication, avoiding imaginary terms that cancel.
+                for m in range(k):
+                    h_inner_h += (
+                        2
+                        * jnp.sum(
+                            (
+                                real_coefficients[k] * real_coefficients[m]
+                                + imag_coefficients[k] * imag_coefficients[m]
+                            )
+                            * moments_b[k + m]
+                        ).real
+                    )
+
+            if self.phase_marginalization:
+                complex_d_inner_h += d_inner_h
+                log_likelihood += -0.5 * h_inner_h
+            else:
+                log_likelihood += (d_inner_h - 0.5 * h_inner_h).real
+
+        if self.phase_marginalization:
+            log_likelihood += log_i0(jnp.absolute(complex_d_inner_h))
+
+        return log_likelihood
 
     # --- shared likelihood core ---
 
@@ -2156,15 +2847,125 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         self.freq_grid_high = frequency_edges[1:]
         self.n_bins = len(frequency_edges) - 1
         self.bin_widths = self.freq_grid_high - self.freq_grid_low
+        self._set_interpolation_nodes()
 
     @staticmethod
-    def _bin_edges_sha256(frequency_edges: Float[Array, " n_bin+1"]) -> str:
-        """Hash canonical little-endian float64 XG bin edges."""
+    def _lobatto_nodes(order: int) -> np.ndarray:
+        """Return the K+1 Gauss-Lobatto nodes on [-1, 1] for a degree-K fit."""
 
+        if order == 1:
+            return np.asarray([-1.0, 1.0])
+        legendre = np.zeros(order + 1)
+        legendre[order] = 1.0
+        interior = np.polynomial.legendre.legroots(
+            np.polynomial.legendre.legder(legendre)
+        )
+        return np.concatenate(([-1.0], np.sort(np.real(interior)), [1.0]))
+
+    def _set_interpolation_nodes(self) -> None:
+        """Place the ratio-fit nodes in every bin and cache the Vandermonde solve."""
+
+        order = int(getattr(self, "interpolation_order", 1))
+        nodes = self._lobatto_nodes(order)
+        self._vandermonde_inverse = jnp.asarray(
+            np.linalg.inv(np.vander(nodes, order + 1, increasing=True))
+        )
+        centres = 0.5 * (self.freq_grid_low + self.freq_grid_high)
+        half_widths = 0.5 * self.bin_widths
+        self.freq_grid_centres = centres
+        self.freq_grid_half_widths = half_widths
+        self.freq_grid_nodes = (
+            centres[None, :] + half_widths[None, :] * jnp.asarray(nodes)[:, None]
+        )
+        self.freq_grid_node_flat = jnp.reshape(self.freq_grid_nodes, (-1,))
+        if getattr(self, "phasor_approximation", "taylor") == "chebyshev":
+            from jimgw.core.single_event.heterodyne_phasor import (
+                phasor_polynomial_coefficients,
+            )
+
+            coefficients, diagnostics = phasor_polynomial_coefficients(
+                np.asarray(half_widths),
+                self.phasor_time_anchors,
+                self.phasor_moment_order,
+                approximation="chebyshev",
+            )
+            self._phasor_polynomial_coefficients = jnp.asarray(coefficients)
+            self.phasor_approximation_diagnostics = diagnostics
+
+    @staticmethod
+    def _bin_edges_sha256(
+        frequency_edges: Float[Array, " n_bin+1"],
+        *,
+        interpolation_order: int = 1,
+        phasor_moment_order: int = 0,
+        phasor_time_anchors: Optional[Sequence[float]] = None,
+        summary_builder_sha256: Optional[str] = None,
+        reference_projection: str = "projected",
+        phasor_approximation: str = "taylor",
+    ) -> str:
+        """Hash canonical little-endian float64 XG bin edges.
+
+        Orders above 1 are folded into the digest so a qualification receipt
+        binds the per-bin ratio model as well as the edges; order 1 keeps the
+        historical digest unchanged.  A nonzero phasor moment order is bound
+        the same way, since it changes which summary moments the likelihood
+        contracts.
+        """
+
+        if (
+            isinstance(interpolation_order, bool)
+            or not isinstance(interpolation_order, (int, np.integer))
+            or int(interpolation_order) < 1
+        ):
+            raise ValueError("interpolation_order must be a positive integer")
         bin_edges = np.asarray(jax.device_get(frequency_edges), dtype="<f8")
         bin_digest = hashlib.sha256()
         bin_digest.update(b"jimgw-xg-bin-edges-v1\0float64-le\0")
         bin_digest.update(bin_edges.tobytes(order="C"))
+        if int(interpolation_order) != 1:
+            bin_digest.update(
+                f"\0interpolation-order={int(interpolation_order)}".encode("ascii")
+            )
+        if (
+            isinstance(phasor_moment_order, bool)
+            or not isinstance(phasor_moment_order, (int, np.integer))
+            or int(phasor_moment_order) < 0
+        ):
+            raise ValueError("phasor_moment_order must be a non-negative integer")
+        if int(phasor_moment_order) != 0:
+            bin_digest.update(
+                f"\0phasor-moment-order={int(phasor_moment_order)}".encode("ascii")
+            )
+        if phasor_approximation not in {"taylor", "chebyshev"}:
+            raise ValueError("phasor_approximation must be taylor or chebyshev")
+        if phasor_approximation == "chebyshev":
+            from jimgw.core.single_event.heterodyne_phasor import (
+                CHEBYSHEV_PHASOR_REVISION,
+            )
+
+            if int(phasor_moment_order) != 16:
+                raise ValueError("chebyshev phasor approximation requires order 16")
+            bin_digest.update(b"\0phasor-approximation\0")
+            bin_digest.update(CHEBYSHEV_PHASOR_REVISION.encode("ascii"))
+        anchors = validate_time_anchors(phasor_time_anchors)
+        if anchors is not None:
+            if phasor_moment_order == 0:
+                raise ValueError(
+                    "phasor_time_anchors require nonzero phasor_moment_order"
+                )
+            bin_digest.update(b"\0phasor-time-anchors-v1\0")
+            bin_digest.update(np.asarray(anchors, dtype="<f8").tobytes())
+        if summary_builder_sha256 is not None:
+            if len(summary_builder_sha256) != 64 or any(
+                c not in "0123456789abcdef" for c in summary_builder_sha256
+            ):
+                raise ValueError("summary_builder_sha256 must be a SHA-256 digest")
+            bin_digest.update(b"\0summary-builder-v1\0")
+            bin_digest.update(summary_builder_sha256.encode("ascii"))
+        if reference_projection not in {"projected", "carrier"}:
+            raise ValueError("reference_projection must be projected or carrier")
+        if reference_projection != "projected":
+            bin_digest.update(b"\0carrier-reference-v1\0")
         return bin_digest.hexdigest()
 
     @classmethod
@@ -2175,6 +2976,8 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         reference_waveform: Waveform,
         reference_parameters: Mapping[str, Any],
         reference_chunk_size: int,
+        *,
+        frequency_bin_edges: Optional[Sequence[float]] = None,
     ) -> tuple[
         Float[Array, " n_valid+1"],
         dict[str, Array],
@@ -2182,7 +2985,21 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
     ]:
         """Plan retained edges and endpoint waveforms without summary construction."""
 
-        frequency_edges = cls._make_binning_scheme(frequencies, n_bins=n_bins)
+        if frequency_bin_edges is None:
+            frequency_edges = cls._make_binning_scheme(frequencies, n_bins=n_bins)
+        else:
+            edges = np.asarray(frequency_bin_edges, dtype=float)
+            if (
+                edges.shape != (n_bins + 1,)
+                or np.any(~np.isfinite(edges))
+                or np.any(np.diff(edges) <= 0)
+                or edges[0] != float(frequencies[0])
+                or edges[-1] != float(frequencies[-1])
+            ):
+                raise ValueError(
+                    "frequency_bin_edges must be increasing, match n_bins and span the full frequency band"
+                )
+            frequency_edges = jnp.asarray(edges)
         support = cls._find_reference_frequency_support_on_grid(
             frequencies,
             reference_waveform,
@@ -2229,7 +3046,9 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         detector: Detector,
         h_ref: Complex[Array, " n_freq"],
         f_bins: Float[Array, " n_valid+1"],
-    ) -> Complex[Array, "4 n_valid"]:
+        *,
+        interpolation_order: int = 1,
+    ) -> Complex[Array, "n_summary n_valid"]:
         """Compute summaries with one bin-index array, never a dense mask."""
 
         summary = HeterodynedTransientLikelihoodFD._segmented_coefficient_sums(
@@ -2238,6 +3057,7 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
             frequencies=np.asarray(jax.device_get(detector.sliced_frequencies)),
             reference=np.asarray(jax.device_get(h_ref)),
             bins=np.asarray(jax.device_get(f_bins)),
+            interpolation_order=interpolation_order,
         )
         return jnp.asarray((4.0 / float(detector.duration)) * summary)
 
@@ -2246,45 +3066,360 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         detector: Detector,
         reference_waveform: Waveform,
         f_bins: Float[Array, " n_valid+1"],
-    ) -> Complex[Array, "4 n_valid"]:
+        *,
+        interpolation_order: int = 1,
+        norm_order: Optional[int] = None,
+    ) -> Complex[Array, "n_summary n_valid"]:
         """Stream fixed-reference summaries in bounded frequency chunks."""
 
         bins = np.asarray(jax.device_get(f_bins))
+        n_summary = (
+            int(interpolation_order) + int(norm_order) + 2
+            if norm_order is not None
+            else (4 if interpolation_order == 1 else 3 * int(interpolation_order) + 2)
+        )
         n_frequencies = len(detector.sliced_frequencies)
-        if n_frequencies <= self.reference_chunk_size:
+        if n_frequencies <= self.reference_chunk_size and norm_order is None:
             frequencies = detector.sliced_frequencies
             polarizations = reference_waveform(
                 frequencies,
                 self.reference_parameters,
             )
-            reference = detector.fd_response(
-                frequencies,
-                polarizations,
+            reference = self._project_reference(detector, frequencies, polarizations)
+            if interpolation_order == 1:
+                # Keep the classic call shape so overrides with the original
+                # signature (benchmarks, test doubles) keep working.
+                return self._compute_coefficients(detector, reference, f_bins)
+            return self._compute_coefficients(
+                detector,
+                reference,
+                f_bins,
+                interpolation_order=interpolation_order,
+            )
+
+        summary = np.zeros((n_summary, len(bins) - 1), dtype=np.complex128)
+        anchors = getattr(self, "phasor_time_anchors", None)
+        bank = (
+            None
+            if anchors is None
+            else np.zeros(
+                (len(anchors), interpolation_order + 1, len(bins) - 1),
+                dtype=np.complex128,
+            )
+        )
+
+        # Two native samples are prepended to every waveform call so backends
+        # that read the grid spacing from their first two inputs (ripple) see
+        # the true spacing even on a one-sample tail chunk.
+        prefix = jnp.asarray(np.asarray(detector.sliced_frequencies[:2]))
+
+        def project_chunk(frequencies):
+            sky = reference_waveform(
+                jnp.concatenate((prefix, jnp.asarray(frequencies))),
                 self.reference_parameters,
             )
-            return self._compute_coefficients(detector, reference, f_bins)
+            sky = jax.tree.map(lambda value: value[2:], sky)
+            return self._project_reference(detector, frequencies, sky)
 
-        summary = np.zeros((4, len(bins) - 1), dtype=np.complex128)
+        # One compiled operation per full/tail shape, with frequencies as an
+        # argument. Avoid thousands of eager operations and device round trips.
+        project = jax.jit(project_chunk) if norm_order is not None else project_chunk
         for start in range(0, n_frequencies, self.reference_chunk_size):
             stop = min(start + self.reference_chunk_size, n_frequencies)
-            frequencies = detector.sliced_frequencies[start:stop]
-            polarizations = reference_waveform(
-                frequencies,
-                self.reference_parameters,
+            frequencies = jnp.asarray(
+                np.asarray(detector.sliced_frequencies[start:stop])
             )
-            reference = detector.fd_response(
-                frequencies,
-                polarizations,
-                self.reference_parameters,
-            )
+            reference = project(frequencies)
+            host_f = np.asarray(jax.device_get(frequencies))
+            host_data = np.asarray(jax.device_get(detector.sliced_fd_data[start:stop]))
+            host_psd = np.asarray(jax.device_get(detector.sliced_psd[start:stop]))
+            host_reference = np.asarray(jax.device_get(reference))
             summary += self._segmented_coefficient_sums(
-                data=np.asarray(jax.device_get(detector.sliced_fd_data[start:stop])),
-                psd=np.asarray(jax.device_get(detector.sliced_psd[start:stop])),
-                frequencies=np.asarray(jax.device_get(frequencies)),
-                reference=np.asarray(jax.device_get(reference)),
+                data=host_data,
+                psd=host_psd,
+                frequencies=host_f,
+                reference=host_reference,
                 bins=bins,
+                interpolation_order=interpolation_order,
+                **({"norm_order": norm_order} if norm_order is not None else {}),
+            )
+            if bank is not None:
+                for i, anchor in enumerate(anchors):
+                    a, _ = polynomial_moments(
+                        host_f,
+                        host_data * np.exp(2j * np.pi * host_f * anchor),
+                        host_psd,
+                        host_reference,
+                        bins,
+                        interpolation_order,
+                        0,
+                    )
+                    bank[i] += a
+        if bank is not None:
+            self.phasor_data_moments[detector.name] = jnp.asarray(
+                (4.0 / float(detector.duration)) * bank
             )
         return jnp.asarray((4.0 / float(detector.duration)) * summary)
+
+    def _compute_reference_coefficients_jax(
+        self,
+        detector,
+        reference_waveform,
+        f_bins,
+        *,
+        interpolation_order,
+        norm_order,
+        device,
+    ):
+        """Fuse reference projection and native overlap reductions on device.
+
+        One compiled executable per detector and reducer: every chunk,
+        including the tail, is padded to one memory-budgeted chunk size, and every
+        tile descriptor to one count planned over the whole stream up front.
+        Chunks are moved to the device from wherever the detector keeps them
+        (host views or device arrays); the stream is never copied whole. Each
+        chunk is checked where stored against the native grid ``k/duration``;
+        native chunks use the bin-aligned GEMM reducer with a deterministic
+        combine, others the generic segmented reducer, compiled only if used.
+        The first two native frequencies are prepended to waveform calls so
+        spacing-reading backends see the true spacing on a padded tail.
+
+        Optional independent native probes consume these same transferred
+        chunks in one additional compiled reducer per detector. Their small
+        compensated sums and validity flags join synchronization before input
+        pages are released; no second native-input traversal is made.
+        """
+        from jimgw.core.single_event.heterodyne_summary import compiled_summary_chunk
+        from jimgw.core.single_event.heterodyne_summary_tiles import (
+            compiled_summary_tiles,
+        )
+        from jimgw.core.single_event.native_storage import release_mapped_pages
+
+        started = time.perf_counter()
+        n_frequencies = len(detector.sliced_frequencies)
+        anchors_host = self.phasor_time_anchors
+        n_anchors = 0 if anchors_host is None else len(anchors_host)
+        chunk_size = min(n_frequencies, self.reference_chunk_size)
+        n_bins = len(f_bins) - 1
+        duration = float(detector.duration)
+        first_native_index = max(
+            0, round(float(detector.sliced_frequencies[0]) * duration)
+        )
+        bins_host = np.asarray(f_bins)
+        # Powers, real/imaginary anchor products and one norm plane.
+        planes = max(interpolation_order, norm_order) + 2 * (n_anchors + 1) + 2
+        planner, chunk_size, padded_tiles, padded_local, matrix_elements = (
+            _summary_tile_layout(
+                bins_host,
+                duration,
+                first_native_index,
+                n_frequencies,
+                chunk_size,
+                planes,
+            )
+        )
+        tile_size = planner.tile_size
+        chunk_starts = range(0, n_frequencies, chunk_size)
+
+        with jax.default_device(device):
+            bins = jax.device_put(np.asarray(f_bins, dtype=np.float64), device)
+            anchors = jax.device_put(
+                np.asarray(
+                    [] if anchors_host is None else anchors_host, dtype=np.float64
+                ),
+                device,
+            )
+            prefix = jax.device_put(detector.sliced_frequencies[:2], device)
+            total = jnp.zeros(
+                (interpolation_order + norm_order + 2, n_bins), dtype=jnp.complex128
+            )
+            bank = jnp.zeros(
+                (n_anchors, interpolation_order + 1, n_bins), dtype=jnp.complex128
+            )
+            probe_bank = getattr(self, "_native_probe_bank", None)
+            probe_state = (
+                None if probe_bank is None else probe_bank.initial_state(device)
+            )
+            probe_reduce = (
+                None
+                if probe_bank is None
+                else probe_bank.make_reducer(detector, device)
+            )
+
+            def project(frequencies):
+                sky = reference_waveform(
+                    jnp.concatenate((prefix, frequencies)), self.reference_parameters
+                )
+                sky = jax.tree.map(lambda value: value[2:], sky)
+                return self._project_reference(detector, frequencies, sky)
+
+            @jax.jit
+            def accumulate_tiles(
+                frequencies,
+                data,
+                psd,
+                total,
+                bank,
+                starts,
+                lengths,
+                bin_ids,
+                tile_local,
+                local_ids,
+            ):
+                a, b, anchored = compiled_summary_tiles(
+                    frequencies,
+                    data,
+                    psd,
+                    project(frequencies),
+                    bins,
+                    anchors,
+                    starts,
+                    lengths,
+                    bin_ids,
+                    tile_size=tile_size,
+                    data_order=interpolation_order,
+                    norm_order=norm_order,
+                    tile_local=tile_local,
+                    local_bins=local_ids,
+                )
+                return total + jnp.concatenate((a, b), axis=0), bank + anchored
+
+            @jax.jit
+            def accumulate_segmented(frequencies, data, psd, total, bank):
+                a, b, anchored = compiled_summary_chunk(
+                    frequencies,
+                    data,
+                    psd,
+                    project(frequencies),
+                    bins,
+                    anchors,
+                    data_order=interpolation_order,
+                    norm_order=norm_order,
+                )
+                return total + jnp.concatenate((a, b), axis=0), bank + anchored
+
+            tiled_chunks = 0
+            pending_fd_views = []
+            for chunk_index, start in enumerate(chunk_starts):
+                stop = min(start + chunk_size, n_frequencies)
+                count = stop - start
+                plan = planner.plan(
+                    first_native_index + start,
+                    count,
+                    padded_tiles=padded_tiles,
+                    padded_local=padded_local,
+                )
+                frequency_slice = detector.sliced_frequencies[start:stop]
+                fd_slice = detector.sliced_fd_data[start:stop]
+                if isinstance(fd_slice, np.ndarray):
+                    pending_fd_views.append(fd_slice)
+                if isinstance(frequency_slice, np.ndarray):
+                    native = _host_native_grid_is_uniform(
+                        frequency_slice, first_native_index + start, duration
+                    )
+                frequencies, data, psd = (
+                    jax.device_put(value, device)
+                    for value in (
+                        frequency_slice,
+                        fd_slice,
+                        detector.sliced_psd[start:stop],
+                    )
+                )
+                padding = chunk_size - count
+                if padding:
+                    frequencies = jnp.pad(
+                        frequencies, (0, padding), constant_values=bins_host[-1] + 1.0
+                    )
+                    data = jnp.pad(data, (0, padding))
+                    psd = jnp.pad(psd, (0, padding), constant_values=1.0)
+                if not isinstance(frequency_slice, np.ndarray):
+                    native = bool(
+                        jax.device_get(
+                            _device_chunk_is_native(
+                                frequencies, first_native_index + start, duration, count
+                            )
+                        )
+                    )
+                if native:
+                    descriptors = (
+                        jax.device_put(value, device)
+                        for value in (
+                            plan.starts,
+                            plan.lengths,
+                            plan.bin_ids,
+                            plan.tile_local,
+                            plan.local_ids,
+                        )
+                    )
+                    total, bank = accumulate_tiles(
+                        frequencies, data, psd, total, bank, *descriptors
+                    )
+                    tiled_chunks += 1
+                else:
+                    total, bank = accumulate_segmented(
+                        frequencies, data, psd, total, bank
+                    )
+                if probe_reduce is not None:
+                    # Reuse the chunk already transferred for native moments.
+                    # The oracle has its own stock waveform/response algebra
+                    # and keeps real samples even outside the retained bins.
+                    probe_state = probe_reduce(
+                        frequencies, data, psd, start, count, probe_state
+                    )
+                # Bound outstanding transfers and temporaries while keeping
+                # asynchronous dispatch within each small group of chunks.
+                if (chunk_index + 1) % 8 == 0:
+                    jax.block_until_ready((total, bank, probe_state))
+                    for view in pending_fd_views:
+                        release_mapped_pages(view)
+                    pending_fd_views.clear()
+            total, bank, probe_state = jax.block_until_ready((total, bank, probe_state))
+            for view in pending_fd_views:
+                release_mapped_pages(view)
+            pending_fd_views.clear()
+            finite = jnp.all(jnp.isfinite(total)) & jnp.all(jnp.isfinite(bank))
+            if not bool(jax.device_get(finite)):
+                raise ValueError(
+                    f"Non-finite native heterodyne summaries for {detector.name}; "
+                    "check in-band PSD, data and reference response"
+                )
+            scale = 4.0 / duration
+            total, bank = jax.block_until_ready((total * scale, bank * scale))
+        diagnostics = {
+            "backend": "jax",
+            "reducer": "bin-aligned-fp64-gemm-deterministic-combine-with-segment-fallback",
+            "device": str(device),
+            "native_frequency_samples": n_frequencies,
+            "chunk_size": chunk_size,
+            "chunks": len(chunk_starts),
+            "tiled_chunks": tiled_chunks,
+            "tile_size": tile_size,
+            "tile_descriptor_shapes": [(tile_size, padded_tiles)],
+            "padded_local_bins": padded_local,
+            "max_padded_tile_slots": padded_tiles * tile_size,
+            "max_tile_matrix_elements": matrix_elements,
+            "tile_power_weight_elements": padded_tiles * tile_size * planes,
+            "tile_combine_elements": padded_tiles * padded_local,
+            "tile_matrix_element_budget": _MAX_TILE_MATRIX_ELEMENTS,
+            "requested_chunk_size": self.reference_chunk_size,
+            "compiled_executables": int(tiled_chunks > 0)
+            + int(tiled_chunks < len(chunk_starts)),
+            "time_anchors": n_anchors,
+            "data_order": interpolation_order,
+            "norm_order": norm_order,
+            "wall_seconds_including_compilation": time.perf_counter() - started,
+        }
+        if probe_bank is not None:
+            diagnostics["native_probe_compiled_executables"] = 1
+            diagnostics["native_probe_count"] = probe_bank.count
+            diagnostics["native_probe_max_waveform_samples"] = chunk_size + 2
+            diagnostics["native_probe_parameter_frequency_elements"] = (
+                probe_bank.count * (chunk_size + 2)
+            )
+            diagnostics["native_probes"] = probe_bank.channel_result(
+                detector, probe_state, chunks=len(chunk_starts), chunk_size=chunk_size
+            )
+        return total, bank, diagnostics
 
     @staticmethod
     def _segmented_coefficient_sums(
@@ -2294,8 +3429,21 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
         frequencies: np.ndarray,
         reference: np.ndarray,
         bins: np.ndarray,
+        interpolation_order: int = 1,
+        norm_order: Optional[int] = None,
     ) -> np.ndarray:
-        """Accumulate unnormalized A0, A1, B0, and B1 bin summaries."""
+        """Accumulate unnormalized bin summaries.
+
+        Order 1 returns the classic ``A0, A1, B0, B1`` rows with raw frequency
+        shifts.  Higher orders return ``A_0..A_K`` followed by ``B_0..B_2K``
+        as moments of the normalized bin coordinate ``u`` in ``[-1, 1]``.
+        """
+
+        if norm_order is not None:
+            a, b = polynomial_moments(
+                frequencies, data, psd, reference, bins, interpolation_order, norm_order
+            )
+            return np.concatenate((a, b), axis=0)
 
         n_bins = len(bins) - 1
         if n_bins <= 0 or np.any(np.diff(bins) <= 0):
@@ -2316,6 +3464,15 @@ class HeterodynedTransientLikelihoodFD(SingleEventLikelihood):
             result = np.zeros(n_bins, dtype=values.dtype)
             np.add.at(result, indices, values)
             return result
+
+        if int(interpolation_order) != 1:
+            order = int(interpolation_order)
+            half_widths = 0.5 * (bins[1:] - bins[:-1])
+            u = shifts / half_widths[indices]
+            return np.stack(
+                [segmented_sum(data_product * u**k) for k in range(order + 1)]
+                + [segmented_sum(self_product * u**k) for k in range(2 * order + 1)]
+            )
 
         return np.stack(
             (

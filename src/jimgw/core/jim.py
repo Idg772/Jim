@@ -501,6 +501,100 @@ class Jim:
                 "build_cache": build_cache,
                 "log_likelihood_from_cache_fn": log_likelihood_from_cache_fn,
             }
+            if sampler_config.scalar_extrinsic_cache:
+                from types import SimpleNamespace
+
+                from jimgw.core.single_event.dominant_mode import (
+                    DominantModeTimeCachedWaveform,
+                )
+                from jimgw.core.single_event.heterodyne_extrinsics import (
+                    evaluate_extrinsic_summary,
+                )
+                from jimgw.core.single_event.likelihood import (
+                    HeterodynedTransientLikelihoodFD,
+                )
+
+                if (
+                    not isinstance(likelihood, HeterodynedTransientLikelihoodFD)
+                    or likelihood.interpolation_order < 2
+                    or likelihood.time_marginalization
+                    or likelihood.distance_marginalization
+                    or sampler_config.scheduler != "fsm"
+                    or sampler_config.fold_symmetry is not None
+                ):
+                    raise ValueError(
+                        "scalar_extrinsic_cache requires an unfolded polynomial "
+                        "FSM likelihood without time/distance marginalization"
+                    )
+                if not isinstance(likelihood.waveform, DominantModeTimeCachedWaveform):
+                    DominantModeTimeCachedWaveform(likelihood.waveform)
+                if not {"iota", "d_L"} <= likelihood.waveform_cacheable_parameter_names:
+                    raise ValueError(
+                        "scalar extrinsic cache requires cached inclination/distance"
+                    )
+                # Infer dependencies through the actual sampling transforms.
+                # A hit that moves sky/time or a coupled intrinsic is unsafe.
+                contract = SimpleNamespace(
+                    waveform_cache_dependency_parameter_names=(
+                        (
+                            set(self.likelihood_parameter_names)
+                            | set(likelihood.fixed_parameters)
+                        )
+                        - {"psi", "iota", "d_L"}
+                    ),
+                    fixed_parameters=likelihood.fixed_parameters,
+                )
+                groups = (
+                    list(sampler_config.blocks)
+                    + list(sampler_config.bridge_blocks)
+                    + [block.parameters for block in sampler_config.de_jump_blocks]
+                )
+                scalar_groups = _resolve_rebuild_required_by_parameter_groups(
+                    contract,
+                    groups,
+                    parameter_names=self.sampling_parameter_names,
+                    sample_transforms=sample_transforms,
+                    likelihood_transforms=likelihood_transforms,
+                )
+                waveform_groups = _resolve_rebuild_required_by_parameter_groups(
+                    likelihood,
+                    groups,
+                    parameter_names=self.sampling_parameter_names,
+                    sample_transforms=sample_transforms,
+                    likelihood_transforms=likelihood_transforms,
+                )
+                if any(
+                    slow and not rebuild
+                    for (_, slow), (_, rebuild) in zip(
+                        scalar_groups, waveform_groups, strict=True
+                    )
+                ):
+                    raise ValueError(
+                        "scalar_extrinsic_cache hit groups may vary only psi, iota "
+                        "and d_L after applying sampling transforms"
+                    )
+
+                def prepare_hit_summary(position, cache):
+                    return likelihood.build_extrinsic_summary(
+                        _sampling_array_to_likelihood_parameters(position),
+                        cache,
+                    )
+
+                def log_likelihood_from_hit_summary(position, summary):
+                    return evaluate_extrinsic_summary(
+                        likelihood,
+                        _sampling_array_to_likelihood_parameters(position),
+                        summary,
+                    )
+
+                self._sampler_backend_kwargs.update(
+                    prepare_hit_summary=prepare_hit_summary,
+                    log_likelihood_from_hit_summary=log_likelihood_from_hit_summary,
+                    # The validated polynomial adapter's rebuild callback
+                    # constructs its cache solely from the supplied position.
+                    # No intermediate accepted cache is consumed inside R.
+                    cache_independent_rebuild=True,
+                )
             if resolved_bridge_blocks:
                 self._sampler_backend_kwargs["resolved_bridge_blocks"] = (
                     resolved_bridge_blocks

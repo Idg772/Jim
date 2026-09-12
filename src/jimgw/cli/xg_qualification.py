@@ -7,9 +7,10 @@ import hashlib
 import json
 import tomllib
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Optional
 
 import typer
 from pydantic import ValidationError
@@ -254,8 +255,7 @@ def plan_xg_qualification_bin_edges(
 
     frequencies, _, _ = _set_and_merge_heterodyne_frequency_grids(
         ifos,
-        likelihood_cfg.f_min,
-        likelihood_cfg.f_max,
+        *likelihood_cfg.frequency_bounds([ifo.name for ifo in ifos]),
     )
     frequency_edges, _, _ = (
         HeterodynedTransientLikelihoodFD._plan_fixed_reference_bin_edges(
@@ -264,9 +264,27 @@ def plan_xg_qualification_bin_edges(
             reference_waveform,
             reference_parameters,
             heterodyne.reference_chunk_size,
+            **(
+                {"frequency_bin_edges": heterodyne.frequency_bin_edges}
+                if heterodyne.frequency_bin_edges is not None
+                else {}
+            ),
         )
     )
-    planned_digest = HeterodynedTransientLikelihoodFD._bin_edges_sha256(frequency_edges)
+    from jimgw.cli._likelihood import build_zero_noise_summary
+
+    summary_builder = build_zero_noise_summary(cfg, ifos, reference_waveform)
+    planned_digest = HeterodynedTransientLikelihoodFD._bin_edges_sha256(
+        frequency_edges,
+        interpolation_order=heterodyne.interpolation_order,
+        phasor_moment_order=heterodyne.phasor_moment_order,
+        phasor_time_anchors=heterodyne.phasor_time_anchors,
+        phasor_approximation=heterodyne.phasor_approximation,
+        summary_builder_sha256=(
+            summary_builder.contract_sha256 if summary_builder is not None else None
+        ),
+        reference_projection=heterodyne.reference_projection,
+    )
 
     if cfg.xg_analysis_contract_sha256() != analysis_contract_sha256:
         raise ValueError("the XG analysis contract changed while planning bins")
@@ -372,15 +390,22 @@ def build_xg_qualification_candidate(
     waveform: Waveform,
     prior: CombinePrior,
     likelihood_transforms: list[NtoMTransform],
+    *,
+    native_probe_parameters: Sequence[Mapping[str, Any]] | None = None,
 ) -> HeterodynedTransientLikelihoodFD:
     """Construct the actual response likelihood for deterministic measurement.
 
     This qualification-only route uses a distinct internal capability.  It
     cannot be supplied through ``build_likelihood`` or the normal ``jim-run``
     pipeline, and its output does not constitute a production receipt.
+    Optional native probes are accumulated during the same data traversal as
+    the reference moments; they do not change those moments or qualify the grid.
     """
 
-    from jimgw.cli._likelihood import _validate_xg_detector_inputs
+    from jimgw.cli._likelihood import (
+        _validate_xg_detector_inputs,
+        build_zero_noise_summary,
+    )
     from jimgw.core.single_event.likelihood import (
         _XG_QUALIFICATION_PLAN_AUTHORITY,
         HeterodynedTransientLikelihoodFD,
@@ -418,14 +443,15 @@ def build_xg_qualification_candidate(
         else None
     )
 
+    f_min, f_max = likelihood_cfg.frequency_bounds([ifo.name for ifo in ifos])
     likelihood = HeterodynedTransientLikelihoodFD(
         detectors=ifos,
         waveform=waveform,
         fixed_parameters=(
             likelihood_cfg.fixed_parameters if likelihood_cfg.fixed_parameters else None
         ),
-        f_min=likelihood_cfg.f_min,
-        f_max=likelihood_cfg.f_max,
+        f_min=f_min,
+        f_max=f_max,
         trigger_time=cfg.data.trigger_time,
         n_bins=heterodyne.n_bins,
         reference_parameters=reference_parameters,
@@ -434,6 +460,17 @@ def build_xg_qualification_candidate(
         phase_marginalization=phase_marginalization,
         time_marginalization=time_marginalization,
         reference_chunk_size=heterodyne.reference_chunk_size,
+        summary_backend=heterodyne.summary_backend,
+        xg_evaluation_mode=heterodyne.xg_evaluation_mode,
+        node_frequency_prefix=heterodyne.node_frequency_prefix,
+        native_probe_parameters=native_probe_parameters,
+        interpolation_order=heterodyne.interpolation_order,
+        phasor_moment_order=heterodyne.phasor_moment_order,
+        phasor_time_anchors=heterodyne.phasor_time_anchors,
+        phasor_approximation=heterodyne.phasor_approximation,
+        zero_noise_summary=build_zero_noise_summary(cfg, ifos, waveform),
+        reference_projection=heterodyne.reference_projection,
+        frequency_bin_edges=heterodyne.frequency_bin_edges,
         xg_plan=_QualificationXGPlan(
             binding.planned_bin_edges_sha256,
             _XG_QUALIFICATION_PLAN_AUTHORITY,
@@ -446,6 +483,67 @@ def build_xg_qualification_candidate(
     if likelihood.bin_edges_sha256 != binding.planned_bin_edges_sha256:
         raise ValueError("realized XG bin edges do not match the qualification binding")
     return likelihood
+
+
+def build_selected_xg_qualification_candidate(
+    cfg: PipelineConfig,
+    ifos: list[GroundBased2G],
+    waveform: Waveform,
+    prior: CombinePrior,
+    likelihood_transforms: list[NtoMTransform],
+    *,
+    native_probe_parameters: Sequence[Mapping[str, Any]] | None = None,
+) -> tuple[HeterodynedTransientLikelihoodFD, PipelineConfig, dict[str, Any] | None]:
+    """Build one native bank and freeze an empirical qualification grid.
+
+    An explicit edge layout is rebuilt as declared. Otherwise, configured bin
+    selection coarsens one fine native bank and returns its exact resolved
+    configuration. The input configuration is never mutated. Native probes,
+    when supplied, use likelihood-space parameters just as in
+    ``build_xg_qualification_candidate``.
+
+    All planning, input and capability checks remain those of the qualification
+    candidate route. Empirical selection does not issue a production receipt or
+    change eligibility for ``jim-run``; independent native validation is still
+    required before a caller samples the candidate.
+    """
+    import jax
+
+    _validate_qualification_candidate_config(cfg)
+    heterodyne = cfg.likelihood.heterodyne
+    assert heterodyne is not None
+    automatic = (
+        heterodyne.bin_selection is not None and heterodyne.frequency_bin_edges is None
+    )
+    construction_cfg = cfg.model_copy(deep=True)
+    if automatic:
+        assert heterodyne.bin_selection is not None
+        construction_cfg.likelihood.heterodyne = heterodyne.model_copy(
+            update={
+                "n_bins": heterodyne.bin_selection.reference_bins,
+                "epsilon": None,
+            }
+        )
+    digest = plan_xg_qualification_bin_edges(construction_cfg, ifos, waveform)
+    binding = bind_xg_qualification_candidate(construction_cfg, digest)
+    candidate = build_xg_qualification_candidate(
+        binding,
+        construction_cfg,
+        ifos,
+        waveform,
+        prior,
+        likelihood_transforms,
+        native_probe_parameters=native_probe_parameters,
+    )
+    jax.block_until_ready((candidate.summary_data, candidate.phasor_data_moments))
+    if not automatic:
+        return candidate, construction_cfg, None
+
+    from jimgw.cli._xg_binning import select_network_binning
+
+    # The selector verifies and rebinds the selected edges against the original
+    # requested contract, not the temporary fine-grid construction config.
+    return select_network_binning(cfg, candidate, ifos, waveform)
 
 
 @app.callback()
@@ -465,7 +563,11 @@ def _load_receipts(bundle_dir: Path) -> dict[str, object]:
 
 
 def _configured_ifos(cfg: PipelineConfig):
-    presets = get_detector_preset()
+    presets = (
+        get_detector_preset(site_overrides=cfg.data.detector_sites)
+        if cfg.data.detector_sites
+        else get_detector_preset()
+    )
     ifos = []
     for detector_name in cfg.data.detectors:
         preset = presets[detector_name]

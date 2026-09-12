@@ -1,0 +1,121 @@
+"""Small CE+ET configuration contracts without external research artifacts.
+
+The four-second frequency grid is for unit tests, not a physically resolved
+2 Hz signal. Tests that construct data must supply their own temporary PSDs.
+"""
+
+import math
+
+
+def network_config() -> dict:
+    """Return a fresh mutable twelve-parameter network configuration."""
+    return {
+        "seed": 2,
+        "data": {
+            "type": "injection",
+            "detectors": ["CE", "ET"],
+            "detector_sites": {
+                "CE": "CE_A_fiducial_2023",
+                "ET": "ET_Sardinia_fiducial_2023",
+            },
+            "trigger_time": 1_300_000_000.0,
+            "duration": 4.0,
+            "sampling_frequency": 128.0,
+            "zero_noise": False,
+            "waveform_chunk_size": 256,
+            "psd_files": {},
+            "injection_parameters": {
+                "M_c": 1.1802650981093186,
+                "q": 0.9724191074091124,
+                "s1_z": -0.014169601016451747,
+                "s2_z": -0.02350583516601907,
+                "lambda_1": 483.1557044220429,
+                "lambda_2": 771.0436351634714,
+                "d_L": 20.0,
+                "iota": 2.016083447361016,
+                "ra": 6.052874807646849,
+                "dec": 0.17257877754217157,
+                "psi": 1.6782976747256861,
+                "phase_c": 2.7844901856551694,
+                "t_c": 0.03512602655783986,
+            },
+        },
+        "waveform": {"approximant": "IMRPhenomD_NRTidalv2", "f_ref": 20.0},
+        "prior": {
+            "M_c": {"type": "uniform", "min": 1.18, "max": 1.1807},
+            "q": {"type": "uniform", "min": 0.5, "max": 1.0},
+            "s1_z": {"type": "uniform", "min": -0.05, "max": 0.05},
+            "s2_z": {"type": "uniform", "min": -0.05, "max": 0.05},
+            "lambda_1": {"type": "uniform", "min": 0.0, "max": 1000.0},
+            "lambda_2": {"type": "uniform", "min": 0.0, "max": 1000.0},
+            "d_L": {"type": "power_law", "min": 1.0, "max": 1000.0, "alpha": 2.0},
+            "iota": {"type": "sine"},
+            "ra": {"type": "uniform", "min": 0.0, "max": 2 * math.pi},
+            "dec": {"type": "cosine"},
+            "psi": {"type": "uniform", "min": 0.0, "max": math.pi},
+            "t_c": {"type": "uniform", "min": -0.1, "max": 0.1},
+        },
+        "sampling": {
+            "time_frame": "CE",
+            "sky_frame": "geocentric",
+            "inclination_coordinate": "cos_iota",
+            "distance_coordinate": "d_hat",
+            "chirp_mass_coordinate": "M_hat",
+        },
+        "likelihood": {
+            "f_min": 2.0,
+            "f_max": 64.0,
+            "detector_f_min": {"CE": 5.0, "ET": 2.0},
+            "time_dependent_response": True,
+            "finite_arm_response": True,
+            "phase_marginalization": True,
+            "heterodyne": {
+                "n_bins": 80,
+                "summary_backend": "jax",
+                "xg_evaluation_mode": "auto",
+                "reference_projection": "carrier",
+                "interpolation_order": 8,
+                "phasor_moment_order": 16,
+                "reference_chunk_size": 256,
+                "phasor_time_anchors": [i / 50 for i in range(-10, 11)],
+                "reference_parameters": {"type": "injection"},
+                "bin_selection": {
+                    "reference_bins": 80,
+                    "candidate_bins": [40, 80],
+                    "training_points": 4,
+                    "verification_points": 4,
+                    "frequency_chunk_size": 256,
+                    "parameter_batch_size": 4,
+                    "timing_lanes": 2,
+                    "timing_repeats": 3,
+                    "allocation_base_bins": 40,
+                },
+            },
+        },
+        "sampler": {
+            "type": "blackjax-swig",
+            "scalar_extrinsic_cache": True,
+            "fsm_sweep_unroll": 1,
+            "fsm_optimizations": "ce-fast",
+            "blocks": [
+                ["M_hat", "q", "lambda_1", "lambda_2", "s1_z", "s2_z", "t_det"],
+                ["ra", "dec"],
+                ["psi"],
+                ["cos_iota", "d_hat"],
+            ],
+            "scheduler": "fsm",
+            "n_live": 32,
+            "n_delete_frac": 0.125,
+            "n_devices": 1,
+            "num_gibbs_sweeps": 8,
+            "num_inner_steps_per_dim": 1,
+            "max_steps": 10,
+            "max_shrinkage": 100,
+            "direction_mode": "covariance",
+            "periodic_wrapped_covariance": True,
+            "adaptive_slice_widths": True,
+            "bracket_mode": "stepping-out",
+            "num_de_jumps": 0,
+        },
+        "output": {"dir": "tests/tmp/network", "save_corner": False},
+    }

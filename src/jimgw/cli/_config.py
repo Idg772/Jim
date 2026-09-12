@@ -9,6 +9,7 @@ The CLI figures out *how* (transforms, parameter conversions, consistency checks
 """
 
 import hashlib
+import itertools
 import json
 import math
 import platform
@@ -67,6 +68,22 @@ class _DataBase(BaseModel):
     model_config = {"extra": "forbid"}
     detectors: list[str]
     trigger_time: float
+    detector_sites: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_detector_sites(self) -> "_DataBase":
+        supported = {
+            "CE": {"CE_A_fiducial_2023"},
+            "ET": {"ET_Sardinia_fiducial_2023"},
+        }
+        for detector, site in self.detector_sites.items():
+            if detector not in self.detectors:
+                raise ValueError(
+                    f"detector_sites contains unrequested detector {detector!r}"
+                )
+            if site not in supported.get(detector, set()):
+                raise ValueError(f"Unsupported detector site {detector!r}: {site!r}")
+        return self
 
     @field_validator("detectors")
     @classmethod
@@ -105,6 +122,24 @@ class InjectionDataConfig(_DataBase):
     psd_files: dict[str, Path] = Field(default_factory=dict)
     psd_is_asd: dict[str, bool] = Field(default_factory=dict)
     waveform_chunk_size: int = Field(default=262_144, ge=1, strict=True)
+    # Keep injected strain, PSD and grids in host memory as index views and
+    # never materialise time-domain arrays. Storage only; results are the
+    # same for the same seed, so it is excluded from the analysis contract.
+    host_resident_data: bool = False
+    host_data_storage: Literal["memory", "mmap"] = "memory"
+    # The indexed generator uses bounded chunks and preserves their Gaussian
+    # distribution. It intentionally changes the legacy seeded realization.
+    noise_generation: Literal["legacy", "indexed-v1"] = "legacy"
+
+    @model_validator(mode="after")
+    def _check_native_storage(self) -> "InjectionDataConfig":
+        if not self.host_resident_data and (
+            self.host_data_storage != "memory" or self.noise_generation != "legacy"
+        ):
+            raise ValueError(
+                "mmap storage and indexed noise require host_resident_data"
+            )
+        return self
 
 
 class FileDataConfig(_DataBase):
@@ -449,6 +484,27 @@ class SamplingConfig(BaseModel):
     ``iota`` before prior and likelihood evaluation.
     """
 
+    distance_coordinate: Literal["d_L", "d_hat"] = "d_L"
+    """Sampling coordinate for luminosity distance.
+    - ``"d_L"`` (default): sample the physical luminosity distance.
+    - ``"d_hat"``: sample the SNR-weighted distance
+      ``d_L / (M_c^(5/6) |R_net(ra, dec, psi, iota)|)``, which straightens the
+      distance--inclination amplitude band. Requires ``M_c``, ``ra``, ``dec``,
+      ``psi``, ``iota`` and ``d_L`` in [prior]; the prior stays on ``d_L``."""
+
+    chirp_mass_coordinate: Literal["M_c", "M_hat"] = "M_c"
+    """Sampling coordinate for the chirp mass.
+    - ``"M_c"`` (default): sample the physical chirp mass.
+    - ``"M_hat"``: sample the Doppler-dressed chirp mass
+      ``M_c * (1 + eps(ra, dec))``, where ``eps`` is minus the line-of-sight
+      component of the reference detector's rotational velocity over ``c``.
+      Earth rotation over a long inspiral makes a sky shift degenerate with a
+      chirp-mass shift, and the dressing absorbs that coupling so a sky move
+      carries the compensating chirp mass. Requires ``M_c``, ``ra`` and ``dec``
+      in [prior]; the prior stays on ``M_c``. The waveform then depends on the
+      sky, so blocks containing ``ra``/``dec`` become rebuild-priced and bridge
+      blocks (which must stay cache-resident) must not contain them."""
+
 
 # ---------------------------------------------------------------------------
 # Likelihood section
@@ -539,6 +595,80 @@ HeterodynedRefParams = Annotated[
 _MAX_HETERODYNE_BIN_EDGES = 4_194_304
 
 
+class CLIZeroNoiseQuadratureConfig(BaseModel):
+    """Opt-in discrete quadrature of deterministic injection summaries."""
+
+    model_config = {"extra": "forbid", "allow_inf_nan": False}
+    atol: float = Field(default=1e-6, gt=0)
+    rtol: float = Field(default=1e-9, ge=0)
+    max_evaluations: int = Field(default=2_000_000, ge=48, strict=True)
+    max_depth: int = Field(default=20, ge=0, strict=True)
+
+
+class CLIXGBinSelectionConfig(BaseModel):
+    """Bounded pre-sampling selection on one reusable native moment bank.
+
+    The tolerance is an empirical delta-log-likelihood gate on deterministic
+    training and independent verification banks, not a whole-prior certificate.
+    All trials retain the configured interpolation and phasor orders.
+    """
+
+    model_config = {"extra": "forbid"}
+    method: Literal["uniform", "adaptive"] = "adaptive"
+    tolerance: float = Field(default=0.05, gt=0.0, le=0.05)
+    reference_bins: int = Field(default=2048, ge=2, le=8192, strict=True)
+    candidate_bins: list[Annotated[int, Field(strict=True)]] = Field(
+        default_factory=lambda: [64, 128, 136, 256, 512, 1024, 2048]
+    )
+    candidate_edge_indices: list[list[Annotated[int, Field(strict=True)]]] = Field(
+        default_factory=list
+    )
+    training_points: int = Field(default=16, ge=4, le=256, strict=True)
+    verification_points: int = Field(default=16, ge=4, le=256, strict=True)
+    frequency_chunk_size: int = Field(default=2048, ge=32, le=16384, strict=True)
+    parameter_batch_size: int = Field(default=8, ge=1, le=32, strict=True)
+    max_bank_bytes: int = Field(default=536870912, ge=1048576, strict=True)
+    timing_lanes: Optional[int] = Field(default=None, ge=1, le=512, strict=True)
+    timing_repeats: int = Field(default=5, ge=3, le=25, strict=True)
+    max_timed_candidates: int = Field(default=3, ge=1, le=8, strict=True)
+    allocation_base_bins: int = Field(default=256, ge=1, le=8192, strict=True)
+    allocation_refinement_depth: int = Field(default=1, ge=0, le=4, strict=True)
+    allocation_max_intervals: int = Field(default=8192, ge=16, le=32768, strict=True)
+    allocation_max_proposals: int = Field(default=64, ge=8, le=256, strict=True)
+    seed: int = Field(default=20260910, ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def _validate_selection(self):
+        if not math.isfinite(self.tolerance):
+            raise ValueError("bin-selection tolerance must be finite")
+        if not self.candidate_bins or any(
+            isinstance(n, bool) or not isinstance(n, int) or n < 1
+            for n in self.candidate_bins
+        ):
+            raise ValueError("candidate_bins must contain positive integers")
+        if len(set(self.candidate_bins)) != len(self.candidate_bins):
+            raise ValueError("candidate_bins must not contain duplicates")
+        if len(self.candidate_bins) > 16:
+            raise ValueError("bin selection accepts at most 16 candidate counts")
+        if len(self.candidate_edge_indices) > 16:
+            raise ValueError("bin selection accepts at most 16 explicit layouts")
+        for indices in self.candidate_edge_indices:
+            if (
+                len(indices) < 2
+                or indices[0] != 0
+                or indices[-1] != self.reference_bins
+                or any(b <= a for a, b in itertools.pairwise(indices))
+            ):
+                raise ValueError(
+                    "candidate_edge_indices must increase from 0 to reference_bins"
+                )
+        # Counts above the reference cap are ignored when resolving a smaller
+        # explicitly bounded fixture; at least one usable candidate is needed.
+        if min(self.candidate_bins) > self.reference_bins:
+            raise ValueError("candidate_bins must include a count <= reference_bins")
+        return self
+
+
 class CLIHeterodynedConfig(BaseModel):
     """Enable the relative-binning (heterodyne) likelihood.
 
@@ -565,6 +695,31 @@ class CLIHeterodynedConfig(BaseModel):
     )
     epsilon: Optional[float] = Field(default=None, gt=0.0, strict=True)
     reference_chunk_size: int = Field(default=262_144, ge=1, strict=True)
+    # Keep the historical reducer explicit for reproducible old receipts.
+    # JAX constructs native polynomial moments on the selected compute device.
+    summary_backend: Literal["numpy", "jax"] = "numpy"
+    xg_evaluation_mode: Literal["auto", "baseline"] = "auto"
+    # Explicit edges pin a previously selected grid. The network inference
+    # runner selects automatically when edges are absent, unless disabled.
+    bin_selection: Optional[CLIXGBinSelectionConfig] = None
+    # Preserve the waveform cutoff convention when restoring selected edges.
+    node_frequency_prefix: Optional[list[float]] = None
+    # Degree of the per-bin polynomial waveform-ratio model.  1 is classic
+    # linear relative binning; 3 removes the (bins)^-2 phasor-curvature error
+    # that dominates at XG signal-to-noise ratios.
+    interpolation_order: int = Field(default=1, ge=1, le=8, strict=True)
+    # Taylor order of the analytic t_c phasor carried in the summary moments.
+    # 0 keeps the phasor inside the per-bin ratio (bin count set by its
+    # winding); 8 removes it from the ratio so the bin count is set by the
+    # waveform alone.  Requires interpolation_order above 1.
+    phasor_moment_order: int = Field(default=0, ge=0, le=16, strict=True)
+    phasor_approximation: Literal["taylor", "chebyshev"] = "taylor"
+    # Absolute rigid time shifts relative to the reference, in seconds.
+    # Evaluations outside this declared support fail closed.
+    phasor_time_anchors: Optional[list[float]] = None
+    zero_noise_quadrature: Optional[CLIZeroNoiseQuadratureConfig] = None
+    reference_projection: Literal["projected", "carrier"] = "projected"
+    frequency_bin_edges: Optional[list[float]] = None
     qualification_manifest: Optional[Path] = None
     qualification_manifest_sha256: Optional[str] = Field(
         default=None,
@@ -576,10 +731,64 @@ class CLIHeterodynedConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_binning_plan(self) -> "CLIHeterodynedConfig":
+        if self.phasor_approximation == "chebyshev" and (
+            self.phasor_moment_order != 16
+            or self.phasor_time_anchors is None
+            or len(self.phasor_time_anchors) < 2
+            or self.zero_noise_quadrature is not None
+        ):
+            raise ValueError(
+                "chebyshev phasor approximation requires native degree-16 moments "
+                "and at least two time anchors"
+            )
+        if self.node_frequency_prefix is not None:
+            prefix = self.node_frequency_prefix
+            if (
+                len(prefix) != 2
+                or any(not math.isfinite(f) or f <= 0 for f in prefix)
+                or prefix[0] >= prefix[1]
+            ):
+                raise ValueError(
+                    "node_frequency_prefix must contain two positive finite increasing frequencies"
+                )
         if self.n_bins is not None and self.epsilon is not None:
             raise ValueError("Specify at most one of n_bins and epsilon")
+        if self.frequency_bin_edges is not None:
+            edges = self.frequency_bin_edges
+            if (
+                self.n_bins is None
+                or len(edges) != self.n_bins + 1
+                or any(not math.isfinite(f) for f in edges)
+                or any(hi <= lo for lo, hi in itertools.pairwise(edges))
+            ):
+                raise ValueError(
+                    "frequency_bin_edges must be ordered, finite and contain n_bins+1 entries"
+                )
         if self.epsilon is not None and not math.isfinite(self.epsilon):
             raise ValueError("epsilon must be finite")
+        if self.zero_noise_quadrature is not None and (
+            self.interpolation_order == 1 or self.phasor_moment_order == 0
+        ):
+            raise ValueError("zero_noise_quadrature requires polynomial phasor moments")
+        if self.summary_backend == "jax" and (
+            self.phasor_moment_order == 0 or self.zero_noise_quadrature is not None
+        ):
+            raise ValueError(
+                "summary_backend='jax' requires native polynomial phasor moments "
+                "and cannot be combined with zero_noise_quadrature"
+            )
+        if self.reference_projection == "carrier" and (
+            self.interpolation_order == 1 or self.phasor_moment_order == 0
+        ):
+            raise ValueError("carrier reference requires polynomial phasor moments")
+        if self.phasor_time_anchors is not None:
+            from jimgw.core.single_event.heterodyne_moments import validate_time_anchors
+
+            validate_time_anchors(self.phasor_time_anchors)
+            if self.phasor_moment_order == 0 or self.interpolation_order == 1:
+                raise ValueError(
+                    "phasor_time_anchors require polynomial interpolation and nonzero phasor_moment_order"
+                )
         return self
 
 
@@ -971,6 +1180,8 @@ class LikelihoodConfig(BaseModel):
     model_config = {"extra": "forbid"}
     f_min: float = Field(gt=0.0)
     f_max: float = Field(gt=0.0)
+    detector_f_min: dict[str, float] = Field(default_factory=dict)
+    detector_f_max: dict[str, float] = Field(default_factory=dict)
     fixed_parameters: dict[str, float] = Field(default_factory=dict)
     time_dependent_response: bool = False
     finite_arm_response: bool = False
@@ -986,6 +1197,58 @@ class LikelihoodConfig(BaseModel):
     distance_marginalization: Optional[CLIDistanceMargConfig] = None
     heterodyne: Optional[CLIHeterodynedConfig] = None
     multiband: Optional[CLIMultibandedConfig] = None
+
+    def frequency_bounds(
+        self, detector_names: list[str]
+    ) -> tuple[float | dict[str, float], float | dict[str, float]]:
+        """Resolve optional channel/family overrides inside the global band.
+
+        The global limits describe the union envelope used for planning; exact
+        ET channel overrides take precedence over an ET family override.
+        """
+        concrete = [
+            channel
+            for name in detector_names
+            for channel in _expanded_detector_names(name)
+        ]
+        allowed = set(concrete) | (
+            {"ET"} if any(n in {"ET1", "ET2", "ET3"} for n in concrete) else set()
+        )
+        unknown = (self.detector_f_min.keys() | self.detector_f_max.keys()) - allowed
+        if unknown:
+            raise ValueError(
+                f"Frequency overrides contain unrequested detectors: {sorted(unknown)}"
+            )
+        if (
+            not math.isfinite(self.f_min)
+            or not math.isfinite(self.f_max)
+            or self.f_min >= self.f_max
+        ):
+            raise ValueError("Likelihood requires finite f_min < f_max")
+
+        def value(name, mapping, default):
+            key = _detector_file_key(name, mapping)
+            return mapping[key] if key is not None else default
+
+        lower = {
+            name: value(name, self.detector_f_min, self.f_min) for name in concrete
+        }
+        upper = {
+            name: value(name, self.detector_f_max, self.f_max) for name in concrete
+        }
+        for name in concrete:
+            if not (
+                math.isfinite(lower[name])
+                and math.isfinite(upper[name])
+                and self.f_min <= lower[name] < upper[name] <= self.f_max
+            ):
+                raise ValueError(
+                    f"{name} frequency bounds must be finite and inside the global band"
+                )
+        return (
+            lower if self.detector_f_min else self.f_min,
+            upper if self.detector_f_max else self.f_max,
+        )
 
     @model_validator(mode="after")
     def _validate_marginalization_conflicts(self) -> "LikelihoodConfig":
@@ -1191,6 +1454,11 @@ class PipelineConfig(BaseModel):
     sampler: SamplerConfig
     output: OutputConfig
 
+    @model_validator(mode="after")
+    def _validate_detector_frequency_bounds(self) -> "PipelineConfig":
+        self.likelihood.frequency_bounds(self.data.detectors)
+        return self
+
     @property
     def verified_xg_manifest(self) -> Optional[XGQualificationManifest]:
         """Return evidence verified against this complete pipeline contract."""
@@ -1257,15 +1525,31 @@ class PipelineConfig(BaseModel):
         """Hash the normalized scientific and execution plan for qualification."""
 
         likelihood = self.likelihood.model_dump(mode="json")
+        # Empty optional network overrides retain the historical scalar/site
+        # contract. Explicit geometry and channel bands are always hashed.
+        for key in ("detector_f_min", "detector_f_max"):
+            if not likelihood[key]:
+                likelihood.pop(key)
+        data = self.data.model_dump(mode="json")
+        if not data["detector_sites"]:
+            data.pop("detector_sites")
+        data.pop("host_resident_data", None)
+        data.pop("host_data_storage", None)
+        if data.get("noise_generation") == "legacy":
+            data.pop("noise_generation")
         heterodyne = likelihood.get("heterodyne")
         if heterodyne is not None:
+            if heterodyne.get("phasor_approximation") == "taylor":
+                heterodyne.pop("phasor_approximation")
+            if heterodyne["summary_backend"] == "numpy":
+                heterodyne.pop("summary_backend")
             heterodyne.pop("qualification_manifest", None)
             heterodyne.pop("qualification_manifest_sha256", None)
         payload = {
             "contract_schema_version": 1,
             "float_precision": "float64",
             "seed": self.seed,
-            "data": self.data.model_dump(mode="json"),
+            "data": data,
             "waveform": self.waveform.model_dump(mode="json"),
             "prior": self.prior.model_dump(mode="json"),
             "sampling": self.sampling.model_dump(mode="json"),
@@ -1986,6 +2270,43 @@ class PipelineConfig(BaseModel):
             raise ValueError(  # noqa: TRY004 - invalid scientific prior contract
                 "inclination_coordinate='cos_iota' requires [prior].iota to use "
                 "type='sine' so the transformed prior is exactly uniform"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_distance_sampling_coordinate(self) -> "PipelineConfig":
+        if self.sampling.distance_coordinate == "d_L":
+            return self
+        if "d_hat" in self.prior.root:
+            raise ValueError(
+                "distance_coordinate='d_hat' cannot be used when [prior] already "
+                "declares 'd_hat'; declare the physical 'd_L' prior instead"
+            )
+        required = ("d_L", "M_c", "ra", "dec", "psi", "iota")
+        missing = [name for name in required if name not in self.prior.root]
+        if missing:
+            raise ValueError(
+                "distance_coordinate='d_hat' requires physical "
+                f"{list(required)} entries in [prior]; missing {missing}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_chirp_mass_sampling_coordinate(self) -> "PipelineConfig":
+        if self.sampling.chirp_mass_coordinate == "M_c":
+            return self
+        if "M_hat" in self.prior.root:
+            raise ValueError(
+                "chirp_mass_coordinate='M_hat' cannot be used when [prior] "
+                "already declares 'M_hat'; declare the physical 'M_c' prior "
+                "instead"
+            )
+        required = ("M_c", "ra", "dec")
+        missing = [name for name in required if name not in self.prior.root]
+        if missing:
+            raise ValueError(
+                "chirp_mass_coordinate='M_hat' requires physical "
+                f"{list(required)} entries in [prior]; missing {missing}"
             )
         return self
 

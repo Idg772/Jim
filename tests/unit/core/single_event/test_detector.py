@@ -685,3 +685,93 @@ def test_fd_response_matches_complex_exp_reference():
     np.testing.assert_allclose(
         np.asarray(result), np.asarray(reference), rtol=1e-13, atol=1e-14
     )
+
+
+def _photon_path_round_trip(frequency, propagation_cosine, arm_length_m, n=40_001):
+    """Brute-force round-trip arm response referenced to the beam-splitter arrival.
+
+    A plane wave ``exp(2 pi i f (t - k.x / c))`` propagating along ``k`` is
+    integrated along the outgoing and returning photon path of one arm whose
+    unit vector ``u`` satisfies ``k.u = propagation_cosine``.
+    """
+    s = np.linspace(0.0, arm_length_m, n)
+    out = (
+        2.0
+        * np.pi
+        * frequency
+        * ((s - 2.0 * arm_length_m) / C_SI - propagation_cosine * s / C_SI)
+    )
+    back = (
+        2.0
+        * np.pi
+        * frequency
+        * ((s - arm_length_m) / C_SI - propagation_cosine * (arm_length_m - s) / C_SI)
+    )
+    return (np.trapezoid(np.exp(1j * out), s) + np.trapezoid(np.exp(1j * back), s)) / (
+        2.0 * arm_length_m
+    )
+
+
+def test_frequency_dependent_antenna_pattern_matches_photon_path_integral():
+    """The finite-arm pattern must use the physical propagation direction.
+
+    ``_wave_frame`` returns ``omega`` pointing from the geocentre towards the
+    source, so the wave propagates along ``-omega`` and each arm's transfer is
+    the photon-path integral with ``propagation_cosine = -omega . arm``.
+    """
+    detector = get_CE()
+    ra, dec, psi, gmst = 1.2, -0.4, 0.7, 2.1
+    m, n, omega = detector._wave_frame(ra, dec, psi, gmst)
+    xarm, yarm = detector.arms
+    plus_tensor = np.outer(m, m) - np.outer(n, n)
+    cross_tensor = np.outer(m, n) + np.outer(n, m)
+    for frequency in (300.0, 1_000.0, 2_000.0):
+        pattern = detector.frequency_dependent_antenna_pattern(
+            ra, dec, psi, gmst, frequency
+        )
+        transfers = [
+            _photon_path_round_trip(
+                frequency, -float(np.dot(omega, arm)), detector.arm_length_m
+            )
+            for arm in (xarm, yarm)
+        ]
+        for name, tensor in (("p", plus_tensor), ("c", cross_tensor)):
+            x_proj = 0.5 * float(np.einsum("ij,ij->", np.outer(xarm, xarm), tensor))
+            y_proj = 0.5 * float(np.einsum("ij,ij->", np.outer(yarm, yarm), tensor))
+            expected = x_proj * transfers[0] - y_proj * transfers[1]
+            np.testing.assert_allclose(
+                complex(pattern[name]), expected, rtol=1e-8, atol=1e-10
+            )
+
+
+def test_finite_arm_transfer_matches_first_principles_photon_path_integral():
+    """Pin the sign convention of ``direction_cosine`` to physics.
+
+    A photon leaves the beam-splitter at t0, travels along the arm at c,
+    reflects and returns at t0 + 2L/c, sampling a plane wave
+    exp(2 pi i f (t - n.x/c)) that propagates along n = -source.  The
+    transfer is the path average referenced to reception.  This shares no
+    code with ``finite_arm_transfer``; ``direction_cosine`` must be
+    ``source . arm`` to reproduce it, and ``propagation . arm`` must not.
+    """
+
+    arm_length_m = 40_000.0
+    frequency = 2_000.0
+    source = np.asarray([0.36, 0.48, 0.8])
+    arm = np.asarray([0.6, 0.8, 0.0])
+    samples = 40_000
+    tau = arm_length_m / C_SI
+    s = (np.arange(samples) + 0.5) / samples * tau
+    times = np.concatenate((s, tau + s))
+    positions = np.concatenate(
+        (np.outer(C_SI * s, arm), np.outer(arm_length_m - C_SI * s, arm))
+    )
+    phase = 2.0 * np.pi * frequency * (times - positions @ (-source) / C_SI)
+    expected = np.mean(np.exp(1j * phase)) * np.exp(-2j * np.pi * frequency * 2.0 * tau)
+
+    correct = complex(finite_arm_transfer(frequency, float(source @ arm), arm_length_m))
+    antipodal = complex(
+        finite_arm_transfer(frequency, -float(source @ arm), arm_length_m)
+    )
+    np.testing.assert_allclose(correct, expected, rtol=1e-6, atol=1e-9)
+    assert abs(antipodal - expected) > 0.05 * abs(expected)

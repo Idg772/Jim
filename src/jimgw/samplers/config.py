@@ -459,6 +459,19 @@ class BlackJAXSwiGConfig(
     receives one randomly signed and permuted covariance-factor basis, while
     every other block retains the established covariance-direction draws.  It
     deliberately requires one Gibbs sweep and one update per dimension.
+
+    ``fsm_sweep_unroll`` optionally rolls repeated ordinary R/H sweeps into
+    a scan, unrolling the requested number of complete sweeps per scan step.
+    ``None`` retains the existing fully unrolled execution. This changes
+    compilation structure, not the number of sweeps, slices or random draws.
+    The initial supported scope is an unfolded covariance slice schedule
+    with scalar extrinsic summaries, stepping out and no additional moves.
+
+    ``fsm_optimizations="auto"`` uses CE's exhausted-endpoint skipping and
+    deferred rebuild-cache storage when the adapter certifies independent
+    positional cache construction on that ordinary R/H schedule. ``baseline``
+    retains the original recurrence for comparisons; ``ce-fast`` requires the
+    optimized contract and raises before sampling if it cannot be satisfied.
     """
 
     type: Literal["blackjax-swig"] = "blackjax-swig"
@@ -470,6 +483,9 @@ class BlackJAXSwiGConfig(
         list[Literal["slice", "periodic-uniform-independence"]]
     ] = None
     scheduler: Literal["fsm", "pre-fsm-lockstep"] = "fsm"
+    scalar_extrinsic_cache: bool = False
+    fsm_optimizations: Literal["auto", "baseline", "ce-fast"] = "auto"
+    fsm_sweep_unroll: Optional[int] = Field(default=None, ge=1, strict=True)
     n_live: int = 500
     n_delete_frac: float = 0.125
     num_gibbs_sweeps: int = Field(default=2, ge=1)
@@ -491,6 +507,52 @@ class BlackJAXSwiGConfig(
     width_target_expansions: float = Field(default=1.0, ge=0.0)
     width_target_shrinks: float = Field(default=3.0, gt=0.0)
     bracket_mode: Literal["stepping-out", "shrink-only"] = "stepping-out"
+
+    @model_validator(mode="after")
+    def _validate_fsm_optimizations(self) -> Self:
+        if self.fsm_optimizations == "ce-fast" and (
+            self.scheduler != "fsm"
+            or not self.scalar_extrinsic_cache
+            or self.direction_mode != "covariance"
+            or self.bracket_mode != "stepping-out"
+            or self.fold_symmetry is not None
+            or self.bridge_blocks
+            or self.num_de_jumps
+            or self.de_jump_blocks
+            or self.complementary_de_jump_block is not None
+            or any(mode != "slice" for mode in (self.block_kernel_modes or ()))
+        ):
+            raise ValueError(
+                "fsm_optimizations='ce-fast' requires an unfolded ordinary "
+                "covariance FSM with scalar_extrinsic_cache, stepping-out, "
+                "and no additional moves"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_fsm_sweep_unroll(self) -> Self:
+        if self.fsm_sweep_unroll is None:
+            return self
+        if self.fsm_sweep_unroll > self.num_gibbs_sweeps:
+            raise ValueError("fsm_sweep_unroll cannot exceed num_gibbs_sweeps")
+        if (
+            self.scheduler != "fsm"
+            or not self.scalar_extrinsic_cache
+            or self.direction_mode != "covariance"
+            or self.bracket_mode != "stepping-out"
+            or self.fold_symmetry is not None
+            or self.bridge_blocks
+            or self.num_de_jumps
+            or self.de_jump_blocks
+            or self.complementary_de_jump_block is not None
+            or any(mode != "slice" for mode in (self.block_kernel_modes or ()))
+        ):
+            raise ValueError(
+                "fsm_sweep_unroll requires an unfolded ordinary covariance FSM "
+                "with scalar_extrinsic_cache, stepping-out, and no "
+                "additional moves"
+            )
+        return self
 
     @field_validator("blocks")
     @classmethod

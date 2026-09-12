@@ -20,6 +20,14 @@ from jimgw.core.constants import (
     EARTH_SEMI_MINOR_AXIS,
 )
 from jimgw.core.single_event.data import Data, PowerSpectrum
+from jimgw.core.single_event.heterodyne_noise import (
+    INDEXED_NOISE_ALGORITHM,
+    compiled_indexed_noise,
+)
+from jimgw.core.single_event.native_storage import (
+    allocate_native_strain,
+    release_mapped_pages,
+)
 from jimgw.core.single_event.polarization import Polarization
 from jimgw.core.single_event.time_dependent_response import (
     earth_orbital_curvature_delay,
@@ -48,16 +56,28 @@ def finite_arm_transfer(
 ) -> Complex:
     """Return the round-trip transfer function of one interferometer arm.
 
-    ``direction_cosine`` is the cosine between the GW propagation direction
-    and the arm, i.e. ``-omega . arm`` when ``omega`` points from the
-    geocenter towards the source. Inputs follow JAX broadcasting rules, so a
+    ``direction_cosine`` is the cosine between the direction towards the
+    source and the arm, i.e. ``omega . arm`` when ``omega`` points from the
+    geocenter towards the source (the wave propagates along ``-omega``). This
+    is the convention of Essick, Vitale & Evans (2017) Eq. (5) and matches a
+    direct photon-path integral of the round trip referenced to the
+    beam-splitter arrival time.
+
+    Passing ``propagation . arm`` (the opposite sign) evaluates the response
+    of the antipodal sky position.  That error has been made twice in this
+    project (a caller in 2026-09-02, the qualification oracle until
+    2026-09-03), so the convention is pinned against a from-scratch
+    photon-path integral in ``tests/unit/core/single_event/test_detector.py``
+    and ``tests/unit/benchmarks/test_xg_response_oracle.py``; any
+    implementation that disagrees with those tests is wrong, whatever it
+    agrees with otherwise. Inputs follow JAX broadcasting rules, so a
     scalar or per-frequency direction cosine is supported. The normalized
     :func:`jax.numpy.sinc` convention makes the transfer tend to one as
     ``frequency * arm_length_m / C_SI`` tends to zero.
 
     Args:
         frequency: Frequency in Hz.
-        direction_cosine: Cosine between the propagation direction and arm.
+        direction_cosine: Cosine between the source direction and the arm.
         arm_length_m: Physical arm length in metres.
 
     Returns:
@@ -81,6 +101,30 @@ def finite_arm_transfer(
     return 0.5 * (
         phasor_out * jnp.sinc(x * (1.0 - mu)) + phasor_back * jnp.sinc(x * (1.0 + mu))
     )
+
+
+def _same_grid(left, right) -> bool:
+    """Compare two frequency grids without moving host arrays to a device."""
+    if left is right:
+        return True
+    if left.shape != right.shape:
+        return False
+    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+        if (
+            isinstance(left, np.ndarray)
+            and isinstance(right, np.ndarray)
+            and left.ctypes.data == right.ctypes.data
+            and left.strides == right.strides
+        ):
+            return True
+        return all(
+            np.array_equal(
+                np.asarray(left[start : start + 65536]),
+                np.asarray(right[start : start + 65536]),
+            )
+            for start in range(0, len(left), 65536)
+        )
+    return bool(jnp.array_equal(left, right))
 
 
 class Detector(ABC):
@@ -138,6 +182,8 @@ class Detector(ABC):
         *,
         optimize: bool = True,
         finite_arm: Optional[bool] = None,
+        apply_antenna: bool = True,
+        include_data_epoch: bool = True,
     ) -> Complex[Array, " n_sample"]:
         """Modulate the waveform in the sky frame by the detector response in the frequency domain.
 
@@ -200,7 +246,7 @@ class Detector(ABC):
         data, freqs_1 = self.data.frequency_slice(*self.frequency_bounds)
         psd, freqs_2 = self.psd.frequency_slice(*self.frequency_bounds)
 
-        assert jnp.array_equal(freqs_1, freqs_2), (
+        assert _same_grid(freqs_1, freqs_2), (
             f"The {self.name} data and PSD must have same frequencies"
         )
 
@@ -651,6 +697,8 @@ class GroundBased2G(Detector):
         *,
         optimize: bool = True,
         finite_arm: Optional[bool] = None,
+        apply_antenna: bool = True,
+        include_data_epoch: bool = True,
     ) -> Complex[Array, " n_sample"]:
         """Modulate the waveform in the sky frame by the detector response in the frequency domain.
 
@@ -669,6 +717,10 @@ class GroundBased2G(Detector):
             optimize: Use the real-angle phasor implementation.
             finite_arm: Override :attr:`finite_arm_response` for this call. None
                 uses the detector default.
+            apply_antenna: False returns the plus-polarization carrier with
+                the same propagation phase, for reference summaries only.
+            include_data_epoch: False omits the common data-epoch phase when
+                constructing smooth ratios offline. Physical strain uses True.
 
         Returns:
             Array: Complex strain measured by the detector in frequency domain, obtained by
@@ -700,8 +752,9 @@ class GroundBased2G(Detector):
             antenna_pattern = self.frequency_dependent_antenna_pattern(
                 ra, dec, psi, gmst, frequency
             )
-            _, _, omega = self._wave_frame(ra, dec, psi, gmst)
-            time_shift = -jnp.einsum("i...,i->...", omega, self.vertex) / C_SI
+            time_shift = (
+                -self._source_projection(ra, dec, psi, gmst, self.vertex)[2] / C_SI
+            )
         elif self.time_dependent_response:
             m, n, omega = self._wave_frame(ra, dec, psi, gmst)
             antenna_pattern = {}
@@ -738,16 +791,22 @@ class GroundBased2G(Detector):
                 & (emission_offset <= validity_max)
             )
             time_shift += jnp.where(valid, orbital_delay, jnp.nan)
-        time_shift += params["trigger_time"] - self.start_time + params["t_c"]
+        if include_data_epoch:
+            time_shift += params["trigger_time"] - self.start_time + params["t_c"]
+        else:
+            time_shift += params["t_c"]
 
-        h_detector = jax.tree_util.tree_map(
-            lambda h, antenna: h * antenna,
-            h_sky,
-            antenna_pattern,
-        )
-        projected_strain = jnp.sum(
-            jnp.stack(jax.tree_util.tree_leaves(h_detector)), axis=0
-        )
+        if apply_antenna:
+            h_detector = jax.tree_util.tree_map(
+                lambda h, antenna: h * antenna,
+                h_sky,
+                antenna_pattern,
+            )
+            projected_strain = jnp.sum(
+                jnp.stack(jax.tree_util.tree_leaves(h_detector)), axis=0
+            )
+        else:
+            projected_strain = h_sky["p"]
 
         phase_angle = (-2.0 * jnp.pi) * frequency * time_shift
         if optimize:
@@ -815,30 +874,70 @@ class GroundBased2G(Detector):
                 "arm_length_m metadata"
             )
 
-        m, n, omega = self._wave_frame(ra, dec, psi, gmst)
         xarm, yarm = self.arms
-        x_transfer = finite_arm_transfer(
-            frequency,
-            -jnp.einsum("i...,i->...", omega, xarm),
-            self.arm_length_m,
-        )
-        y_transfer = finite_arm_transfer(
-            frequency,
-            -jnp.einsum("i...,i->...", omega, yarm),
-            self.arm_length_m,
-        )
-        xx = 0.5 * jnp.einsum("i,j->ij", xarm, xarm)
-        yy = 0.5 * jnp.einsum("i,j->ij", yarm, yarm)
+        # ``omega`` points from the geocentre towards the source, and the
+        # transfer function takes the cosine between that source direction
+        # and the arm (the wave propagates along ``-omega``).
+        #
+        # The arm projection of a polarization tensor built from the wave
+        # frame basis (m, n) is a scalar quadratic form in the arm's
+        # components along m and n: for D_a = a (x) a / 2,
+        # D_a : (m m - n n) = ((a.m)^2 - (a.n)^2) / 2 and
+        # D_a : (m n + n m) = (a.m)(a.n).  Evaluating those dot products
+        # per frequency keeps the whole response elementwise; materialising
+        # the (3, 3, n_freq) tensors and contracting them was the dominant
+        # memory traffic of every XG likelihood call.
+        x_m, x_n, x_omega = self._source_projection(ra, dec, psi, gmst, xarm)
+        y_m, y_n, y_omega = self._source_projection(ra, dec, psi, gmst, yarm)
+        x_transfer = finite_arm_transfer(frequency, x_omega, self.arm_length_m)
+        y_transfer = finite_arm_transfer(frequency, y_omega, self.arm_length_m)
 
         antenna_patterns = {}
         for polarization in self.polarization_mode:
-            wave_tensor = polarization.tensor_from_basis(m, n)
-            x_projection = jnp.einsum("ij,ij...->...", xx, wave_tensor)
-            y_projection = jnp.einsum("ij,ij...->...", yy, wave_tensor)
+            if polarization.name == "p":
+                x_projection = 0.5 * (x_m * x_m - x_n * x_n)
+                y_projection = 0.5 * (y_m * y_m - y_n * y_n)
+            elif polarization.name == "c":
+                x_projection = x_m * x_n
+                y_projection = y_m * y_n
+            else:
+                m, n, _ = self._wave_frame(ra, dec, psi, gmst)
+                wave_tensor = polarization.tensor_from_basis(m, n)
+                xx = 0.5 * jnp.einsum("i,j->ij", xarm, xarm)
+                yy = 0.5 * jnp.einsum("i,j->ij", yarm, yarm)
+                x_projection = jnp.einsum("ij,ij...->...", xx, wave_tensor)
+                y_projection = jnp.einsum("ij,ij...->...", yy, wave_tensor)
             antenna_patterns[polarization.name] = (
                 x_projection * x_transfer - y_projection * y_transfer
             )
         return antenna_patterns
+
+    @staticmethod
+    def _source_projection(
+        ra: FloatLike,
+        dec: FloatLike,
+        psi: FloatLike,
+        gmst: FloatLike,
+        vector: Float[Array, "3"],
+    ) -> tuple[Array, Array, Array]:
+        """Return ``(vector . m, vector . n, vector . omega)`` elementwise.
+
+        Same wave-frame convention as :meth:`_wave_frame`, without stacking
+        the basis vectors: every quantity is a scalar per broadcast element.
+        """
+        phi = jnp.asarray(ra) - jnp.mod(jnp.asarray(gmst), 2 * jnp.pi)
+        theta = jnp.pi / 2 - jnp.asarray(dec)
+        phi, theta, psi = jnp.broadcast_arrays(phi, theta, jnp.asarray(psi))
+        cos_phi, sin_phi = jnp.cos(phi), jnp.sin(phi)
+        cos_theta, sin_theta = jnp.cos(theta), jnp.sin(theta)
+        cos_psi, sin_psi = jnp.cos(psi), jnp.sin(psi)
+        a0, a1, a2 = vector[0], vector[1], vector[2]
+        dot_u = a0 * cos_phi * cos_theta + a1 * cos_theta * sin_phi - a2 * sin_theta
+        dot_v = -a0 * sin_phi + a1 * cos_phi
+        dot_omega = a0 * sin_theta * cos_phi + a1 * sin_theta * sin_phi + a2 * cos_theta
+        dot_m = -dot_u * sin_psi - dot_v * cos_psi
+        dot_n = -dot_u * cos_psi + dot_v * sin_psi
+        return dot_m, dot_n, dot_omega
 
     def td_response(
         self,
@@ -972,7 +1071,7 @@ class GroundBased2G(Detector):
         if self.psd.n_freq != self.data.n_freq:
             # Cannot proceed comparison, needs interpolation
             return False
-        return (self.psd.frequencies == self.data.frequencies).all()
+        return _same_grid(self.psd.frequencies, self.data.frequencies)
 
     def set_data(self, data: Data | Array, **kws) -> None:
         """Add data to the detector.
@@ -1028,6 +1127,9 @@ class GroundBased2G(Detector):
         zero_noise: bool = False,
         rng_key: Optional[Key] = None,
         waveform_chunk_size: int = 262_144,
+        host_resident: bool = False,
+        host_storage: str = "memory",
+        noise_generation: str = "legacy",
     ) -> None:
         """Inject a signal into the detector data.
 
@@ -1052,6 +1154,13 @@ class GroundBased2G(Detector):
             waveform_chunk_size: Maximum number of in-band frequency samples
                 projected at once. This bounds temporary waveform and response
                 arrays for long XG injections.
+            host_resident: Keep the native Fourier series on the host, without
+                materializing time-domain or window arrays.
+            host_storage: ``memory`` retains the host array in RAM; ``mmap``
+                uses a temporary file and releases clean mapped pages by chunk.
+            noise_generation: ``legacy`` reproduces the original full-array
+                noise draw. ``indexed-v1`` draws independently by absolute
+                frequency index in bounded chunks, with a new seeded realization.
 
         Returns:
             None
@@ -1076,6 +1185,33 @@ class GroundBased2G(Detector):
         # Stamp trigger_time and gmst — mirrors TransientLikelihoodFD.evaluate()
         params["trigger_time"] = float(trigger_time)
         params["gmst"] = float(compute_gmst(trigger_time))
+
+        if host_storage not in {"memory", "mmap"} or noise_generation not in {
+            "legacy",
+            "indexed-v1",
+        }:
+            raise ValueError("Invalid host storage or noise generation mode")
+        if not host_resident and (
+            host_storage != "memory" or noise_generation != "legacy"
+        ):
+            raise ValueError("mmap storage and indexed noise require host_resident")
+
+        if host_resident:
+            self._inject_signal_host_resident(
+                duration=duration,
+                sampling_frequency=sampling_frequency,
+                start_time=start_time,
+                waveform_model=waveform_model,
+                params=params,
+                f_min=f_min,
+                f_max=f_max,
+                zero_noise=zero_noise,
+                rng_key=rng_key,
+                waveform_chunk_size=waveform_chunk_size,
+                host_storage=host_storage,
+                noise_generation=noise_generation,
+            )
+            return
 
         # 1. Set empty data to initialize the detector
         n_times = int(jnp.round(duration * sampling_frequency))
@@ -1103,10 +1239,14 @@ class GroundBased2G(Detector):
         first_frequency_index = round(
             float(self.sliced_frequencies[0]) * float(self.duration)
         )
+        native_prefix = self.sliced_frequencies[:2]
         for start in range(0, len(self.sliced_frequencies), waveform_chunk_size):
             stop = min(start + waveform_chunk_size, len(self.sliced_frequencies))
             chunk_frequencies = self.sliced_frequencies[start:stop]
-            polarisations = waveform_model(chunk_frequencies, params)
+            polarisations = waveform_model(
+                jnp.concatenate((native_prefix, chunk_frequencies)), params
+            )
+            polarisations = jax.tree.map(lambda value: value[2:], polarisations)
             projected_chunk = self.fd_response(
                 chunk_frequencies,
                 polarisations,
@@ -1160,6 +1300,145 @@ class GroundBased2G(Detector):
         logger.info(f"For detector {self.name}, the injected signal has:")
         logger.info(f"  - Optimal SNR: {optimal_snr:.4f}")
         logger.info(f"  - Match filtered SNR: {match_filtered_snr:.4f}")
+
+    def _inject_signal_host_resident(
+        self,
+        *,
+        duration: float,
+        sampling_frequency: float,
+        start_time: float,
+        waveform_model,
+        params: dict,
+        f_min: float,
+        f_max: float,
+        zero_noise: bool,
+        rng_key: Optional[Key],
+        waveform_chunk_size: int,
+        host_storage: str,
+        noise_generation: str,
+    ) -> None:
+        """Project, add noise, accumulate SNR and persist one native chunk.
+
+        Indexed noise avoids all full-length device arrays. The optional
+        mapping releases clean pages after each write. Legacy noise remains
+        available for reproducing prior seeded data, at its old memory cost.
+        """
+        n_times = round(duration * sampling_frequency)
+        if n_times % 2:
+            raise ValueError(
+                "host-resident injection requires an even number of time samples"
+            )
+        buffer, owner = allocate_native_strain(n_times // 2 + 1, host_storage)
+        self.set_data(
+            Data.from_host_fd(
+                buffer,
+                delta_t=1.0 / sampling_frequency,
+                start_time=start_time,
+                name=f"{self.name}_injected",
+            )
+        )
+        self.data._host_storage_owner = owner
+        # A caller may provide an already-native device PSD, in which case
+        # set_data correctly skips interpolation. Move that table in bounded
+        # slices too, and reuse the Data grid instead of keeping a duplicate.
+        if not isinstance(self.psd.values, np.ndarray):
+            host_psd = np.empty(self.psd.n_freq, dtype=np.float64)
+            for start in range(0, self.psd.n_freq, waveform_chunk_size):
+                stop = min(start + waveform_chunk_size, self.psd.n_freq)
+                host_psd[start:stop] = np.asarray(
+                    jax.device_get(self.psd.values[start:stop])
+                )
+            self.psd = PowerSpectrum(host_psd, self.data.frequencies, self.psd.name)
+        elif self.psd.frequencies is not self.data.frequencies:
+            self.psd = PowerSpectrum(
+                self.psd.values, self.data.frequencies, self.psd.name
+            )
+        self.set_frequency_bounds(f_min, f_max)
+        n_band = len(self.sliced_frequencies)
+        if n_band < 2:
+            raise ValueError(
+                f"injection band [{f_min}, {f_max}] requires at least two frequency samples"
+            )
+        first = int(np.searchsorted(self.frequencies, self.sliced_frequencies[0]))
+        prefix = jnp.asarray(self.sliced_frequencies[:2])
+        df = float(self.sliced_frequencies[1] - self.sliced_frequencies[0])
+
+        def project_chunk(frequencies):
+            polarisations = waveform_model(
+                jnp.concatenate((prefix, frequencies)), params
+            )
+            polarisations = jax.tree.map(lambda value: value[2:], polarisations)
+            return self.fd_response(frequencies, polarisations, params)
+
+        project = (
+            jax.jit(project_chunk)
+            if noise_generation == "indexed-v1"
+            else project_chunk
+        )
+
+        legacy_noise = None
+        if not zero_noise:
+            if rng_key is None:
+                seed = int(time.time())
+                rng_key = (
+                    jax.random.key(seed, impl="threefry2x32")
+                    if noise_generation == "indexed-v1"
+                    else jax.random.key(seed)
+                )
+                logger.info(
+                    "No rng_key provided for noise simulation. Using time-based key with seed=%d.",
+                    seed,
+                )
+            if noise_generation == "legacy":
+                legacy_noise = self.psd.simulate_data(rng_key)
+        optimal_sq = 0.0
+        cross = 0.0j
+        for start in range(0, n_band, waveform_chunk_size):
+            stop = min(start + waveform_chunk_size, n_band)
+            frequencies = jnp.asarray(self.sliced_frequencies[start:stop])
+            s = np.asarray(jax.device_get(project(frequencies)))
+            p = self.sliced_psd[start:stop]
+            if not np.all(np.isfinite(s)) or not np.all(np.isfinite(p) & (p > 0)):
+                raise ValueError(
+                    f"Non-finite injection or invalid in-band PSD for {self.name}"
+                )
+            optimal_sq += float(np.sum((s.real**2 + s.imag**2) / p))
+            destination = buffer[first + start : first + stop]
+            destination[:] = s
+            if not zero_noise:
+                if noise_generation == "indexed-v1":
+                    noise = compiled_indexed_noise(rng_key, p, df, first + start)
+                else:
+                    noise = legacy_noise[first + start : first + stop]
+                n = np.asarray(jax.device_get(noise))
+                if not np.all(np.isfinite(n)):
+                    raise ValueError(f"Non-finite native noise for {self.name}")
+                cross += complex(np.sum(np.conj(s) * n / p))
+                destination += n
+            release_mapped_pages(destination, written=True)
+        del legacy_noise
+        optimal_sq *= 4.0 * df
+        cross *= 4.0 * df
+        optimal_snr = optimal_sq**0.5
+        self.set_frequency_bounds()
+        self.optimal_snr = optimal_snr
+        self.match_filtered_snr = (
+            (optimal_sq + cross) / optimal_snr if optimal_snr > 0 else complex(np.nan)
+        )
+        self.data_preparation_diagnostics = {
+            "host_storage": host_storage,
+            "noise_generation": noise_generation,
+            "noise_algorithm": INDEXED_NOISE_ALGORITHM
+            if noise_generation == "indexed-v1"
+            else "legacy-jax-full-array",
+            "zero_noise": zero_noise,
+            "waveform_chunk_size": waveform_chunk_size,
+            "full_length_device_noise": not zero_noise and noise_generation == "legacy",
+            "native_fd_storage_bytes": buffer.nbytes,
+        }
+        logger.info(f"For detector {self.name}, the injected signal has:")
+        logger.info(f"  - Optimal SNR: {optimal_snr:.4f}")
+        logger.info(f"  - Match filtered SNR: {self.match_filtered_snr:.4f}")
 
     def get_whitened_frequency_domain_strain(
         self, frequency_series: Complex[Array, " n_freq"]
@@ -1349,18 +1628,168 @@ def get_CE() -> GroundBased2G:
     )
 
 
-def get_detector_preset() -> dict[str, GroundBased2G | list[GroundBased2G]]:
+def get_CE_A() -> GroundBased2G:
+    """Return the 40 km CE-A fiducial geometry with detector channel name CE.
+
+    The Cosmic Explorer project recommends the intentionally offshore location
+    46 degrees north, 125 degrees west for reproducible network calculations;
+    this is not a selected construction site. Table 2 of
+    https://arxiv.org/html/2307.10421v2 specifies the x arm at 260 degrees north
+    of east. The orthogonal y arm at 350 degrees completes a right-handed
+    (x, y, outward vertical) frame. See also https://cosmicexplorer.org/celocations.html.
+
+    Zero elevation and arm tilts are explicit fiducial modeling conventions,
+    not surveyed measurements. The legacy :func:`get_CE` remains at Hanford.
+    """
+    return GroundBased2G(
+        "CE",
+        latitude=46.0 * DEG_TO_RAD,
+        longitude=-125.0 * DEG_TO_RAD,
+        xarm_azimuth=260.0 * DEG_TO_RAD,
+        yarm_azimuth=350.0 * DEG_TO_RAD,
+        xarm_tilt=0.0,
+        yarm_tilt=0.0,
+        elevation=0.0,
+        arm_length_m=40_000.0,
+        modes="pc",
+    )
+
+
+def get_ET_Sardinia() -> list[GroundBased2G]:
+    """Return a connected triangular ET at the published Sardinia fiducial site.
+
+    The first corner is at 40 degrees 31 minutes north, 9 degrees 25 minutes
+    east, with x/y azimuths 90/150 degrees north of east and nominal 10 km arms
+    (https://arxiv.org/html/2307.10421v2, Table 2). Zero elevation is an explicit
+    fiducial convention; this does not specify surveyed underground facilities.
+
+    All corners lie on the zero-height Earth ellipsoid. Two corners are placed
+    exactly 10 km in chord distance from the first, along its specified local
+    azimuths. Their closing side is 3.1 mm shorter than the nominal 10 km arm
+    length. Every directed arm points along an actual connecting ECEF chord;
+    Earth curvature therefore produces small downward arm tilts and deviations
+    below 0.000021 degrees from 60-degree opening angles.
+    The finite-arm response uses the nominal 10 km for both arms; it does not
+    resolve the closing side's 3.1 mm geometric difference.
+
+    This new geometry does not reproduce the legacy Bilby-style pairing of
+    rotated arms with independently propagated corners: those arms can point
+    away from their neighboring corners. The historical :func:`get_ET` remains
+    unchanged for existing fixtures.
+    """
+    latitude = (40.0 + 31.0 / 60) * DEG_TO_RAD
+    longitude = (9.0 + 25.0 / 60) * DEG_TO_RAD
+    length = 10_000.0
+    major, minor = EARTH_SEMI_MAJOR_AXIS, EARTH_SEMI_MINOR_AXIS
+    ellipsoid_metric = 1.0 / np.asarray([major, major, minor]) ** 2
+    eccentricity_squared = 1.0 - (minor / major) ** 2
+
+    def local_frame(lat, lon):
+        up = np.asarray(
+            [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)]
+        )
+        east = np.asarray([-np.sin(lon), np.cos(lon), 0.0])
+        return east, np.cross(up, east), up
+
+    normal_radius = major / np.sqrt(1.0 - eccentricity_squared * np.sin(latitude) ** 2)
+    first = np.asarray(
+        [
+            normal_radius * np.cos(latitude) * np.cos(longitude),
+            normal_radius * np.cos(latitude) * np.sin(longitude),
+            normal_radius * (1.0 - eccentricity_squared) * np.sin(latitude),
+        ]
+    )
+    east, north, up = local_frame(latitude, longitude)
+    vertices = [first]
+    for azimuth in (90.0 * DEG_TO_RAD, 150.0 * DEG_TO_RAD):
+        horizontal = np.cos(azimuth) * east + np.sin(azimuth) * north
+        tilt = -length / (2.0 * major)
+        # Solve the short downward chord's intersection with the ellipsoid.
+        # Only fixed preset constants enter this small host-side calculation.
+        for _ in range(8):
+            endpoint = first + length * (np.cos(tilt) * horizontal + np.sin(tilt) * up)
+            derivative = length * (-np.sin(tilt) * horizontal + np.cos(tilt) * up)
+            residual = np.dot(endpoint * ellipsoid_metric, endpoint) - 1.0
+            tilt -= residual / (2.0 * np.dot(endpoint * ellipsoid_metric, derivative))
+        vertices.append(
+            first + length * (np.cos(tilt) * horizontal + np.sin(tilt) * up)
+        )
+
+    detectors = []
+    for index, vertex in enumerate(vertices):
+        # At zero geodetic height this ellipsoid-coordinate inverse is exact.
+        lat = np.arctan2(
+            vertex[2] / (1.0 - eccentricity_squared), np.hypot(*vertex[:2])
+        )
+        lon = np.arctan2(vertex[1], vertex[0])
+        east, north, up = local_frame(lat, lon)
+        angles = []
+        for neighbor in ((index + 1) % 3, (index + 2) % 3):
+            arm = vertices[neighbor] - vertex
+            arm /= np.linalg.norm(arm)
+            angles.append(
+                (
+                    float(
+                        np.arctan2(np.dot(arm, north), np.dot(arm, east))
+                        % (2.0 * np.pi)
+                    ),
+                    float(
+                        np.arctan2(
+                            np.dot(arm, up),
+                            np.hypot(np.dot(arm, east), np.dot(arm, north)),
+                        )
+                    ),
+                )
+            )
+        detectors.append(
+            GroundBased2G(
+                f"ET{index + 1}",
+                latitude=float(lat),
+                longitude=float(lon),
+                elevation=0.0,
+                xarm_azimuth=angles[0][0],
+                yarm_azimuth=angles[1][0],
+                xarm_tilt=angles[0][1],
+                yarm_tilt=angles[1][1],
+                arm_length_m=length,
+                modes="pc",
+            )
+        )
+    return detectors
+
+
+def get_detector_preset(
+    site_overrides: Optional[dict[str, str]] = None,
+) -> dict[str, GroundBased2G | list[GroundBased2G]]:
     """Return a dictionary of pre-configured detector instances.
+
+    Args:
+        site_overrides: Explicit geometry labels keyed by detector channel.
+            ``{"CE": "CE_A_fiducial_2023"}`` selects the published CE-A
+            fiducial site, and ``{"ET": "ET_Sardinia_fiducial_2023"}`` selects
+            a connected Sardinia triangle. Omitting overrides preserves all
+            legacy geometries. Channel names remain CE and ET1/ET2/ET3.
 
     Returns:
         dict: Mapping of detector name to detector object(s).
             Keys are ``"H1"``, ``"L1"``, ``"V1"``, ``"CE"`` (single
             [`GroundBased2G`][jimgw.core.single_event.detector.GroundBased2G]) and ``"ET"`` (list of three).
     """
-    return {
+    overrides = site_overrides or {}
+    site_builders = {
+        "CE": {"CE_A_fiducial_2023": get_CE_A},
+        "ET": {"ET_Sardinia_fiducial_2023": get_ET_Sardinia},
+    }
+    for detector, site in overrides.items():
+        if detector not in site_builders or site not in site_builders[detector]:
+            raise ValueError(f"Unsupported detector site override: {detector}={site!r}")
+    detectors = {
         "H1": get_H1(),
         "L1": get_L1(),
         "V1": get_V1(),
         "ET": get_ET(),
         "CE": get_CE(),
     }
+    for detector, site in overrides.items():
+        detectors[detector] = site_builders[detector][site]()
+    return detectors

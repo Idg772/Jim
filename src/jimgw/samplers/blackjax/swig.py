@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from functools import partial
 from typing import Any, NamedTuple, Optional, cast
 
 import jax
@@ -18,6 +19,7 @@ from blackjax.smc.tuning.from_particles import particles_covariance_matrix
 from jax.sharding import Mesh
 from jaxtyping import Array, Float
 
+from jimgw.samplers.blackjax._deferred_cache import run_deferred_rebuild_segment
 from jimgw.samplers.blackjax._fsm import (
     HybridSegmentSchedule,
     SegmentSchedule,
@@ -1144,6 +1146,117 @@ def _build_swig_constrained_step_lockstep(
     return constrained_step
 
 
+def _run_swig_sweep_scan(segments, state, num_sweeps, run_one_segment, *, unroll=1):
+    """Roll repeated, already-drawn R/H schedules without changing their order.
+
+    This path requires a cache boundary between sweeps. It retains every
+    segment's asynchronous lane barrier and returns diagnostics
+    in the original sweep/segment/slice order. Direction and PRNG construction
+    stays outside this helper, exactly as in the unrolled implementation.
+    """
+    n_segments, remainder = divmod(len(segments), num_sweeps)
+    if remainder or not n_segments:
+        raise ValueError("sweep scan requires identical segment counts per sweep")
+    modes = tuple(mode for mode, _ in segments[:n_segments])
+    if modes[0] == modes[-1]:
+        raise ValueError("sweep scan requires a cache boundary between sweeps")
+    if any(
+        mode != modes[index % n_segments] for index, (mode, _) in enumerate(segments)
+    ):
+        raise ValueError("sweep scan requires a repeated cache-segment pattern")
+    schedules = tuple(
+        jax.tree.map(
+            lambda *values: jnp.stack(values),
+            *(segments[sweep * n_segments + index][1] for sweep in range(num_sweeps)),
+        )
+        for index in range(n_segments)
+    )
+
+    def sweep_body(cached_state, sweep_schedules):
+        infos = []
+        for requires_rebuild, schedule in zip(modes, sweep_schedules, strict=True):
+            cached_state, info = run_one_segment(
+                cached_state, requires_rebuild, schedule
+            )
+            infos.append(info)
+        return cached_state, tuple(infos)
+
+    state, infos = jax.lax.scan(sweep_body, state, schedules, unroll=unroll)
+    # Each leaf is [sweep, slice-within-segment]. Joining the segment axis
+    # before flattening preserves the original chronological diagnostic order.
+    combined = jax.tree.map(
+        lambda *parts: jnp.concatenate(parts, axis=1).reshape(-1), *infos
+    )
+    return state, [combined]
+
+
+def _require_scannable_cache_schedule(
+    rebuild_required_by_block, prepare_hit_summary, log_likelihood_from_hit_summary
+):
+    """Reject an explicit production scan before tracing unsupported callbacks."""
+    modes = tuple(rebuild_required_by_block.values())
+    if (
+        not modes
+        or not modes[0]
+        or modes[-1]
+        or prepare_hit_summary is None
+        or log_likelihood_from_hit_summary is None
+    ):
+        raise ValueError(
+            "fsm_sweep_unroll requires a rebuild-first, cache-hit-last schedule "
+            "with scalar summary callbacks"
+        )
+
+
+def _resolve_fsm_optimizations(
+    config,
+    rebuild_required_by_block,
+    prepare_hit_summary,
+    log_likelihood_from_hit_summary,
+    *,
+    cache_independent_rebuild,
+):
+    """Select the pure ordinary R/H optimization without changing its schedule."""
+    modes = tuple(rebuild_required_by_block.values())
+    supported = (
+        cache_independent_rebuild is True
+        and config.scheduler == "fsm"
+        and config.scalar_extrinsic_cache
+        and config.direction_mode == "covariance"
+        and config.bracket_mode == "stepping-out"
+        and config.fold_symmetry is None
+        and not config.bridge_blocks
+        and not config.num_de_jumps
+        and not config.de_jump_blocks
+        and config.complementary_de_jump_block is None
+        and all(mode == "slice" for mode in (config.block_kernel_modes or ()))
+        and bool(modes)
+        and modes[0]
+        and not modes[-1]
+        and prepare_hit_summary is not None
+        and log_likelihood_from_hit_summary is not None
+    )
+    requested = config.fsm_optimizations
+    if requested == "ce-fast" and not supported:
+        raise ValueError(
+            "fsm_optimizations='ce-fast' requires certified independent positional "
+            "cache construction and an ordinary rebuild-first, scalar-hit-last FSM"
+        )
+    enabled = supported and requested != "baseline"
+    return {
+        "requested": requested,
+        "implementation": "ce-fast-v1" if enabled else "baseline",
+        "skip_exhausted_endpoints": bool(enabled),
+        "defer_rebuild_cache": bool(enabled),
+        "fallback_reason": (
+            "unsupported cache or sampler contract"
+            if requested == "auto" and not supported
+            else None
+        ),
+        "scope": "ordinary physical-target R/H transitions",
+    }
+
+
 def _build_swig_constrained_step(
     *,
     log_prior_fn: Callable,
@@ -1166,8 +1279,15 @@ def _build_swig_constrained_step(
     block_kernel_modes: Optional[Sequence[str]] = None,
     resolved_complementary_de_jump_block: Optional[ResolvedDEJumpBlock] = None,
     bracket_mode: str = "stepping-out",
+    prepare_hit_summary: Optional[Callable] = None,
+    log_likelihood_from_hit_summary: Optional[Callable] = None,
+    _scan_sweeps: bool = False,
+    fsm_sweep_unroll: Optional[int] = None,
+    ce_fast_fsm: bool = False,
 ) -> Callable:
     """Run a SwiG transition with one FSM loop per static cache segment."""
+    if (prepare_hit_summary is None) != (log_likelihood_from_hit_summary is None):
+        raise ValueError("conditional hit summary callbacks must be supplied together")
     if bracket_mode not in ("stepping-out", "shrink-only"):
         raise ValueError(f"Unsupported bracket_mode: {bracket_mode!r}")
     shrink_only = bracket_mode == "shrink-only"
@@ -1195,6 +1315,66 @@ def _build_swig_constrained_step(
     uses_periodic_independence = (
         "periodic-uniform-independence" in resolved_block_kernel_modes
     )
+    if ce_fast_fsm:
+        _require_scannable_cache_schedule(
+            rebuild_required_by_block,
+            prepare_hit_summary,
+            log_likelihood_from_hit_summary,
+        )
+        if (
+            shrink_only
+            or direction_mode != "covariance"
+            or resolved_bridge_blocks
+            or num_de_jumps
+            or resolved_de_jump_blocks
+            or resolved_complementary_de_jump_block is not None
+            or uses_periodic_independence
+        ):
+            raise ValueError("ce_fast_fsm requires ordinary covariance R/H slices")
+    if fsm_sweep_unroll is not None:
+        if (
+            type(fsm_sweep_unroll) is not int
+            or not 1 <= fsm_sweep_unroll <= num_gibbs_sweeps
+        ):
+            raise ValueError(
+                "fsm_sweep_unroll must be an integer from 1 to num_gibbs_sweeps"
+            )
+        if _scan_sweeps and fsm_sweep_unroll != 1:
+            raise ValueError(
+                "fsm_sweep_unroll conflicts with private _scan_sweeps=True"
+            )
+        _require_scannable_cache_schedule(
+            rebuild_required_by_block,
+            prepare_hit_summary,
+            log_likelihood_from_hit_summary,
+        )
+        if direction_mode != "covariance" or shrink_only:
+            raise ValueError(
+                "fsm_sweep_unroll requires ordinary covariance stepping-out"
+            )
+    sweep_unroll = (
+        fsm_sweep_unroll
+        if fsm_sweep_unroll is not None
+        else (1 if _scan_sweeps else None)
+    )
+    if sweep_unroll is not None:
+        modes = tuple(rebuild_required_by_block.values())
+        if (
+            uses_periodic_independence
+            or resolved_bridge_blocks
+            or num_de_jumps
+            or resolved_de_jump_blocks
+            or resolved_complementary_de_jump_block is not None
+            or not modes
+            or modes[0] == modes[-1]
+        ):
+            label = (
+                "private sweep scan" if fsm_sweep_unroll is None else "fsm_sweep_unroll"
+            )
+            raise ValueError(
+                f"{label} requires ordinary R/H slices, no extra moves, "
+                "and different first/last cache modes"
+            )
     if any(requires_rebuild for _, requires_rebuild in resolved_bridge_blocks):
         raise ValueError("bridge blocks must be cache-resident")
     if resolved_bridge_blocks and direction_mode != "covariance":
@@ -1205,6 +1385,7 @@ def _build_swig_constrained_step(
         )
     if resolved_bridge_blocks and shrink_only:
         raise ValueError("bridge blocks require stepping-out brackets")
+
     if resolved_complementary_de_jump_block is not None:
         complementary_indices, complementary_rebuild, complementary_attempts = (
             resolved_complementary_de_jump_block
@@ -1237,7 +1418,16 @@ def _build_swig_constrained_step(
             position,
         )
 
-    def make_eval(requires_rebuild):
+    def make_eval(requires_rebuild, accepted_state=None):
+        hit_summary = None
+        if not requires_rebuild and prepare_hit_summary is not None:
+            if accepted_state is None:
+                raise ValueError(
+                    "conditional summary requires the accepted segment state"
+                )
+            hit_summary = prepare_hit_summary(
+                accepted_state.position, accepted_state.cache
+            )
         if requires_rebuild:
 
             def eval_candidate(position, cache):
@@ -1254,7 +1444,11 @@ def _build_swig_constrained_step(
             def eval_candidate(position, cache):
                 return (
                     log_prior_fn(position),
-                    log_likelihood_from_cache_fn(position, cache),
+                    (
+                        log_likelihood_from_hit_summary(position, hit_summary)
+                        if prepare_hit_summary is not None
+                        else log_likelihood_from_cache_fn(position, cache)
+                    ),
                     cache,
                 )
 
@@ -1603,7 +1797,7 @@ def _build_swig_constrained_step(
                     schedule,
                     cached_state,
                     loglikelihood_0,
-                    eval_candidate=make_eval(requires_rebuild),
+                    eval_candidate=make_eval(requires_rebuild, cached_state),
                     wrap_position=wrap_periodic_position,
                     max_expansions=max_steps,
                     max_shrinkage=max_shrinkage,
@@ -1918,19 +2112,53 @@ def _build_swig_constrained_step(
                 )
                 run_start = i
 
-        segment_infos = []
-        for requires_rebuild, schedule in segments:
-            cached_state, segment_info = run_segment(
+        def run_one_segment(cached_state, requires_rebuild, schedule):
+            options = {
+                "eval_candidate": make_eval(requires_rebuild, cached_state),
+                "wrap_position": wrap_periodic_position,
+                "max_expansions": max_steps,
+                "max_shrinkage": max_shrinkage,
+                "shrink_only": shrink_only,
+            }
+            # Routing follows the resolved cache dependency, never segment length.
+            optimized = ce_fast_fsm
+            runner = (
+                partial(run_segment, skip_exhausted_endpoints=True)
+                if optimized
+                else run_segment
+            )
+            if optimized and requires_rebuild:
+                return run_deferred_rebuild_segment(
+                    schedule,
+                    cached_state,
+                    loglikelihood_0,
+                    run_segment_fn=runner,
+                    build_cache=build_cache,
+                    cache_independent_rebuild=True,
+                    **options,
+                )
+            return runner(
                 schedule,
                 cached_state,
                 loglikelihood_0,
-                eval_candidate=make_eval(requires_rebuild),
-                wrap_position=wrap_periodic_position,
-                max_expansions=max_steps,
-                max_shrinkage=max_shrinkage,
-                shrink_only=shrink_only,
+                **options,
             )
-            segment_infos.append(segment_info)
+
+        if sweep_unroll is not None:
+            cached_state, segment_infos = _run_swig_sweep_scan(
+                segments,
+                cached_state,
+                num_gibbs_sweeps,
+                run_one_segment,
+                unroll=sweep_unroll,
+            )
+        else:
+            segment_infos = []
+            for requires_rebuild, schedule in segments:
+                cached_state, segment_info = run_one_segment(
+                    cached_state, requires_rebuild, schedule
+                )
+                segment_infos.append(segment_info)
 
         num_de_jump_acceptances = jnp.asarray(0, dtype=jnp.int32)
         if num_de_jumps > 0:
@@ -1960,7 +2188,7 @@ def _build_swig_constrained_step(
                 loglikelihood_0,
                 live_positions,
                 attempts,
-                make_eval(requires_rebuild),
+                make_eval(requires_rebuild, cached_state),
                 wrap_periodic_position,
                 parameter_indices,
             )
@@ -2040,6 +2268,9 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
         resolved_bridge_blocks: tuple[ResolvedBridgeBlock, ...] = (),
         resolved_de_jump_blocks: tuple[ResolvedDEJumpBlock, ...] = (),
         resolved_complementary_de_jump_block: Optional[ResolvedDEJumpBlock] = None,
+        prepare_hit_summary: Optional[Callable] = None,
+        log_likelihood_from_hit_summary: Optional[Callable] = None,
+        cache_independent_rebuild: bool = False,
     ) -> None:
         if (
             rebuild_required_by_block is None
@@ -2186,6 +2417,27 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
         self._rebuild_required_by_block = rebuild_required_by_block
         self._build_cache = build_cache
         self._log_likelihood_from_cache_fn = log_likelihood_from_cache_fn
+        if (prepare_hit_summary is None) != (log_likelihood_from_hit_summary is None):
+            raise ValueError(
+                "conditional hit summary callbacks must be supplied together"
+            )
+        if prepare_hit_summary is not None and config.scheduler != "fsm":
+            raise ValueError("conditional hit summaries require the FSM scheduler")
+        if config.fsm_sweep_unroll is not None:
+            _require_scannable_cache_schedule(
+                rebuild_required_by_block,
+                prepare_hit_summary,
+                log_likelihood_from_hit_summary,
+            )
+        self._prepare_hit_summary = prepare_hit_summary
+        self._log_likelihood_from_hit_summary = log_likelihood_from_hit_summary
+        self.fsm_optimization_diagnostics = _resolve_fsm_optimizations(
+            config,
+            rebuild_required_by_block,
+            prepare_hit_summary,
+            log_likelihood_from_hit_summary,
+            cache_independent_rebuild=cache_independent_rebuild,
+        )
         self._periodic = periodic
         self._block_kernel_modes = block_kernel_modes
         self._resolved_bridge_blocks = tuple(resolved_bridge_blocks)
@@ -2804,16 +3056,26 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
         )
         n_replacements = np.asarray(update_info.is_accepted).size
         n_slice_updates = slice_updates_per_replacement * n_replacements
-        # Stepping-out slice updates evaluate both bracket endpoints (2 evals
-        # each); shrink-only bracket mode never evaluates an endpoint, so the
-        # endpoint term must vanish under that mode.
+        # Preserve the established logical E+S+2 convention for comparisons.
+        # With endpoint skipping this is not the actual number of evaluations;
+        # even baseline counts do not measure masked GPU work or kernel launches.
         n_endpoint_evals_per_slice_update = (
             0 if self._swig_config.bracket_mode == "shrink-only" else 2
         )
         diagnostics.update(
             {
                 "n_slice_updates": n_slice_updates,
+                "fsm_optimizations": dict(self.fsm_optimization_diagnostics),
+                "likelihood_evaluation_counter_convention": (
+                    "logical E+S plus two endpoints per stepping-out slice; "
+                    "excludes endpoint-skipping savings and masked-lane work; "
+                    "legacy physical counter is not a GPU invocation count"
+                ),
                 "n_likelihood_evaluations_physical": (
+                    diagnostics["n_likelihood_evaluations"]
+                    + n_endpoint_evals_per_slice_update * n_slice_updates
+                ),
+                "n_likelihood_requests_baseline_convention": (
                     diagnostics["n_likelihood_evaluations"]
                     + n_endpoint_evals_per_slice_update * n_slice_updates
                 ),
@@ -2821,18 +3083,43 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
         )
         return diagnostics
 
+    def _build_constrained_step(self) -> Callable:
+        """Build the ordinary configured FSM transition."""
+        return _build_swig_constrained_step(
+            log_prior_fn=self._log_prior_fn,
+            build_cache=self._build_cache,
+            log_likelihood_from_cache_fn=self._log_likelihood_from_cache_fn,
+            rebuild_required_by_block=self._rebuild_required_by_block,
+            num_gibbs_sweeps=self._swig_config.num_gibbs_sweeps,
+            num_inner_steps_per_dim=self._swig_config.num_inner_steps_per_dim,
+            num_slice_steps_by_block=self._swig_config.num_slice_steps_by_block,
+            max_steps=self._swig_config.max_steps,
+            max_shrinkage=self._swig_config.max_shrinkage,
+            periodic=self._periodic,
+            n_dims=self.n_dims,
+            per_slice_info=self._swig_config.adaptive_slice_widths,
+            direction_mode=self._swig_config.direction_mode,
+            de_fraction=self._swig_config.de_fraction,
+            num_de_jumps=self._swig_config.num_de_jumps,
+            resolved_bridge_blocks=self._resolved_bridge_blocks,
+            resolved_de_jump_blocks=self._resolved_de_jump_blocks,
+            block_kernel_modes=self._block_kernel_modes,
+            resolved_complementary_de_jump_block=(
+                self._resolved_complementary_de_jump_block
+            ),
+            bracket_mode=self._swig_config.bracket_mode,
+            prepare_hit_summary=self._prepare_hit_summary,
+            log_likelihood_from_hit_summary=self._log_likelihood_from_hit_summary,
+            fsm_sweep_unroll=self._swig_config.fsm_sweep_unroll,
+            ce_fast_fsm=(
+                self.fsm_optimization_diagnostics["implementation"] == "ce-fast-v1"
+            ),
+        )
+
     def _build_nested_sampler(
         self, n_delete: int, mesh: Optional[Mesh] = None
     ) -> SamplingAlgorithm:
         is_fsm_builder = self._swig_config.scheduler != "pre-fsm-lockstep"
-        constrained_step_builder = cast(
-            Callable[..., Any],
-            (
-                _build_swig_constrained_step
-                if is_fsm_builder
-                else _build_swig_constrained_step_lockstep
-            ),
-        )
         constrained_step_kwargs: dict[str, Any] = {
             "log_prior_fn": self._log_prior_fn,
             "build_cache": self._build_cache,
@@ -2855,17 +3142,12 @@ class BlackJAXSwiGSampler(BlackJAXNSSSampler):
             ),
             "bracket_mode": self._swig_config.bracket_mode,
         }
-        # per_slice_info only exists on the FSM builder's signature; passing
-        # it to the lockstep builder would raise a TypeError.
         if is_fsm_builder:
-            constrained_step_kwargs["per_slice_info"] = (
-                self._swig_config.adaptive_slice_widths
+            constrained_step = self._build_constrained_step()
+        else:
+            constrained_step = _build_swig_constrained_step_lockstep(
+                **constrained_step_kwargs
             )
-            if self._resolved_bridge_blocks:
-                constrained_step_kwargs["resolved_bridge_blocks"] = (
-                    self._resolved_bridge_blocks
-                )
-        constrained_step = constrained_step_builder(**constrained_step_kwargs)
         if mesh is None:
             if self._resolved_complementary_de_jump_block is None:
                 kernel = build_from_mcmc_kernel(

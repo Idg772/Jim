@@ -8,6 +8,7 @@ from jimgw.core.single_event.detector import get_detector_preset
 from jimgw.core.single_event.transforms import (
     ChirpMassMassRatioToComponentMassesTransform,
     ChirpMassSymmetricMassRatioToComponentMassesTransform,
+    ChirpMassToDopplerDressedChirpMassTransform,
     ComponentMassesToChirpMassMassRatioTransform,
     ComponentMassesToChirpMassSymmetricMassRatioTransform,
     DistanceToSNRWeightedDistanceTransform,
@@ -25,6 +26,81 @@ detector_preset = get_detector_preset()
 H1 = detector_preset["H1"]
 L1 = detector_preset["L1"]
 V1 = detector_preset["V1"]
+CE = detector_preset["CE"]
+
+
+class TestDopplerDressedChirpMassTransform:
+    """The dressing must be an exact bijection with the analytic Jacobian, and
+    must reproduce the rotational Doppler amplitude it claims to absorb."""
+
+    trigger_time = 1300000000.0
+
+    def _transform(self):
+        return ChirpMassToDopplerDressedChirpMassTransform(self.trigger_time, CE)
+
+    def test_forward_is_finite_and_small(self):
+        transform = self._transform()
+        output, jacobian = transform.transform(
+            {
+                "M_c": 1.1802650981093186,
+                "ra": 2.96479778676665,
+                "dec": 0.17257877754217157,
+            }
+        )
+        assert np.isfinite(output["M_hat"])
+        assert_all_finite(jacobian)
+        # The dressing is a part-per-million effect: it must not disturb the
+        # chirp-mass/mass-ratio correlation that keeps M_c in the intrinsic block.
+        assert abs(output["M_hat"] / 1.1802650981093186 - 1.0) < 1e-5
+
+    def test_round_trip_is_exact(self):
+        transform = self._transform()
+        rng = np.random.default_rng(0)
+        for _ in range(32):
+            point = {
+                "M_c": float(rng.uniform(1.0, 40.0)),
+                "ra": float(rng.uniform(0.0, 2 * np.pi)),
+                "dec": float(np.arcsin(rng.uniform(-1.0, 1.0))),
+            }
+            forward, log_det = transform.transform(dict(point))
+            back, inverse_log_det = transform.inverse(dict(forward))
+            assert np.isclose(back["M_c"], point["M_c"], rtol=0, atol=1e-12)
+            assert np.isclose(back["ra"], point["ra"])
+            assert np.isclose(back["dec"], point["dec"])
+            assert np.isclose(log_det, -inverse_log_det, rtol=0, atol=1e-12)
+
+    def test_log_jacobian_matches_analytic_form(self):
+        """log|dM_hat/dM_c| = log(1 + eps), with eps depending on the sky only."""
+        transform = self._transform()
+        for ra, dec in ((0.3, -0.4), (2.9648, 0.1726), (5.5, 0.9)):
+            _, log_det = transform.transform({"M_c": 1.2, "ra": ra, "dec": dec})
+            epsilon = (
+                float(transform.velocity_over_c)
+                * np.cos(dec)
+                * np.sin(float(transform.detector_right_ascension) - ra)
+            )
+            assert np.isclose(log_det, np.log1p(epsilon), rtol=0, atol=1e-15)
+
+    def test_log_jacobian_is_independent_of_chirp_mass(self):
+        transform = self._transform()
+        _, first = transform.transform({"M_c": 1.2, "ra": 2.9, "dec": 0.1})
+        _, second = transform.transform({"M_c": 30.0, "ra": 2.9, "dec": 0.1})
+        assert np.isclose(first, second, rtol=0, atol=1e-15)
+
+    def test_amplitude_matches_detector_rotational_velocity(self):
+        """eps peaks at the rotational speed over c, and vanishes on the meridian."""
+        transform = self._transform()
+        theta0 = float(transform.detector_right_ascension)
+        on_meridian, _ = transform.transform({"M_c": 1.0, "ra": theta0, "dec": 0.0})
+        assert np.isclose(on_meridian["M_hat"], 1.0, rtol=0, atol=1e-15)
+        quadrature, _ = transform.transform(
+            {"M_c": 1.0, "ra": theta0 - np.pi / 2, "dec": 0.0}
+        )
+        assert np.isclose(
+            quadrature["M_hat"] - 1.0, float(transform.velocity_over_c), rtol=1e-12
+        )
+        # Cosmic Explorer shares the LIGO Hanford site: v/c is ~1e-6.
+        assert 5e-7 < float(transform.velocity_over_c) < 2e-6
 
 
 class TestDistanceTransform:

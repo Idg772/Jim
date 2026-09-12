@@ -336,3 +336,105 @@ def test_injection_noise_keys_are_seeded_and_detector_distinct(monkeypatch):
     np.testing.assert_array_equal(observed_keys[0], observed_keys[2])
     np.testing.assert_array_equal(observed_keys[1], observed_keys[3])
     assert not np.array_equal(observed_keys[0], observed_keys[1])
+
+
+class _FlatNetworkWaveform:
+    """A finite nonzero spectrum for exercising data-band routing cheaply."""
+
+    f_ref = 20.0
+
+    def __call__(self, frequencies, parameters):
+        del parameters
+        carrier = jnp.ones_like(frequencies, dtype=jnp.complex128) * 1e-22
+        return {"p": carrier, "c": -1j * carrier}
+
+
+def _network_injection_config(tmp_path, *, zero_noise=True):
+    # CE deliberately has no sensitivity samples below 5 Hz. ET-D-like
+    # coverage begins at 2 Hz; these are synthetic PSDs, not design curves.
+    ce_path, et_path = tmp_path / "ce.npz", tmp_path / "et.npz"
+    for path, low in ((ce_path, 5), (et_path, 2)):
+        np.savez(
+            path, frequencies=np.arange(low, 17.0), values=np.full(17 - low, 1e-44)
+        )
+    return InjectionDataConfig(
+        detectors=["CE", "ET"],
+        trigger_time=1_126_259_462.4,
+        duration=4.0,
+        sampling_frequency=32.0,
+        injection_parameters={"t_c": 0.0, "ra": 1.375, "dec": -1.2108, "psi": 0.2},
+        zero_noise=zero_noise,
+        psd_files={"CE": ce_path, "ET": et_path},
+        waveform_chunk_size=31,
+    )
+
+
+@pytest.mark.parametrize("zero_noise", [False, True])
+def test_network_injection_preserves_individual_frequency_bands(tmp_path, zero_noise):
+    config = _network_injection_config(tmp_path, zero_noise=zero_noise)
+    detectors = _data.build_data(
+        config,
+        f_min={"CE": 5.0, "ET": 2.0, "ET2": 3.0},
+        f_max={"CE": 16.0, "ET": 12.0},
+        waveform=_FlatNetworkWaveform(),
+        time_frame="geocentric",
+        seed=17,
+    )
+
+    assert [detector.name for detector in detectors] == ["CE", "ET1", "ET2", "ET3"]
+    for detector, low, high in zip(
+        detectors, [5.0, 2.0, 3.0, 2.0], [16.0, 12.0, 12.0, 12.0], strict=True
+    ):
+        np.testing.assert_array_equal(detector.frequency_bounds, [low, high])
+        assert float(detector.sliced_frequencies[0]) == low
+        assert float(detector.sliced_frequencies[-1]) == high
+        assert np.all(np.isfinite(detector.sliced_fd_data))
+        assert np.all(np.abs(np.asarray(detector.sliced_fd_data)) > 0.0)
+        assert np.all(
+            np.asarray(detector.data.fd)[~np.asarray(detector.frequency_mask)] == 0.0
+        )
+
+
+def test_network_file_loading_validates_only_each_detector_band(tmp_path):
+    injection = _network_injection_config(tmp_path)
+    strain_files = {}
+    for name in ("CE", "ET1", "ET2", "ET3"):
+        path = tmp_path / f"{name}-strain.npz"
+        Data(jnp.zeros(128), 1 / 32.0).to_file(str(path))
+        strain_files[name] = path
+    config = FileDataConfig(
+        detectors=injection.detectors,
+        trigger_time=injection.trigger_time,
+        strain_files=strain_files,
+        psd_files=injection.psd_files,
+    )
+    detectors = _data.build_data(config, f_min={"CE": 5.0, "ET": 2.0}, f_max=16.0)
+    assert len(detectors) == 4
+    # A global 2 Hz request must still fail against the CE file's 5 Hz start.
+    with pytest.raises(ValueError, match="CE configured PSD.*requested"):
+        _data.build_data(config, f_min=2.0, f_max=16.0)
+
+
+def test_network_injection_checks_each_nyquist_bound_before_loading(tmp_path):
+    config = _network_injection_config(tmp_path)
+    with pytest.raises(ValueError, match="ET2 f_max=17.0"):
+        _data.build_data(
+            config,
+            f_min={"CE": 5.0, "ET": 2.0},
+            f_max={"CE": 16.0, "ET": 12.0, "ET2": 17.0},
+            waveform=_FlatNetworkWaveform(),
+        )
+
+
+@pytest.mark.parametrize("name", ["CE", "H1", "ET4"])
+def test_detector_frequency_family_fallback_is_only_for_concrete_et_channels(name):
+    with pytest.raises(ValueError, match=f"detector '{name}'"):
+        _data._detector_frequency_bound({"ET": 2.0}, name)
+
+
+def test_network_injection_rejects_missing_detector_bound(tmp_path):
+    config = _network_injection_config(tmp_path)
+    with pytest.raises(ValueError, match="detector 'ET1'"):
+        _data.build_data(
+            config, f_min={"CE": 5.0}, f_max=16.0, waveform=_FlatNetworkWaveform()
+        )
