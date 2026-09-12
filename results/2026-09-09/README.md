@@ -35,6 +35,11 @@ Files follow the dated result layout on `NS-FSM`:
 - `comparison/` contains the paired execution and recovery checks.
 - `validation/` contains the earlier native checks and recovery summaries.
 - `make_figure.py` creates the timing figure from `timing.csv`.
+- Each retained sample set has `corner.png` and `corner.pdf`. Solid black
+  lines mark the injected values. Contours enclose 50% and 90% probability.
+  The endpoint control uses the same plot as `ce-eight-sweeps`.
+- `corner-plots.json` records the plot inputs and method. Run
+  `python results/make_xg_corner_plots.py 2026-09-09` to create the plots.
 
 The endpoint control arrays are omitted because their values equal the main
 run arrays; `comparison/duplicate-arrays.json` records this check. Retained

@@ -42,6 +42,10 @@ Files follow the dated result layout on `NS-FSM`:
 - `posterior-comparison/` contains the comparison statistics and plots.
 - `posterior-recovery/` contains the injection recovery statistics and plots.
 - `make_figure.py` creates the timing figure from `timing.csv`.
+- Each run has `corner.png` and `corner.pdf`. Solid black lines mark the
+  injected values. Contours enclose 50% and 90% probability.
+- `corner-plots.json` records the plot inputs and method. Run
+  `python results/make_xg_corner_plots.py 2026-09-11` to create the plots.
 
 The old 1024-bin attempts 5 and 8 have identical physical parameter arrays.
 Their likelihood and weight arrays differ. Both outputs are retained; they
